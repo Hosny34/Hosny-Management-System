@@ -1,0 +1,213 @@
+POS STAFF TRAINING CHECKLIST
+
+Use this checklist while training POS staff on the POS system.
+Mark each item after you explain it and let the trainee try it.
+
+==================================================
+1. BASIC STARTUP
+==================================================
+
+[ ] Open the POS app
+[ ] Explain what the POS is responsible for
+[ ] Explain that POS is for selling/execution, not warehouse control
+[ ] Explain that stock comes from warehouse sync only
+
+==================================================
+2. GENERAL RULES
+==================================================
+
+[ ] Explain that POS must not change inventory reality freely
+[ ] Explain that cashiers should not manually edit stock
+[ ] Explain that cashiers should not manually change prices
+[ ] Explain that branch-to-branch transfer is request-only through warehouse
+[ ] Explain that finalized bills are not deleted normally
+
+==================================================
+3. SYNC BASICS
+==================================================
+
+[ ] Open sync settings
+[ ] Show server URL
+[ ] Show device name for this POS
+[ ] Show test connection
+[ ] Show sync now
+[ ] Explain when POS should sync
+[ ] Explain that POS sync may show upload because it sends a stock snapshot too
+[ ] Explain that POS must sync after warehouse when receiving stock
+
+==================================================
+4. RECEIVING STOCK FROM WAREHOUSE
+==================================================
+
+[ ] Explain that POS stock arrives only from warehouse
+[ ] Run a real/test sync after warehouse shipment
+[ ] Show the received stock in POS
+[ ] Show that selling screen refreshes after sync
+[ ] Explain how to confirm the stock really arrived
+
+==================================================
+5. SELLING SCREEN
+==================================================
+
+[ ] Open the selling point
+[ ] Explain school selection
+[ ] Explain item selection
+[ ] Explain color selection
+[ ] Explain size selection
+[ ] Explain that if warehouse configured two overlapping numeric ranges, the size buttons show each size once (merged list, not duplicated)
+[ ] Explain quantity handling
+[ ] Explain how totals appear
+[ ] Explain favorites / quick selections if used
+[ ] Explain how to clear or restart a sale before finalizing
+
+==================================================
+6. CUSTOMERS / SPECIAL TARGETS
+==================================================
+
+[ ] Explain normal customer usage
+[ ] Explain customer autocomplete if used
+[ ] Explain special target: `الى المصنع`
+[ ] Explain special target: branch transfer request
+
+==================================================
+7. NORMAL SALE
+==================================================
+
+[ ] Create a normal sale
+[ ] Finalize bill
+[ ] Show printed receipt
+[ ] Explain how stock decreases after sale
+[ ] Explain how to find the bill later in history
+
+==================================================
+8. BILL PRINTING
+==================================================
+
+[ ] Show bill printing flow
+[ ] Explain thermal receipt format
+[ ] Explain when a bill prints automatically vs manually
+[ ] Explain how to reprint if needed
+
+==================================================
+9. RETURN TO WAREHOUSE
+==================================================
+
+[ ] Create a test return using `الى المصنع`
+[ ] Finalize the return bill
+[ ] Explain that this does NOT go directly back into warehouse stock
+[ ] Explain that warehouse must review it in unhandled branch products
+[ ] Explain that POS user should not assume the item is fully processed until warehouse handles it
+
+==================================================
+10. POS TO POS REQUEST
+==================================================
+
+[ ] Create a test transfer request to another branch
+[ ] Explain that this is only a request
+[ ] Explain that warehouse must receive and reroute it
+[ ] Explain that destination POS will not receive it until warehouse processes it
+
+==================================================
+11. BILL HISTORY
+==================================================
+
+[ ] Open bill history
+[ ] Show how to inspect an old bill
+[ ] Show how to reprint a bill if available
+[ ] Explain bill statuses
+[ ] Explain that finalized bills stay in history
+
+==================================================
+12. VOID FLOW
+==================================================
+
+[ ] Explain what VOID means
+[ ] Explain that VOID requires manager control
+[ ] Explain that VOID needs a reason
+[ ] Explain difference between VOID and normal return
+[ ] Show one test VOID if appropriate
+
+==================================================
+13. CASHIER RESTRICTIONS
+==================================================
+
+[ ] Explain that manual incoming stock is blocked by default
+[ ] Explain that stock deletion/editing is blocked by default
+[ ] Explain that price editing is blocked by default
+[ ] Explain that bulk price updates are blocked by default
+[ ] Explain that import/reset/admin dangerous actions are blocked by default
+[ ] Explain why these restrictions exist
+
+==================================================
+14. MANAGER PERMISSIONS
+==================================================
+
+[ ] Open admin/settings
+[ ] Open `صلاحيات المدير`
+[ ] Explain that only manager should use this tab
+[ ] Explain manager password usage
+[ ] Explain that permissions can temporarily unlock restricted features
+[ ] Explain that manager should disable sensitive features again after use
+
+==================================================
+15. INVENTORY WINDOW BEHAVIOR
+==================================================
+
+[ ] Open inventory window if allowed
+[ ] Explain which parts may be visible but restricted
+[ ] Explain that seeing a screen does not always mean cashier is allowed to use every action
+
+==================================================
+16. SIZE RANGES
+==================================================
+
+[ ] Explain why size ranges are important
+[ ] Show how a trainee should recognize correct sizes
+[ ] Explain what to do if sizes look wrong after sync
+[ ] Explain that warehouse controls the official size-range setup
+[ ] Explain two-range profiles: overlapping ranges appear as one continuous size row (e.g. 6 through 28), not two repeated blocks
+
+==================================================
+17. DAILY TROUBLESHOOTING
+==================================================
+
+[ ] Explain what to check if stock did not appear
+[ ] Explain what to check if sync failed
+[ ] Explain what to check if wrong device name was entered
+[ ] Explain what to do if bill did not print
+[ ] Explain what to do if cashier sees a restricted-feature message
+
+==================================================
+18. RESET / CLEAN START
+==================================================
+
+[ ] Explain local DB reset concept simply
+[ ] Explain that reset `.bat` files are destructive
+[ ] Explain that reset should only be done intentionally
+[ ] Explain that server reset alone is not enough for full clean state
+[ ] Explain that local DB delete alone may pull old events again
+
+==================================================
+19. DAILY WORKING RULES
+==================================================
+
+[ ] Always sync before starting serious work if needed
+[ ] Always sync after warehouse sends stock
+[ ] Do not manually invent stock in POS
+[ ] Do not manually change prices in POS
+[ ] Use `الى المصنع` for warehouse return flow
+[ ] Use branch transfer request only through warehouse workflow
+[ ] Use VOID only with manager approval
+
+==================================================
+20. FINAL TRAINEE PRACTICE
+==================================================
+
+[ ] Trainee runs test connection
+[ ] Trainee runs sync
+[ ] Trainee receives stock from warehouse
+[ ] Trainee makes a normal sale
+[ ] Trainee finds the bill in history
+[ ] Trainee creates a return to warehouse
+[ ] Trainee creates a branch transfer request
+[ ] Trainee explains the difference between sale / return / transfer request / VOID

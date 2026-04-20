@@ -1,0 +1,634 @@
+WAREHOUSE / POS SYSTEM - READ ME
+
+========================================
+1. WHAT THIS SYSTEM IS
+========================================
+
+This project contains:
+
+- Warehouse desktop app
+- POS desktop app
+- Sync server
+
+The apps work locally with SQLite, and synchronization happens through the sync server.
+
+
+========================================
+2. SERVER CONNECTION
+========================================
+
+Current production sync server:
+
+https://web-production-e022.up.railway.app
+
+To connect any device to the server:
+
+1. Open the app
+2. Open sync settings
+3. Enter the server URL
+4. Enter the device name
+5. Leave API key empty unless old compatibility is needed
+6. Press "اختبار الاتصال"
+7. If successful, save the settings
+
+Important:
+
+- API key is optional in the current version
+- device name is the important field
+- synchronization now uses JWT bearer tokens from the server
+
+
+========================================
+3. DEVICE NAMES
+========================================
+
+Approved branch POS names:
+
+- POS-ZAY
+- POS-OCT
+- POS-OBO
+- POS-GESR
+- POS-BAH
+- POS-CEN
+
+Main warehouse device:
+
+- WAREHOUSE
+
+Warnings:
+
+- Use exact names
+- Do not rename devices randomly
+- Do not change letter case or spelling
+- Every branch should keep one stable device name
+- If you recreate a POS copy later, make sure the device name matches the intended branch
+
+
+========================================
+4. HOW TO SYNCHRONIZE
+========================================
+
+Basic sync flow:
+
+1. Make sure internet is working
+2. Open sync window
+3. Press "اختبار الاتصال" first if needed
+4. Press "مزامنة الآن"
+5. Wait until the log says synchronization completed
+
+Expected behavior:
+
+- Warehouse can send branch shipments to POS
+- POS can send stock snapshots back to warehouse
+- One sync cycle may show both upload and download
+
+Important note:
+
+- A POS may show upload count because it sends its stock snapshot to the warehouse
+- That does not mean warehouse shipment failed
+- Periodic sync is enabled in all apps every ~10 minutes with staggered startup offsets to reduce overlap
+
+
+========================================
+5. HOW TO SEND STOCK FROM WAREHOUSE TO POS
+========================================
+
+To send stock from warehouse to branch:
+
+1. Open warehouse app
+2. Go to billing / POS-related outbound flow
+3. In customer field choose branch from the list as:
+   فرع: POS-ZAY
+   or another approved branch
+4. Confirm the bill / shipment
+5. Run sync from warehouse
+6. Run sync from the target POS
+
+Important:
+
+- Selecting a branch sends the bill as a branch shipment event
+- A normal customer sale is not the same as a branch shipment
+- Branch names in the dropdown are intentionally prefixed with "فرع: "
+
+Warehouse number note:
+
+- the warehouse app now supports warehouse numbers `1` to `7`
+- warehouse selectors now show labels instead of only raw numbers
+- the newly added operational mapping is:
+- `1` = `مخزن 1`
+- `2` = `مخزن 2`
+- `3` = `مخزن 3`
+- `4` = `مخزن 4`
+- `5` = `POS-ZAY`
+- `6` = `POS-OCT`
+- `7` = `POS-OBO`
+
+
+========================================
+6. HOW POS RETURNS TO WAREHOUSE WORK NOW
+========================================
+
+The POS system now supports sending stock back using:
+
+- الى المصنع
+
+Important:
+
+- this no longer goes مباشرة into warehouse stock
+- after sync, the warehouse receives these products into a review queue
+- warehouse staff must decide what to do with them
+
+POS steps:
+
+1. Open POS
+2. Add the items to the bill
+3. Press `الى المصنع`
+4. Confirm the bill
+5. Run sync on POS
+6. Run sync on warehouse
+
+Warehouse result:
+
+- the products appear in the unhandled branch items window
+- they do not enter stock until processed
+
+
+========================================
+7. HOW TO PROCESS UNHANDLED BRANCH PRODUCTS
+========================================
+
+Warehouse now has a window for unhandled branch products / returns / transfer requests.
+
+In that window, each line can be:
+
+- assigned to warehouse number + package number
+- redirected to another branch
+- discarded as defective
+
+Meaning of each action:
+
+- Assign: item enters warehouse stock
+- Redirect: item is sent onward to another branch
+- Discard: item is marked defective and never enters stock
+
+Important:
+
+- If a branch sends items back and you do nothing in this queue, those items stay pending
+- Pending items are not yet part of warehouse stock
+
+
+========================================
+8. HOW TO SEND FROM POS TO ANOTHER POS
+========================================
+
+The POS system now also supports sending stock to another branch through warehouse review.
+
+Flow:
+
+1. Open POS
+2. Add items to the bill
+3. Choose target branch using the branch target action
+4. Confirm the bill
+5. Run sync on source POS
+6. Run sync on warehouse
+7. Open unhandled branch products in warehouse
+8. Redirect the queued item to the destination branch
+9. Run sync on the destination POS
+
+Important:
+
+- POS does not send directly branch-to-branch
+- it goes through warehouse review first
+- this is intentional
+
+
+========================================
+9. POS CASHIER RESTRICTIONS
+========================================
+
+The POS is now treated as a cashier terminal, not a warehouse control panel.
+
+Allowed in POS:
+
+- sell
+- reserve
+- return / exchange
+- raise a warehouse-reviewed transfer request
+
+Blocked in POS:
+
+- manual incoming stock
+- manual stock adjustment
+- manual stock deletion
+- manual price change
+- bulk price change
+- destructive admin reset actions
+
+Important:
+
+- stock should reach POS only through warehouse sync
+- prices should reach POS only through warehouse sync
+
+Manager note:
+
+- these restrictions are now controlled from the manager permissions tab
+- they are no longer hardcoded only
+
+
+========================================
+10. MANAGER PERMISSIONS TAB
+========================================
+
+There is now a manager tab inside POS settings/admin.
+
+Use it when you want to decide which sensitive POS features are:
+
+- allowed
+- restricted
+
+How to use it:
+
+1. Open POS settings / admin
+2. Open `صلاحيات المدير`
+3. Enter manager password
+4. Enable or disable the needed features
+5. Save permissions
+
+Examples of features that can now be controlled:
+
+- opening inventory window
+- manual incoming stock
+- Excel import
+- manual stock adjustment
+- reset actions
+- price editing
+- stock deletion
+- specs editing
+- size profile editing
+
+
+========================================
+11. HOW VOID WORKS IN POS
+========================================
+
+Finalized POS bills should not be deleted.
+
+Use one of these instead:
+
+- RETURN flow
+- VOID with reason
+
+VOID rules:
+
+- requires manager password
+- requires a reason
+- keeps the bill in history as an auditable record
+
+
+========================================
+12. HOW TO CHECK BRANCH STOCK IN WAREHOUSE
+========================================
+
+The warehouse app includes a branch stock window.
+
+Use it to:
+
+- select branch device
+- see last known stock snapshot from that POS
+- filter by:
+  - item type
+  - school
+  - color
+  - size
+- search by text
+
+If a branch is not showing fresh data:
+
+1. Open sync in that POS
+2. Run sync
+3. Open sync in warehouse
+4. Run sync
+5. Refresh branch stock window
+
+
+========================================
+13. HOW TO TEST THAT SYNC IS WORKING
+========================================
+
+Good practical tests:
+
+Test A - Warehouse to POS:
+
+1. Create a shipment in warehouse to a branch
+2. Sync warehouse
+3. Sync the target POS
+4. Check that stock appears in POS selling point immediately
+5. Sync POS again if needed
+6. Check branch stock mirror in warehouse
+
+Test B - POS return to warehouse:
+
+1. Create a bill in POS
+2. Press `الى المصنع`
+3. Finalize
+4. Sync POS
+5. Sync warehouse
+6. Check unhandled branch products window
+7. Assign or discard or redirect
+
+Test C - POS to another POS:
+
+1. Create bill in source POS
+2. Choose target branch
+3. Finalize
+4. Sync source POS
+5. Sync warehouse
+6. Process the queued line in warehouse by redirecting it
+7. Sync destination POS
+
+Test D - cashier lockdown:
+
+1. Open POS
+2. Confirm that manual incoming-stock actions are unavailable
+3. Confirm that inventory/admin edit actions are blocked
+4. Open bill history
+5. VOID one test sale using manager password + reason
+6. Confirm the bill stays in history instead of disappearing
+
+Test E - manager permissions:
+
+1. Open POS settings
+2. Open `صلاحيات المدير`
+3. Enable one restricted feature
+4. Save
+5. Test that the feature is now available
+6. Disable it again and confirm it becomes restricted
+
+Signs of success:
+
+- POS stock appears
+- POS selling point refreshes
+- warehouse branch stock window shows updated rows
+- sync log ends successfully
+- POS returns appear in the warehouse review queue
+- redirected items arrive only after warehouse processing
+
+
+========================================
+14. TIPS AND TRICKS
+========================================
+
+- Always test connection after changing server URL or device name
+- Keep one branch per device name
+- Use sync regularly instead of waiting too long between cycles
+- If you ship goods from warehouse to branch, sync warehouse first, then sync the POS
+- If branch stock looks outdated in warehouse, remember the branch must push a fresh snapshot first
+- The branch stock window is a mirror of POS snapshot data, not a live direct database link
+- If data was changed locally but UI did not update before, this has been improved in current builds, so use the latest `.exe`
+- If you edit code or deploy new fixes, rebuild the `.exe` before testing that desktop app
+- Keep backup copies of SQLite database files before major changes
+- Use exact branch names to avoid sending shipments to the wrong target
+- If you are troubleshooting sync, open the sync dialog and read the log line by line
+- If one old bad sync event happened before a code fix, sometimes the safest test is to create a fresh new shipment after updating
+- Returns from POS now need warehouse review before they become stock
+- If a destination branch does not receive a POS-to-POS transfer yet, check whether warehouse has actually redirected it
+- Pending queue items are work waiting for warehouse decision, not sync failures
+- Treat POS as cashier terminal only; keep stock/price authority in warehouse
+- Use VOID only for controlled cancellation, not as a replacement for normal return flow
+- If you temporarily allow a sensitive feature in POS, switch it off again after the manager finishes
+
+
+========================================
+15. WARNINGS
+========================================
+
+- Do not invent branch names outside the approved set unless you intentionally add a new branch
+- Do not use one device name for two different branch computers
+- Do not change a branch device name after it starts syncing unless you know you want a new logical device identity
+- Do not assume upload count alone means outbound stock shipment; POS snapshots also count as uploads
+- Do not use old executables after important sync fixes
+- Do not edit database files manually unless absolutely necessary
+- Do not rely on stale cached device names if you are reorganizing branches
+- Do not confuse customer sales with branch shipments
+- Do not enter random branch names with typos
+- Do not expect `الى المصنع` items to appear instantly in warehouse stock
+- Do not forget to process pending queue items in warehouse
+- Do not assume a POS-to-POS request is complete before warehouse redirects it
+- Do not add stock manually in POS
+- Do not change prices manually in POS
+- Do not use old unrestricted POS builds after this restriction update
+- Do not leave powerful manager permissions enabled unless there is a real operational need
+
+
+========================================
+16. IF SOMETHING LOOKS WRONG
+========================================
+
+Check these first:
+
+1. Is the server URL correct?
+2. Is the device name correct?
+3. Did "اختبار الاتصال" pass?
+4. Did warehouse sync first?
+5. Did the target POS sync after warehouse?
+6. Are you using the latest built `.exe`?
+7. Are you looking at branch shipment or normal customer sale?
+8. Is the branch stock mirror old because the POS did not push a fresh snapshot yet?
+9. Did a POS return land in the unhandled queue instead of stock? That may be the expected new behavior.
+10. Did warehouse actually process / redirect the pending line?
+11. Are you using the newest POS build with cashier restrictions enabled?
+12. Did the manager permissions tab enable or disable this feature intentionally?
+
+
+========================================
+17. AUTH / SCOPE SMOKE CHECK
+========================================
+
+After server auth/scope changes, run this local smoke check from:
+
+- `sync_server\Hosny-sync-server`
+
+Command:
+
+python smoke_auth_scope.py
+
+Expected result:
+
+- `SMOKE_AUTH_SCOPE_PASSED`
+
+What it verifies:
+
+- allowlisted device-name auth behavior
+- simple JWT TTL setting wiring
+- push target-scope validation rules (POS restrictions and valid warehouse scopes)
+
+
+========================================
+18. BUILDING WINDOWS EXE
+========================================
+
+Use Windows PowerShell. Prefer `Set-Location "…path…"; command` (older PowerShell may not accept `&&`).
+
+Install / upgrade PyInstaller:
+
+python -m pip install --upgrade pyinstaller
+
+Recommended (matches checked-in specs; one-file bundles):
+
+Warehouse (from inner app folder):
+
+Set-Location "…\ادارة المخازن\ادارة المخازن"
+python -m PyInstaller --noconfirm HosnyWarehouse.spec
+
+POS Zay:
+
+Set-Location "…\ادارة المخازن\POS-ZAY"
+python -m PyInstaller --noconfirm HosnyPOS.spec
+
+POS OCT (when this folder is in your copy):
+
+Set-Location "…\ادارة المخازن\POS-OCT"
+python -m PyInstaller --noconfirm HosnyPOS.spec
+
+Legacy one-liner (still valid if you do not use `.spec` files):
+
+pyinstaller --onefile HosnyPOS.py --name HosnyPOS
+
+Current important executables:
+
+- ادارة المخازن\ادارة المخازن\dist\HosnyWarehouse.exe
+- POS-ZAY\dist\HosnyPOS.exe
+- POS-OCT\dist\HosnyPOS.exe (when POS-OCT is maintained)
+
+Project setup guide file:
+
+- `Project Tools Setup.txt`
+
+Use it when preparing a new machine to know:
+
+- which tools must be installed
+- which Python packages are needed
+- how to install server dependencies
+- how to install build/reset helper tools
+
+Python compatibility note:
+
+- target Python version for this project is `Python 3.10`
+- newer versions may work, but use `Python 3.10` when you want the safest setup
+
+Main test checklist file:
+
+- `TEST SCENARIOS.md`
+
+Use it as the master QA list when testing the system after changes or resets.
+It now includes broad coverage for the full visible system feature set, not only sync scenarios.
+
+Staff training checklist files:
+
+- `Warehouse Staff Training Checklist.txt`
+- `POS Staff Training Checklist.txt`
+
+Use these when training new staff so you do not forget to explain major workflows, restrictions, and daily rules.
+
+Latest fix notes from testing:
+
+- wrong/unknown device names should now be rejected by the sync server
+- warehouse quick search now prefers matching item names before matching school names
+- branch-shipment bills are now labeled more clearly in warehouse bill history
+- if a warehouse-side return is opened for a branch-shipment bill, the returned lines should now go to the unhandled branch products queue instead of trying to return directly into a closed package
+- movements window now shows the related customer/branch and uses linked dropdown filters for type / school / color / size
+- size-profile matching was tightened so saved size ranges are more likely to load correctly even if spacing/casing was inconsistent
+- warehouse **حجوزات الفروع (مرآة)**: POS filter matches whether sync stored device as **name** or **UUID**; picklist includes both friendly names and raw identifiers; **مجمّع حسب المنتج** tab sums quantities per product across lines (and branches when no POS filter)
+- warehouse **التدفقات المالية للفروع (يومي)** uses the same expanded device picklist / name↔UUID resolution for **الجهاز**
+- two configured numeric size ranges (النطاق الأول + الثاني) are **merged** on warehouse and POS size pickers so overlapping sizes are not duplicated (e.g. 6→22 plus 14→28 becomes one list through 28)
+- after material code changes, rebuild affected `.exe` files with PyInstaller (see commands above); project `.cursor/rules/pyinstaller-after-changes.mdc` reminds automation to do the same
+
+
+========================================
+19. SERVER RESET SCRIPT
+========================================
+
+A Bash reset script was added here:
+
+- Resets\reset_sync_server.sh
+
+Windows one-click reset files were also added here:
+
+- Resets\Reset POS-ZAY.bat
+- Resets\Reset POS-OCT.bat
+- Resets\Reset POS-OBO.bat
+- Resets\Reset POS-GESR.bat
+- Resets\Reset POS-BAH.bat
+- Resets\Reset POS-CEN.bat
+- Resets\Reset WAREHOUSE.bat
+- Resets\Reset ALL Devices.bat
+
+Available modes:
+
+- reset POS-ZAY only
+- reset POS-OCT only
+- reset POS-OBO only
+- reset POS-GESR only
+- reset POS-BAH only
+- reset POS-CEN only
+- reset warehouse only
+- reset all devices completely
+
+Easiest usage:
+
+- double-click the matching `.bat` file in the `Resets` folder
+
+Manual usage:
+
+- run the `.sh` file from Git Bash or any Bash shell that has `sqlite3` installed
+- the Windows `.bat` launchers no longer require Git Bash; they use Python directly
+
+Examples:
+
+bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-zay
+bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-oct
+bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-obo
+bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-gesr
+bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-bah
+bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-cen
+bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" warehouse
+bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" all
+
+Important:
+
+- if you run a local sync server that uses the same local SQLite file, close it before reset
+- the script asks for confirmation before deleting data
+- `all` wipes every device, event, and cursor from the server database
+
+
+========================================
+20. FUTURE NOTES
+========================================
+
+Other POS copies may be recreated later from POS-ZAY.
+
+When recreating new POS copies:
+
+- copy from the latest clean POS version
+- set a unique approved device name
+- test server connection
+- run sync
+- rebuild the `.exe`
+
+
+========================================
+21. SHORT PRACTICAL RULES
+========================================
+
+- Warehouse name = WAREHOUSE
+- Call-center monitor name = STOCK-MONITOR (read-only lookup role)
+- Branch names must be exact
+- API key can stay empty
+- Test connection before sync
+- Warehouse sync first for outbound shipments
+- POS sync after warehouse to receive stock
+- Use latest executables
+- `الى المصنع` means warehouse review queue first
+- POS to POS also goes through warehouse review first
+- POS stock and price authority belong to warehouse, not cashier
+- Manager permissions decide which sensitive POS tools are currently unlocked

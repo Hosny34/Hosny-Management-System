@@ -1,0 +1,34 @@
+---
+description: Rebuild Windows executables with PyInstaller after Python app fixes
+alwaysApply: true
+---
+
+# PyInstaller after code changes
+
+Whenever you change code under this project that ships as a desktop `.exe`, finish by running **PyInstaller** for the affected app(s). Use PowerShell: chain with `;` (not `&&` on older PowerShell).
+
+**Warehouse** (`ادارة المخازن/HosnyWarehouse.py`): from workspace folder `ادارة المخازن` (inner), run:
+
+```powershell
+Set-Location "<workspace>\ادارة المخازن\ادارة المخازن"; python -m PyInstaller --noconfirm HosnyWarehouse.spec
+```
+
+Output: `ادارة المخازن/ادارة المخازن/dist/HosnyWarehouse.exe`
+
+**POS Zay** (`POS-ZAY/HosnyPOS.py`):
+
+```powershell
+Set-Location "<workspace>\ادارة المخازن\POS-ZAY"; python -m PyInstaller --noconfirm HosnyPOS.spec
+```
+
+Output: `ادارة المخازن/POS-ZAY/dist/HosnyPOS.exe`
+
+**POS OCT** (`POS-OCT/HosnyPOS.py`):
+
+```powershell
+Set-Location "<workspace>\ادارة المخازن\POS-OCT"; python -m PyInstaller --noconfirm HosnyPOS.spec
+```
+
+Output: `POS-OCT/dist/HosnyPOS.exe`
+
+Rebuild only what you touched; if shared logic was copied or both POS trees matter, rebuild both POS folders. Confirm exit code 0 before considering the task done.

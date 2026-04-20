@@ -1,0 +1,10 @@
+Build this folder’s POS Windows .exe from PowerShell (use Set-Location to this directory first):
+
+python -m pip install --upgrade pyinstaller
+python -m PyInstaller --noconfirm HosnyPOS.spec
+
+Output: dist\HosnyPOS.exe
+
+Legacy one-file command (still works):
+
+pyinstaller --onefile HosnyPOS.py --name HosnyPOS

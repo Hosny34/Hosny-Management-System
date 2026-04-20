@@ -1,0 +1,255 @@
+WAREHOUSE STAFF TRAINING CHECKLIST
+
+Use this checklist while training warehouse staff on the warehouse system.
+Mark each item after you explain it and let the trainee try it.
+
+==================================================
+1. BASIC STARTUP
+==================================================
+
+[ ] Open the warehouse app
+[ ] Explain what this app is responsible for
+[ ] Explain that warehouse is the source of truth for stock
+[ ] Show where the local data is stored
+[ ] Explain when to close and reopen the app safely
+
+==================================================
+2. LOGIN / GENERAL RULES
+==================================================
+
+[ ] Explain manager-only actions
+[ ] Explain that warehouse changes affect real stock
+[ ] Explain that POS requests must be reviewed by warehouse
+[ ] Explain that device names must be correct in sync setup
+
+==================================================
+3. SYNC BASICS
+==================================================
+
+[ ] Open sync settings
+[ ] Show server URL
+[ ] Show device name = WAREHOUSE
+[ ] Show test connection
+[ ] Show sync now
+[ ] Explain how to read sync log messages
+[ ] Explain that warehouse should sync before POS when sending stock
+[ ] Explain that warehouse may need another sync after POS pushes updates
+
+==================================================
+4. WAREHOUSE NUMBERS / PACKAGE NUMBERS
+==================================================
+
+[ ] Explain warehouse numbers
+[ ] Explain displayed labels vs internal numeric values
+[ ] Show:
+[ ] مخزن 1
+[ ] مخزن 2
+[ ] مخزن 3
+[ ] مخزن 4
+[ ] مخزن زايد
+[ ] مخزن اكتوبر
+[ ] مخزن العبور
+[ ] Explain package number meaning
+[ ] Explain why warehouse number and package number must be chosen carefully
+[ ] Explain package closing / reopening behavior
+
+==================================================
+5. ADDING STOCK
+==================================================
+
+[ ] Show how to add normal inbound stock
+[ ] Explain item type
+[ ] Explain school
+[ ] Explain color
+[ ] Explain size
+[ ] Explain badge flag if used
+[ ] Explain unit price
+[ ] Explain quantity
+[ ] Explain warehouse number
+[ ] Explain package number
+[ ] Save a real/test stock line
+[ ] Confirm the stock appears in inventory
+
+==================================================
+6. SIZE RANGES
+==================================================
+
+[ ] Explain why size ranges matter in this system
+[ ] Show how size ranges are defined
+[ ] Show how to edit size ranges
+[ ] Explain numeric ranges
+[ ] Explain alpha sizes if used
+[ ] Explain that warehouse should keep size ranges correct before shipping to POS
+[ ] Explain two numeric ranges: overlapping ranges merge into one continuous list on POS/warehouse pickers (no duplicate size buttons)
+
+==================================================
+7. SEARCH / FILTERS / INVENTORY VIEW
+==================================================
+
+[ ] Open stock/inventory window
+[ ] Show filtering by item type
+[ ] Show filtering by school
+[ ] Show filtering by color
+[ ] Show filtering by size
+[ ] Show filtering by warehouse number
+[ ] Show filtering by package number
+[ ] Show text search
+[ ] Show clear filters
+[ ] Explain how to verify stock before making a shipment
+
+==================================================
+8. EDITING / MAINTAINING STOCK
+==================================================
+
+[ ] Show price update flow
+[ ] Show specs edit flow if used
+[ ] Show delete/remove flow if allowed
+[ ] Explain when these actions are dangerous
+[ ] Explain why warehouse edits should be deliberate and checked
+
+==================================================
+9. BILLING / OUTBOUND TO BRANCH
+==================================================
+
+[ ] Open warehouse billing screen
+[ ] Explain customer field
+[ ] Explain branch shipment naming:
+[ ] فرع: POS-ZAY
+[ ] فرع: POS-OCT
+[ ] فرع: POS-OBO
+[ ] فرع: POS-GESR
+[ ] فرع: POS-BAH
+[ ] فرع: POS-CEN
+[ ] Create a test shipment to a branch
+[ ] Confirm shipment saves in bill history
+[ ] Explain that warehouse must sync after creating the shipment
+[ ] Explain that target POS must sync after warehouse
+
+==================================================
+10. BILL HISTORY
+==================================================
+
+[ ] Open bill history window
+[ ] Show normal bill rows
+[ ] Show branch shipment rows
+[ ] Open bill details
+[ ] Export a bill if needed
+[ ] Print a bill if needed
+[ ] Explain difference between bill history and stock movement history
+
+==================================================
+11. BRANCH STOCK MIRROR
+==================================================
+
+[ ] Open branch stock window
+[ ] Explain this is mirrored POS stock, not direct live access
+[ ] Select a branch
+[ ] Show branch stock rows
+[ ] Show branch stock filters
+[ ] Explain that warehouse sees latest POS snapshot only after POS sync
+
+==================================================
+11b. BRANCH RESERVATIONS MIRROR AND DAILY FINANCE (READ-ONLY)
+==================================================
+
+[ ] Open **المزامنة** → **حجوزات الفروع (مرآة)…**
+[ ] Explain: data is a mirror from sync, not edited here
+[ ] Show **نقطة البيع** filter (names and raw device IDs may both appear)
+[ ] Explain: choosing a branch **name** still finds rows if the server stored a device UUID
+[ ] Show tab **تفصيلي (كل حجز)** vs **مجمّع حسب المنتج** (totals by نوع/مدرسة/لون/مقاس across lines and branches)
+[ ] Show **المعلقة فقط** when training pending reservations
+[ ] Open **المزامنة** → **التدفقات المالية للفروع (يومي)…**
+[ ] Explain **الجهاز** filter uses the same expanded device list for consistency
+
+==================================================
+12. UNHANDLED BRANCH PRODUCTS
+==================================================
+
+[ ] Open منتجات الفروع غير المعالجة
+[ ] Explain what appears here
+[ ] Explain POS return to warehouse workflow
+[ ] Explain POS to POS via warehouse workflow
+[ ] Show queue statuses
+[ ] Show how to assign to warehouse stock
+[ ] Show how to discard as defective
+[ ] Show how to reroute to another branch
+[ ] Explain that queued items do NOT become stock until warehouse processes them
+
+==================================================
+13. RETURNS / REFUNDS
+==================================================
+
+[ ] Explain difference between local warehouse return flow and branch unhandled queue flow
+[ ] Show when a return goes directly to stock
+[ ] Show when a return should go to unhandled queue instead
+[ ] Explain why closed package errors may happen in old/manual cases
+
+==================================================
+14. MOVEMENT HISTORY
+==================================================
+
+[ ] Open سجل الحركات
+[ ] Show filtering by customer
+[ ] Show filtering by item type
+[ ] Show filtering by school
+[ ] Show filtering by color
+[ ] Show filtering by size
+[ ] Show date filtering
+[ ] Show free-text filtering
+[ ] Explain how to investigate what happened to a product
+
+==================================================
+15. ADMIN / MANAGER TOOLS
+==================================================
+
+[ ] Open manager/admin tools
+[ ] Show package reopen tool
+[ ] Explain when package reopen is allowed
+[ ] Explain why admin tools should be limited
+
+==================================================
+16. EXPORT / PRINT
+==================================================
+
+[ ] Show Excel export if used
+[ ] Show printing if used
+[ ] Explain when to keep paper copy vs digital copy
+
+==================================================
+17. RESET / TROUBLESHOOTING
+==================================================
+
+[ ] Explain local DB reset concept in simple words
+[ ] Explain server reset `.bat` files
+[ ] Explain that reset is destructive
+[ ] Explain when NOT to reset
+[ ] Explain common troubleshooting questions:
+[ ] Is device name correct?
+[ ] Did test connection pass?
+[ ] Did warehouse sync first?
+[ ] Did target POS sync after warehouse?
+[ ] Did POS push latest snapshot?
+
+==================================================
+18. DAILY WORKING RULES
+==================================================
+
+[ ] Always verify branch target before confirming shipment
+[ ] Always verify warehouse/package values before saving stock
+[ ] Always sync after important warehouse actions
+[ ] Always review unhandled branch queue regularly
+[ ] Do not treat POS as source of truth
+[ ] Do not bypass warehouse review for branch transfers
+
+==================================================
+19. FINAL TRAINEE PRACTICE
+==================================================
+
+[ ] Trainee adds stock
+[ ] Trainee searches stock
+[ ] Trainee creates branch shipment
+[ ] Trainee runs warehouse sync
+[ ] Trainee opens branch stock mirror
+[ ] Trainee opens unhandled branch queue
+[ ] Trainee assigns or reroutes one queued item
+[ ] Trainee explains the full flow back to trainer

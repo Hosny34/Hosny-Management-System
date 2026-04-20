@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \":*)",
+      "Bash(\"c:/Users/youssef.sherif/Downloads/ادارة المخازن/ادارة:*)",
+      "Bash(python _append_part2.py)",
+      "Bash(python _append_part3.py)",
+      "Bash(python _append_part4.py)",
+      "Bash(python -c \"content = open\\(''HosnyWarehouse.py'', ''r'', encoding=''utf-8''\\).read\\(\\); lines = content.splitlines\\(\\); print\\(f''Current line count: {len\\(lines\\)}''\\); print\\(''Last 5 lines:''\\); print\\(''\\\\n''.join\\(lines[-5:]\\)\\)\")",
+      "Bash(python _append_part5.py)",
+      "Bash(python _append_part5_new.py)",
+      "Bash(python _append_part6.py)",
+      "Bash(python -m py_compile HosnyWarehouse.py)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''HosnyWarehouse.py'', doraise=True\\)\")",
+      "Bash(python -c \"print\\(sum\\(1 for _ in open\\(r''c:\\\\Users\\\\youssef.sherif\\\\Downloads\\\\ادارة المخازن\\\\ادارة المخازن\\\\HosnyWarehouse.py'', encoding=''utf-8''\\)\\)\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''HosnyWarehouse.py'', doraise=True\\); print\\(''Syntax OK''\\)\")",
+      "Bash(pyinstaller --onefile HosnyWarehouse.py)",
+      "Bash(python -m PyInstaller --onefile HosnyWarehouse.py)",
+      "Bash(\"c:\\\\Users\\\\youssef.sherif\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe\" -m pip show pyinstaller)",
+      "Bash(where python)",
+      "Bash(\"c:\\\\Users\\\\youssef.sherif\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe\" -m pip install pyinstaller)",
+      "Bash(\"c:\\\\Users\\\\youssef.sherif\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\Scripts\\\\pyinstaller.exe\" --onefile HosnyWarehouse.py)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''HosnyWarehouse.py'', doraise=True\\); print\\(''OK''\\)\")",
+      "Bash(timeout 8 python HosnyWarehouse.py)",
+      "Bash(pyinstaller --onefile --noconsole --name \"ادارة_المخازن\" HosnyWarehouse.py)"
+    ]
+  }
+}

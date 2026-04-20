@@ -1,0 +1,254 @@
+PROJECT TOOLS SETUP GUIDE
+
+This file lists the tools and packages needed to run, build, and maintain this project.
+
+Main project parts:
+- Warehouse desktop app
+- POS desktop app
+- Sync server
+
+========================================
+1. REQUIRED TO RUN THE DESKTOP APPS FROM SOURCE
+========================================
+
+1. Python
+
+Recommended:
+- Python 3.10
+- Python 3.11 and 3.12 should also work, but target 3.10 for compatibility
+
+Why needed:
+- runs the warehouse app
+- runs the POS app
+- runs helper scripts
+
+Install on Windows:
+1. Download from:
+   https://www.python.org/downloads/
+2. Install Python 3.10
+3. IMPORTANT: enable "Add Python to PATH"
+
+Verify:
+python --version
+
+
+========================================
+2. REQUIRED PYTHON PACKAGES FOR THE DESKTOP APPS
+========================================
+
+Desktop apps use mostly the Python standard library, but these extra packages are useful/needed:
+
+Required:
+- openpyxl
+
+Optional but recommended on Windows:
+- pywin32
+
+Why:
+- openpyxl: Excel export support
+- pywin32: better Windows printing behavior
+
+Install:
+python -m pip install --upgrade pip
+python -m pip install openpyxl pywin32
+
+
+========================================
+3. REQUIRED TO RUN THE SYNC SERVER
+========================================
+
+Required Python packages for sync server:
+- fastapi
+- uvicorn
+- pydantic
+- PyJWT
+
+The server already has a requirements file here:
+- sync_server\Hosny-sync-server\requirements.txt
+
+Install:
+cd sync_server\Hosny-sync-server
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+
+========================================
+4. REQUIRED DATABASE TOOLING
+========================================
+
+Desktop apps:
+- use SQLite built into Python
+- no separate DB server install is required
+
+Optional command-line tool:
+- sqlite3
+
+Why useful:
+- inspect/reset the sync server DB manually
+- needed only if you want to use the Bash reset script manually
+
+Install on Windows:
+
+Option A - winget:
+winget install SQLite.SQLite
+
+Option B - Chocolatey:
+choco install sqlite
+
+Verify:
+sqlite3 --version
+
+
+========================================
+5. REQUIRED TO BUILD EXE FILES
+========================================
+
+Required:
+- PyInstaller
+
+Install:
+python -m pip install --upgrade pyinstaller
+
+Build commands (recommended — uses repo `.spec` files, same as CI/manual release builds):
+
+Warehouse:
+cd "C:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن"
+python -m PyInstaller --noconfirm HosnyWarehouse.spec
+
+POS Zay:
+cd "C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-ZAY"
+python -m PyInstaller --noconfirm HosnyPOS.spec
+
+POS OCT (optional second branch copy in workspace):
+cd "C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-OCT"
+python -m PyInstaller --noconfirm HosnyPOS.spec
+
+Legacy one-file build (still works):
+
+Warehouse: pyinstaller --onefile HosnyWarehouse.py
+POS: pyinstaller --onefile HosnyPOS.py --name HosnyPOS
+
+Outputs: `dist\` under each folder above (`HosnyWarehouse.exe`, `HosnyPOS.exe`).
+
+
+========================================
+6. REQUIRED TO USE THE RESET SCRIPTS
+========================================
+
+Required:
+- Python
+
+Recommended Bash on Windows:
+- Git Bash
+
+Install Git Bash:
+1. Download from:
+   https://git-scm.com/download/win
+2. Install Git for Windows
+
+What it gives you:
+- bash
+- git bash terminal
+
+Note:
+- Windows `.bat` reset launchers now use Python directly and do not require Git Bash or sqlite3.exe
+
+The reset script currently lives here:
+- Resets\reset_sync_server.sh
+
+
+========================================
+7. OPTIONAL BUT RECOMMENDED TOOLS
+========================================
+
+1. Git
+
+Why useful:
+- version control
+- backup
+- easier rollback
+
+Install:
+winget install Git.Git
+
+2. VS Code / Cursor
+
+Why useful:
+- code editing
+- Python development
+- terminal integration
+
+3. pip upgrade
+
+Recommended:
+python -m pip install --upgrade pip
+
+
+========================================
+8. FULL INSTALL COMMANDS FOR A NEW MACHINE
+========================================
+
+After installing Python:
+
+python -m pip install --upgrade pip
+python -m pip install openpyxl pywin32 pyinstaller
+
+Then for sync server:
+
+cd "C:\Users\youssef.sherif\Downloads\ادارة المخازن\sync_server\Hosny-sync-server"
+python -m pip install -r requirements.txt
+
+
+========================================
+9. QUICK CHECKLIST
+========================================
+
+Minimum needed for desktop apps:
+- Python 3.10
+- openpyxl
+
+Minimum needed for server:
+- Python 3.10
+- packages from requirements.txt
+
+Minimum needed for EXE building:
+- Python 3.10
+- PyInstaller
+
+Minimum needed for reset scripts:
+- Python (Windows `.bat` launchers use embedded `sqlite3` via Python)
+- Optional: Bash + `sqlite3` CLI only if you run `reset_sync_server.sh` manually from Git Bash
+
+
+========================================
+10. VERIFY EVERYTHING
+========================================
+
+Check Python:
+python --version
+
+Check pip:
+python -m pip --version
+
+Check PyInstaller:
+pyinstaller --version
+
+Check sqlite3:
+sqlite3 --version
+
+Check server deps:
+cd "C:\Users\youssef.sherif\Downloads\ادارة المخازن\sync_server\Hosny-sync-server"
+python -c "import fastapi, uvicorn, jwt; print('server deps ok')"
+
+Check desktop deps:
+python -c "import openpyxl; print('desktop deps ok')"
+
+
+========================================
+11. NOTES
+========================================
+
+- Tkinter comes with normal Python on Windows, so you usually do not install it separately.
+- SQLite for the desktop apps is built into Python.
+- pywin32 is recommended mainly for better printing on Windows, but some flows may still run without it.
+- If you only use the compiled .exe files, end users usually do not need Python installed.
