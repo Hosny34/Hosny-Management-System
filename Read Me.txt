@@ -536,7 +536,15 @@ Latest fix notes from testing:
 - warehouse quick search now prefers matching item names before matching school names
 - branch-shipment bills are now labeled more clearly in warehouse bill history
 - if a warehouse-side return is opened for a branch-shipment bill, the returned lines should now go to the unhandled branch products queue instead of trying to return directly into a closed package
-- movements window now shows the related customer/branch and uses linked dropdown filters for type / school / color / size
+- warehouse now has a dedicated sync diagnostics tab (`تشخيص المزامنة`) in the main tabs and header navigation (shortcut `F11`)
+- movements window in warehouse is now an aggregated product monitor (not raw per-row movement log), with linked dropdown filters
+- warehouse movements monitor columns are now:
+  - incoming (`وارد`)
+  - sold (`مباع`)
+  - remaining (`متبقي`) across warehouse + all branch mirrors
+  - reservations (`حجوزات`)
+- branch shipments are intentionally not treated as final sales in this monitor
+- warehouse-side sales are counted only for non-branch customers (branch customers like `فرع: ...` are shipment flows)
 - size-profile matching was tightened so saved size ranges are more likely to load correctly even if spacing/casing was inconsistent
 - warehouse **حجوزات الفروع (مرآة)**: POS filter matches whether sync stored device as **name** or **UUID**; picklist includes both friendly names and raw identifiers; **مجمّع حسب المنتج** tab sums quantities per product across lines (and branches when no POS filter)
 - warehouse **التدفقات المالية للفروع (يومي)** uses the same expanded device picklist / name↔UUID resolution for **الجهاز**

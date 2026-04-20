@@ -3598,6 +3598,199 @@ class SqliteDatabase:
         cur.close()
         return rows
 
+    def list_movement_item_totals(self, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Aggregate movement/stock metrics per item specs across warehouse + branches."""
+        def _date_clause(col: str) -> Tuple[str, List[Any]]:
+            parts: List[str] = []
+            args: List[Any] = []
+            df = (filters.get("date_from") or "").strip()
+            dt = (filters.get("date_to") or "").strip()
+            if df:
+                parts.append(f"date({col}) >= date(?)")
+                args.append(df)
+            if dt:
+                parts.append(f"date({col}) <= date(?)")
+                args.append(dt)
+            return (" AND " + " AND ".join(parts), args) if parts else ("", [])
+
+        def _to_key(row: Any) -> Tuple[str, str, str, str]:
+            return (
+                str(row[0] or "").strip(),
+                str(row[1] or "").strip(),
+                str(row[2] or "").strip(),
+                str(row[3] or "").strip(),
+            )
+
+        def _spec_match(key: Tuple[str, str, str, str]) -> bool:
+            checks = (
+                ("item_type", key[0]),
+                ("school", key[1]),
+                ("color", key[2]),
+                ("size", key[3]),
+            )
+            for fld, actual in checks:
+                want = str(filters.get(fld) or "").strip()
+                if want and actual.lower() != want.lower():
+                    return False
+            txt = str(filters.get("text") or "").strip().lower()
+            if txt:
+                hay = " ".join(key).lower()
+                if txt not in hay:
+                    return False
+            return True
+
+        cur = self.conn.cursor()
+        metrics: Dict[Tuple[str, str, str, str], Dict[str, int]] = {}
+
+        def _bucket(key: Tuple[str, str, str, str]) -> Dict[str, int]:
+            if key not in metrics:
+                metrics[key] = {
+                    "incoming_qty": 0,
+                    "sold_warehouse_qty": 0,
+                    "branch_shipped_qty": 0,
+                    "branch_sold_qty_est": 0,
+                    "reserved_qty": 0,
+                    "warehouse_qty": 0,
+                    "branch_qty": 0,
+                    "remaining_total_qty": 0,
+                    "sold_total_qty": 0,
+                }
+            return metrics[key]
+
+        # Current warehouse stock
+        for r in cur.execute(
+            """
+            SELECT item_type, school, color, size, COALESCE(SUM(count),0)
+            FROM stocks
+            WHERE count > 0
+            GROUP BY item_type, school, color, size
+            """
+        ).fetchall():
+            key = _to_key(r)
+            _bucket(key)["warehouse_qty"] = int(r[4] or 0)
+
+        # Current branch stock mirror
+        try:
+            rows = cur.execute(
+                """
+                SELECT item_type, school, color, size, COALESCE(SUM(count),0)
+                FROM pos_stocks_mirror
+                GROUP BY item_type, school, color, size
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        for r in rows:
+            key = _to_key(r)
+            _bucket(key)["branch_qty"] = int(r[4] or 0)
+
+        # Reserved qty mirrored from branches (active only)
+        try:
+            rows = cur.execute(
+                """
+                SELECT item_type, school, color, size, COALESCE(SUM(qty),0)
+                FROM pos_reservations_mirror
+                WHERE status = 'معلق'
+                GROUP BY item_type, school, color, size
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        for r in rows:
+            key = _to_key(r)
+            _bucket(key)["reserved_qty"] = int(r[4] or 0)
+
+        # Warehouse incoming movements (period-filtered)
+        d_sql, d_args = _date_clause("m.ts")
+        rows = cur.execute(
+            f"""
+            SELECT m.item_type, m.school, m.color, m.size, COALESCE(SUM(m.qty),0)
+            FROM movements m
+            WHERE m.direction = 'IN'
+            {d_sql}
+            GROUP BY m.item_type, m.school, m.color, m.size
+            """,
+            d_args,
+        ).fetchall()
+        for r in rows:
+            key = _to_key(r)
+            _bucket(key)["incoming_qty"] = int(r[4] or 0)
+
+        # Warehouse sold (exclude shipment bills whose customer is a branch)
+        d_sql, d_args = _date_clause("m.ts")
+        rows = cur.execute(
+            f"""
+            SELECT m.item_type, m.school, m.color, m.size, COALESCE(SUM(m.qty),0)
+            FROM movements m
+            LEFT JOIN bills b ON b.id = m.bill_id
+            WHERE m.direction IN ('OUT', 'OUT_FACTORY')
+              AND (
+                    b.id IS NULL
+                 OR LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))
+              )
+            {d_sql}
+            GROUP BY m.item_type, m.school, m.color, m.size
+            """,
+            d_args,
+        ).fetchall()
+        for r in rows:
+            key = _to_key(r)
+            _bucket(key)["sold_warehouse_qty"] = int(r[4] or 0)
+
+        # Shipped to branches from warehouse bills (period-filtered on bill date)
+        d_sql, d_args = _date_clause("b.created_at")
+        rows = cur.execute(
+            f"""
+            SELECT bi.item_type, bi.school, bi.color, bi.size, COALESCE(SUM(bi.qty),0)
+            FROM bill_items bi
+            JOIN bills b ON b.id = bi.bill_id
+            WHERE COALESCE(b.status,'CONFIRMED') = 'CONFIRMED'
+              AND LOWER(TRIM(COALESCE(b.customer,''))) LIKE LOWER(TRIM('فرع:%'))
+            {d_sql}
+            GROUP BY bi.item_type, bi.school, bi.color, bi.size
+            """,
+            d_args,
+        ).fetchall()
+        for r in rows:
+            key = _to_key(r)
+            _bucket(key)["branch_shipped_qty"] = int(r[4] or 0)
+
+        cur.close()
+
+        out: List[Dict[str, Any]] = []
+        for key, m in metrics.items():
+            if not _spec_match(key):
+                continue
+            branch_sold = max(0, int(m["branch_shipped_qty"]) - int(m["branch_qty"]))
+            sold_total = int(m["sold_warehouse_qty"]) + branch_sold
+            remaining_total = int(m["warehouse_qty"]) + int(m["branch_qty"])
+            out.append(
+                {
+                    "item_type": key[0],
+                    "school": key[1],
+                    "color": key[2],
+                    "size": key[3],
+                    "incoming_qty": int(m["incoming_qty"]),
+                    "sold_branch_qty": int(branch_sold),
+                    "sold_warehouse_qty": int(m["sold_warehouse_qty"]),
+                    "sold_total_qty": int(sold_total),
+                    "reserved_qty": int(m["reserved_qty"]),
+                    "remaining_branch_qty": int(m["branch_qty"]),
+                    "remaining_warehouse_qty": int(m["warehouse_qty"]),
+                    "remaining_total_qty": int(remaining_total),
+                }
+            )
+
+        out.sort(
+            key=lambda r: (
+                (r.get("item_type") or "").lower(),
+                (r.get("school") or "").lower(),
+                (r.get("color") or "").lower(),
+                (r.get("size") or "").lower(),
+            )
+        )
+        return out
+
 
 
 # ------------------- UI helpers -------------------
@@ -8214,18 +8407,10 @@ class MovementsWindow(tk.Toplevel):
     def _build(self):
         top = ttk.LabelFrame(self, text="تصنيف")
         top.pack(fill=tk.X, padx=8, pady=8)
-        # Customer dropdown (replaces direction)
-        self.customer = LabeledStaticCombo(top, "العميل", values=[""])
-        self.customer.grid(row=0, column=0, sticky="ew", padx=6, pady=4)
-        # refresh list when user opens/focuses
-        self.customer.cb.bind("<Button-1>", lambda e: self._reload_customers(), add="+")
-        self.customer.cb.bind("<FocusIn>", lambda e: self._reload_customers(), add="+")
-
-
-        self.ftype  = LabeledCombobox(top, "النوع",   self.db, "item_type");  self.ftype.grid(row=0, column=2, padx=6, pady=4, sticky="ew")
-        self.fsch   = LabeledCombobox(top, "المدرسة", self.db, "school");     self.fsch.grid(row=0, column=3, padx=6, pady=4, sticky="ew")
-        self.fclr   = LabeledCombobox(top, "اللون",   self.db, "color");      self.fclr.grid(row=0, column=4, padx=6, pady=4, sticky="ew")
-        self.fsiz   = LabeledCombobox(top, "المقاس",  self.db, "size");       self.fsiz.grid(row=0, column=5, padx=6, pady=4, sticky="ew")
+        self.ftype  = LabeledCombobox(top, "النوع",   self.db, "item_type");  self.ftype.grid(row=0, column=0, padx=6, pady=4, sticky="ew")
+        self.fsch   = LabeledCombobox(top, "المدرسة", self.db, "school");     self.fsch.grid(row=0, column=1, padx=6, pady=4, sticky="ew")
+        self.fclr   = LabeledCombobox(top, "اللون",   self.db, "color");      self.fclr.grid(row=0, column=2, padx=6, pady=4, sticky="ew")
+        self.fsiz   = LabeledCombobox(top, "المقاس",  self.db, "size");       self.fsiz.grid(row=0, column=3, padx=6, pady=4, sticky="ew")
         def _constraints(exclude: Optional[str] = None) -> Dict[str, Any]:
             data = {
                 "item_type": self.ftype.get() or None,
@@ -8253,16 +8438,18 @@ class MovementsWindow(tk.Toplevel):
         self.dt = DateField(top, "إلى");             self.dt.grid(row=1, column=1, padx=6, pady=4, sticky="w")
 
 
-        ttk.Label(top, text="نص").grid(row=1, column=4, sticky="e", padx=4, pady=4)
-        self.txt = ttk.Entry(top); self.txt.grid(row=1, column=5, sticky="ew", padx=6, pady=4)
-        top.columnconfigure(5, weight=1)
+        ttk.Label(top, text="بحث").grid(row=1, column=2, sticky="e", padx=4, pady=4)
+        self.txt = ttk.Entry(top); self.txt.grid(row=1, column=3, sticky="ew", padx=6, pady=4)
+        top.columnconfigure(3, weight=1)
 
         btns = ttk.Frame(top)
-        btns.grid(row=0, column=6, rowspan=2, sticky="e", padx=6, pady=4)
+        btns.grid(row=0, column=4, rowspan=2, sticky="e", padx=6, pady=4)
         _mr = ttk.Button(btns, text="تحديث", command=self._refresh); _mr.pack(side=tk.LEFT)
         ToolTip(_mr, "تحديث قائمة الحركات")
         _mc = ttk.Button(btns, text="مسح", command=self._clear); _mc.pack(side=tk.LEFT, padx=6)
         ToolTip(_mc, "مسح جميع الفلاتر")
+        _mp = ttk.Button(btns, text="طباعة", command=self._print_report); _mp.pack(side=tk.LEFT, padx=6)
+        ToolTip(_mp, "طباعة التقرير التجميعي المعروض")
         _me = ttk.Button(btns, text="تصدير إلى إكسل", command=self._export); _me.pack(side=tk.LEFT)
         ToolTip(_me, "تصدير الحركات إلى ملف إكسل")
 
@@ -8271,14 +8458,13 @@ class MovementsWindow(tk.Toplevel):
         # NEW: add badge column
         self.table = ttk.Treeview(
             table_wrap,
-            columns=("id","ts","customer","direction","type","school","color","size","qty","note","bill_id","stock_id","badge"),
+            columns=("type","school","color","size","incoming","sold","remaining","reserved"),
             show="headings",
             height=14,
         )
         for col, txt, w in [
-            ("id","المعرّف",70), ("ts","الوقت",170), ("customer","العميل",180), ("direction","الاتجاه",100), ("type","النوع",150),
-            ("school","المدرسة",170), ("color","اللون",100), ("size","المقاس",80), ("qty","الكمية",70),
-            ("note","ملاحظة",200), ("bill_id","الفاتورة",70), ("stock_id","المخزون",70), ("badge","بادج",60),
+            ("type","النوع",160), ("school","المدرسة",170), ("color","اللون",120), ("size","المقاس",90),
+            ("incoming","وارد",95), ("sold","مباع",95), ("remaining","متبقي",95), ("reserved","حجوزات",90),
         ]:
             self.table.heading(col, text=txt)
             self.table.column(col, width=w, anchor="center")
@@ -8291,7 +8477,7 @@ class MovementsWindow(tk.Toplevel):
         add_context_menu(self.table)
         _bind_mousewheel(self.table)
 
-        sum_fr = ttk.LabelFrame(self, text="ملخص النتائج المعروضة (حسب الفلاتر الحالية)")
+        sum_fr = ttk.LabelFrame(self, text="ملخص النتائج المعروضة (تجميعي حسب المنتج)")
         sum_fr.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._summary_var = tk.StringVar(value="")
         ttk.Label(
@@ -8300,14 +8486,9 @@ class MovementsWindow(tk.Toplevel):
         ).pack(anchor="e", padx=10, pady=8)
 
         self._refresh()
-        self._reload_customers()
 
-    def _reload_customers(self):
-        vals = [""] + self.db.list_customers()
-        self.customer.cb["values"] = vals
     def _filters(self) -> Dict[str, Any]:
         return {
-            "customer":  self.customer.get() or None,     # NEW
             "item_type": self.ftype.get(),
             "school":    self.fsch.get(),
             "color":     self.fclr.get(),
@@ -8320,47 +8501,41 @@ class MovementsWindow(tk.Toplevel):
 
     def _refresh(self):
         try:
-            rows = self.db.list_movements(self._filters())
+            rows = self.db.list_movement_item_totals(self._filters())
         except Exception as ex:
             messagebox.showerror("فشل البحث", str(ex), parent=self)
             self._summary_var.set("")
             return
 
-        _DIR_LABELS = {
-            "IN": "وارد", "OUT": "منصرف", "ADJUST_OUT": "تسوية سلبية",
-            "ADJUST_IN": "تسوية إيجابية", "OUT_FACTORY": "من المصنع",
-            "PRICE_UPDATE": "تحديث سعر", "VOID": "إلغاء فاتورة",
-            "RETURN_IN": "مرتجع", "TRANSFER_OUT": "تحويل صادر",
-            "TRANSFER_IN": "تحويل وارد",
-        }
         self.table.delete(*self.table.get_children())
-        for m in rows:
-            dir_txt = _DIR_LABELS.get(m.get("direction"), m.get("direction", ""))
+        for r in rows:
             self.table.insert(
                 "", tk.END,
-                values=(m.get("id"), m.get("ts"), m.get("customer",""), dir_txt,
-                        m.get("item_type",""), m.get("school",""), m.get("color",""), m.get("size",""),
-                        m.get("qty"), m.get("note",""),
-                        m.get("bill_id") if m.get("bill_id") is not None else "",
-                        m.get("stock_id") if m.get("stock_id") is not None else "",
-                        "✓" if int(m.get("has_badge") or 0) else "")
+                values=(
+                    r.get("item_type",""), r.get("school",""), r.get("color",""), r.get("size",""),
+                    int(r.get("incoming_qty") or 0),
+                    int(r.get("sold_total_qty") or 0),
+                    int(r.get("remaining_total_qty") or 0),
+                    int(r.get("reserved_qty") or 0),
+                )
             )
         apply_zebra_tags(self.table)
-        s = _summarize_movement_rows(rows)
+        s = {
+            "n": len(rows),
+            "incoming_qty": sum(int(r.get("incoming_qty") or 0) for r in rows),
+            "sold_total_qty": sum(int(r.get("sold_total_qty") or 0) for r in rows),
+            "reserved_qty": sum(int(r.get("reserved_qty") or 0) for r in rows),
+            "remaining_total_qty": sum(int(r.get("remaining_total_qty") or 0) for r in rows),
+        }
         self._summary_var.set(
-            f"عدد الحركات: {s['n']}  |  "
-            f"إجمالي كمية الوارد: {s['qty_in']}  |  "
-            f"إجمالي كمية المنصرف (بيع/مصنع): {s['qty_out']}  |  "
-            f"تسويات سلبية (كمية): {s['qty_adj_out']}  |  "
-            f"مرتجعات واردة (كمية): {s['qty_return_in']}  |  "
-            f"حجوزات (كمية): {s['qty_reserve']}\n"
-            f"قيمة المنصرف (كمية×سعر الحركة): {s['val_out']:.2f}  |  "
-            f"تحصيل تسليم حجوزات: {s['deliver_cash']:.2f}  |  "
-            f"إجمالي الدخل (منصرف + تحصيل تسليم): {s['income_moves']:.2f}"
+            f"عدد المنتجات المعروضة: {s['n']}  |  "
+            f"إجمالي الوارد: {s['incoming_qty']}  |  "
+            f"إجمالي المباع: {s['sold_total_qty']}  |  "
+            f"إجمالي المتبقي (المخزن + الفروع): {s['remaining_total_qty']}  |  "
+            f"إجمالي الحجوزات: {s['reserved_qty']}"
         )
 
     def _clear(self):
-        self.customer.set("")         # NEW
         for w in (self.ftype, self.fsch, self.fclr, self.fsiz):
             w.set("")
         self.df.set("")               # DateField
@@ -8370,7 +8545,7 @@ class MovementsWindow(tk.Toplevel):
 
 
     def _export(self):
-        rows = self.db.list_movements(self._filters())
+        rows = self.db.list_movement_item_totals(self._filters())
         if not rows:
             messagebox.showwarning("فارغ", "لا توجد صفوف للتصدير.", parent=self)
             return
@@ -8378,24 +8553,168 @@ class MovementsWindow(tk.Toplevel):
             title="تصدير الحركات إلى إكسل",
             defaultextension=".xlsx",
             filetypes=[("Excel Workbook", "*.xlsx"), ("Excel 97-2003 XML", "*.xls"), ("All files", "*.*")],
-            initialfile=f"movements_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            initialfile=f"movement_totals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
             parent=self,
         )
         if not path:
             return
-        headers = ["id","ts","direction","item_type","school","color","size","warehouse_no","package_no","unit_price","qty","note","bill_id","stock_id","has_badge"]
+        headers = [
+            "item_type", "school", "color", "size",
+            "incoming_qty", "sold_total_qty", "remaining_total_qty", "reserved_qty",
+        ]
         table = [[
-            m.get("id"), m.get("ts"), m.get("direction"),
             m.get("item_type",""), m.get("school",""), m.get("color",""), m.get("size",""),
-            m.get("warehouse_no",""), m.get("package_no",""), m.get("unit_price",""),
-            m.get("qty"), m.get("note",""), m.get("bill_id"), m.get("stock_id"),
-            ("✓" if int(m.get("has_badge") or 0) else "")
+            int(m.get("incoming_qty") or 0),
+            int(m.get("sold_total_qty") or 0),
+            int(m.get("remaining_total_qty") or 0),
+            int(m.get("reserved_qty") or 0),
         ] for m in rows]
         try:
             export_to_excel(path, headers, table)
             show_toast(self, "تم حفظ الحركات إلى إكسل بنجاح")
         except Exception as ex:
             messagebox.showerror("فشل التصدير", str(ex), parent=self)
+
+    def _print_report(self):
+        rows = self.db.list_movement_item_totals(self._filters())
+        if not rows:
+            messagebox.showwarning("فارغ", "لا توجد صفوف للطباعة.", parent=self)
+            return
+
+        def _h(v: Any) -> str:
+            s = str(v if v is not None else "")
+            return (
+                s.replace("&", "&amp;")
+                 .replace("<", "&lt;")
+                 .replace(">", "&gt;")
+                 .replace('"', "&quot;")
+            )
+
+        f = self._filters()
+        filter_bits = []
+        for label, key in (
+            ("النوع", "item_type"),
+            ("المدرسة", "school"),
+            ("اللون", "color"),
+            ("المقاس", "size"),
+            ("من", "date_from"),
+            ("إلى", "date_to"),
+            ("بحث", "text"),
+        ):
+            val = str(f.get(key) or "").strip()
+            if val:
+                filter_bits.append(f"{label}: {_h(val)}")
+        filters_html = " | ".join(filter_bits) if filter_bits else "بدون فلاتر"
+
+        totals = {
+            "incoming": sum(int(r.get("incoming_qty") or 0) for r in rows),
+            "sold": sum(int(r.get("sold_total_qty") or 0) for r in rows),
+            "remaining": sum(int(r.get("remaining_total_qty") or 0) for r in rows),
+            "reserved": sum(int(r.get("reserved_qty") or 0) for r in rows),
+        }
+
+        tr_html = []
+        for r in rows:
+            tr_html.append(
+                "<tr>"
+                f"<td>{_h(r.get('item_type',''))}</td>"
+                f"<td>{_h(r.get('school',''))}</td>"
+                f"<td>{_h(r.get('color',''))}</td>"
+                f"<td>{_h(r.get('size',''))}</td>"
+                f"<td class='num'>{int(r.get('incoming_qty') or 0)}</td>"
+                f"<td class='num'>{int(r.get('sold_total_qty') or 0)}</td>"
+                f"<td class='num'>{int(r.get('remaining_total_qty') or 0)}</td>"
+                f"<td class='num'>{int(r.get('reserved_qty') or 0)}</td>"
+                "</tr>"
+            )
+
+        html = f"""<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<title>تقرير حركة الأصناف - تجميعي</title>
+<style>
+@page {{ size: A4 landscape; margin: 10mm; }}
+* {{ box-sizing: border-box; }}
+body {{
+  margin: 0;
+  font-family: "Segoe UI", Tahoma, Arial, "Noto Sans Arabic", sans-serif;
+  color: #0f172a;
+  direction: rtl;
+}}
+.wrap {{ padding: 8px; }}
+.title {{ font-size: 20px; font-weight: 700; margin-bottom: 4px; }}
+.meta {{ font-size: 12px; color: #334155; margin-bottom: 3px; }}
+.summary {{
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  padding: 8px;
+  margin: 8px 0 10px;
+  font-weight: 600;
+  font-size: 13px;
+}}
+table {{
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+}}
+th, td {{
+  border: 1px solid #64748b;
+  padding: 6px 4px;
+  text-align: center;
+  vertical-align: middle;
+  word-wrap: break-word;
+}}
+th {{
+  background: #e2e8f0;
+  font-weight: 700;
+}}
+tbody tr:nth-child(even) {{ background: #f8fafc; }}
+.num {{ font-variant-numeric: tabular-nums; }}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="title">تقرير حركة الأصناف (تجميعي)</div>
+    <div class="meta">وقت التقرير: {_h(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))}</div>
+    <div class="meta">الفلاتر: {filters_html}</div>
+    <div class="summary">
+      عدد المنتجات: {len(rows)} |
+      إجمالي الوارد: {totals['incoming']} |
+      إجمالي المباع: {totals['sold']} |
+      إجمالي المتبقي: {totals['remaining']} |
+      إجمالي الحجوزات: {totals['reserved']}
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>النوع</th>
+          <th>المدرسة</th>
+          <th>اللون</th>
+          <th>المقاس</th>
+          <th>وارد</th>
+          <th>مباع</th>
+          <th>متبقي</th>
+          <th>حجوزات</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(tr_html)}
+      </tbody>
+    </table>
+  </div>
+</body>
+</html>
+"""
+
+        path = os.path.join(
+            tempfile.gettempdir(),
+            f"movement_totals_print_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+        )
+        with open(path, "w", encoding="utf-8") as fobj:
+            fobj.write(html)
+        _print_html_auto(path, copies=1, parent=self)
 
 class AdminWindow(tk.Toplevel):
     """
@@ -9598,6 +9917,183 @@ class DashboardFrame(ttk.Frame):
             pass
 
 
+class SyncDiagnosticsFrame(ttk.Frame):
+    """Dedicated sync diagnostics tab (branch health + top exceptions)."""
+    def __init__(self, master, db: SqliteDatabase, app=None):
+        super().__init__(master, padding=10)
+        self.db = db
+        self.app = app
+        self._build()
+        self._refresh()
+
+    def _build(self):
+        ttk.Label(self, text="تشخيص المزامنة", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 8))
+
+        self._sync_summary_var = tk.StringVar(value="")
+        ttk.Label(self, textvariable=self._sync_summary_var).pack(fill=tk.X, pady=(0, 6))
+
+        act = ttk.Frame(self)
+        act.pack(fill=tk.X, pady=(0, 6))
+        ttk.Button(
+            act,
+            text="مزامنة الآن",
+            command=(lambda: self.app._open_sync_dialog()) if self.app else None,
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Button(
+            act,
+            text="طابور الفروع",
+            command=(lambda: self.app._open_branch_inventory_queue()) if self.app else None,
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Button(
+            act,
+            text="مرآة حجوزات الفروع",
+            command=(lambda: self.app._open_pos_reservations_mirror()) if self.app else None,
+        ).pack(side=tk.LEFT, padx=2)
+
+        health_fr = ttk.LabelFrame(self, text="صحة الفروع")
+        health_fr.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        self.sync_tree = ttk.Treeview(
+            health_fr,
+            columns=("branch", "status", "last_snapshot", "age_min", "rows", "value", "sync_errors"),
+            show="headings",
+            height=8,
+        )
+        for col, txt, w in [
+            ("branch", "الفرع", 180),
+            ("status", "الحالة", 100),
+            ("last_snapshot", "آخر لقطة", 190),
+            ("age_min", "عمر اللقطة (د)", 110),
+            ("rows", "الصفوف", 90),
+            ("value", "القيمة", 120),
+            ("sync_errors", "أخطاء مزامنة", 120),
+        ]:
+            self.sync_tree.heading(col, text=txt)
+            self.sync_tree.column(col, width=w, anchor="center")
+        self.sync_tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        add_context_menu(self.sync_tree)
+        _bind_mousewheel(self.sync_tree)
+
+        ex_fr = ttk.LabelFrame(self, text="استثناءات المزامنة (أعلى الأسباب)")
+        ex_fr.pack(fill=tk.BOTH, expand=False)
+        self.sync_ex_tree = ttk.Treeview(
+            ex_fr,
+            columns=("etype", "count", "last_error"),
+            show="headings",
+            height=6,
+        )
+        for col, txt, w in [
+            ("etype", "نوع الحدث", 220),
+            ("count", "عدد الأخطاء", 100),
+            ("last_error", "آخر خطأ", 760),
+        ]:
+            self.sync_ex_tree.heading(col, text=txt)
+            self.sync_ex_tree.column(col, width=w, anchor="center")
+        self.sync_ex_tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        add_context_menu(self.sync_ex_tree)
+        _bind_mousewheel(self.sync_ex_tree)
+
+    def _refresh(self):
+        try:
+            cur = self.db.conn.cursor()
+
+            self.sync_tree.delete(*self.sync_tree.get_children())
+            q = """
+                SELECT
+                    COALESCE(kd.device_name, pm.source_device) AS branch_name,
+                    pm.snapshot_at,
+                    pm.row_count,
+                    pm.total_value
+                FROM pos_stocks_snapshot_meta pm
+                LEFT JOIN known_devices kd
+                    ON kd.device_name = pm.source_device
+                    OR kd.device_uuid = pm.source_device
+                ORDER BY branch_name
+            """
+            rows = cur.execute(q).fetchall()
+            ok_count = 0
+            warn_count = 0
+            critical_count = 0
+            for r in rows:
+                snap = str(r[1] or "")
+                age_min: Optional[int] = None
+                if snap:
+                    try:
+                        dt = datetime.fromisoformat(snap.replace("Z", "+00:00"))
+                        age_min = max(0, int((datetime.now(dt.tzinfo) - dt).total_seconds() // 60))
+                    except Exception:
+                        age_min = None
+                if age_min is None:
+                    status = "غير معروف"
+                    warn_count += 1
+                elif age_min >= 60:
+                    status = "حرج"
+                    critical_count += 1
+                elif age_min >= 15:
+                    status = "تحذير"
+                    warn_count += 1
+                else:
+                    status = "جيد"
+                    ok_count += 1
+                self.sync_tree.insert(
+                    "",
+                    tk.END,
+                    values=(
+                        r[0] or "",
+                        status,
+                        snap,
+                        age_min if age_min is not None else "",
+                        int(r[2] or 0),
+                        f"{float(r[3] or 0.0):,.2f}",
+                        "—",
+                    ),
+                )
+            apply_zebra_tags(self.sync_tree)
+
+            outbox_pending = 0
+            inbox_errors = 0
+            queue_pending = 0
+            try:
+                outbox_pending = int(cur.execute("SELECT COUNT(*) FROM sync_outbox WHERE status='pending'").fetchone()[0] or 0)
+                inbox_errors = int(cur.execute("SELECT COUNT(*) FROM sync_inbox WHERE apply_status='error'").fetchone()[0] or 0)
+                queue_pending = int(cur.execute("SELECT COUNT(*) FROM branch_inventory_queue WHERE status='PENDING'").fetchone()[0] or 0)
+            except Exception:
+                pass
+            self._sync_summary_var.set(
+                f"فروع سليمة: {ok_count}  |  تحذير: {warn_count}  |  حرج: {critical_count}  |  "
+                f"أحداث صادرة قيد الانتظار: {outbox_pending}  |  أخطاء تطبيق وارد: {inbox_errors}  |  "
+                f"طابور الفرع (معلّق): {queue_pending}"
+            )
+
+            self.sync_ex_tree.delete(*self.sync_ex_tree.get_children())
+            try:
+                ex_rows = cur.execute(
+                    """
+                    SELECT event_type, COUNT(*) AS c, MAX(COALESCE(apply_error,'')) AS last_error
+                    FROM sync_inbox
+                    WHERE apply_status='error'
+                    GROUP BY event_type
+                    ORDER BY c DESC, event_type
+                    LIMIT 8
+                    """
+                ).fetchall()
+            except Exception:
+                ex_rows = []
+            for er in ex_rows:
+                self.sync_ex_tree.insert(
+                    "",
+                    tk.END,
+                    values=(
+                        er[0] or "",
+                        int(er[1] or 0),
+                        str(er[2] or "")[:350],
+                    ),
+                )
+            apply_zebra_tags(self.sync_ex_tree)
+            cur.close()
+        except Exception:
+            pass
+
+
 # ------------------- Statistics Frame -------------------
 
 class StatisticsFrame(ttk.Frame):
@@ -10353,6 +10849,7 @@ class WarehouseApp(tk.Tk):
         self.bind("<F4>", lambda e: self._open_bills_history())
         self.bind("<F5>", lambda e: self._refresh_current_tab())
         self.bind("<F9>", lambda e: self._switch_tab("dashboard"))
+        self.bind("<F11>", lambda e: self._switch_tab("sync_diagnostics"))
         self.bind("<F10>", lambda e: self._switch_tab("statistics"))
         self.bind("<Control-i>", lambda e: self._open_inventory())
         self.bind("<Control-p>", lambda e: self._open_bills_history())
@@ -10423,7 +10920,8 @@ class WarehouseApp(tk.Tk):
             "dashboard": 0,
             "outcome": 1,
             "income": 2,
-            "statistics": 3,
+            "sync_diagnostics": 3,
+            "statistics": 4,
         }
         idx = tab_map.get(name)
         if idx is not None and hasattr(self, "notebook"):
@@ -10438,7 +10936,9 @@ class WarehouseApp(tk.Tk):
             idx = self.notebook.index(self.notebook.select())
             if idx == 0 and hasattr(self, "_dashboard"):
                 self._dashboard._refresh()
-            elif idx == 3 and hasattr(self, "_statistics"):
+            elif idx == 3 and hasattr(self, "_sync_diagnostics"):
+                self._sync_diagnostics._refresh()
+            elif idx == 4 and hasattr(self, "_statistics"):
                 self._statistics._refresh()
         except Exception:
             pass
@@ -10582,6 +11082,7 @@ class WarehouseApp(tk.Tk):
         shortcuts_menu.add_command(label="F4  - الفواتير", state="disabled")
         shortcuts_menu.add_command(label="F5  - تحديث", state="disabled")
         shortcuts_menu.add_command(label="F9  - لوحة التحكم", state="disabled")
+        shortcuts_menu.add_command(label="F11 - تشخيص المزامنة", state="disabled")
         shortcuts_menu.add_command(label="F10 - الإحصائيات", state="disabled")
         menubar.add_cascade(label="اختصارات", menu=shortcuts_menu)
 
@@ -10623,7 +11124,8 @@ class WarehouseApp(tk.Tk):
             ("لوحة التحكم", 0),
             ("المنصرف", 1),
             ("الوارد", 2),
-            ("الإحصائيات", 3),
+            ("تشخيص المزامنة", 3),
+            ("الإحصائيات", 4),
         ]
         for text, idx in nav_items:
             b = tk.Button(nav, text=f"  {text}  ", bg=_HBG2, fg=_UI["TEXT_DIM"],
@@ -10678,6 +11180,9 @@ class WarehouseApp(tk.Tk):
         self._income = IncomeFrame(self.notebook, self.db)
         self.notebook.add(self._income, text="  الوارد  (F1)  ")
 
+        self._sync_diagnostics = SyncDiagnosticsFrame(self.notebook, self.db, app=self)
+        self.notebook.add(self._sync_diagnostics, text="  تشخيص المزامنة  (F11)  ")
+
         self._statistics = StatisticsFrame(self.notebook, self.db)
         self.notebook.add(self._statistics, text="  الإحصائيات  (F10)  ")
 
@@ -10691,6 +11196,8 @@ class WarehouseApp(tk.Tk):
                 if idx == 0:
                     self._dashboard._refresh()
                 elif idx == 3:
+                    self._sync_diagnostics._refresh()
+                elif idx == 4:
                     self._statistics._refresh()
             except Exception:
                 pass

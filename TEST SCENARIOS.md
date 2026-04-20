@@ -952,6 +952,21 @@ Expected:
 - selection is accepted
 - downstream save/transfer works
 
+### `WH-05` Warehouse movements monitor is aggregated by product
+
+Steps:
+
+1. Open warehouse **الحركات** window.
+2. Confirm grid columns are product-level and aggregated (`النوع`, `المدرسة`, `اللون`, `المقاس`, `وارد`, `مباع`, `متبقي`, `حجوزات`).
+3. Apply filters (type/school/color/size/date/text) and press **تحديث**.
+4. Verify each row represents one product specs combination, not raw movement rows.
+
+Expected:
+
+- results are aggregated per product specs.
+- footer totals match visible rows.
+- export file uses the same aggregated columns.
+
 ## 16. Warehouse Branch UI Tests
 
 ### `BR-01` Branch list includes approved POS names
@@ -1046,6 +1061,23 @@ Expected:
 - lower detail panel fills with categories (sales, returns, voids, exchange, reservation buckets) for that day.
 - filtering by POS **name** matches rows stored under that device’s UUID (or name), same resolution rules as reservation mirror.
 - numbers are plausible for the test activity you created.
+
+### `BR-08` Warehouse sync diagnostics tab visibility and refresh
+
+Steps:
+
+1. Open warehouse main window.
+2. Switch to tab **تشخيص المزامنة** (or press shortcut `F11`).
+3. Confirm both sections render:
+   - branch health grid,
+   - top sync exceptions grid.
+4. Press **تحديث** / run one sync cycle and return to the tab.
+
+Expected:
+
+- diagnostics tab opens without errors.
+- branch health rows update according to latest mirrored snapshot state.
+- exception list shows top apply errors when present; stays empty when no errors exist.
 
 ## 17. Sync Detail And Status Tests
 

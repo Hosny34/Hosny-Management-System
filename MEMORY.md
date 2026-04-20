@@ -1147,3 +1147,22 @@ Runbook updates:
 - `Read Me.txt` now includes an `AUTH / SCOPE SMOKE CHECK` section with command + expected output.
 - Sync notes explicitly document staggered ~10-minute periodic sync across apps.
 - Short practical rules now explicitly include `STOCK-MONITOR` as call-center read-only monitor identity.
+
+## Update (2026-04): Warehouse diagnostics tab + movement monitor semantics
+
+Warehouse app (`ادارة المخازن/HosnyWarehouse.py`) now includes:
+
+- A dedicated main tab **تشخيص المزامنة** (shortcut `F11`) in addition to dashboard widgets.
+- Warehouse movements window switched from raw movement log rows to **aggregated per-product monitor** with columns:
+  - `وارد`, `مباع`, `متبقي`, `حجوزات` (plus product specs columns).
+- Business semantics enforced in monitor:
+  - branch shipments are **not** counted as final sales,
+  - warehouse sales are counted only for non-branch customers,
+  - remaining is total warehouse stock + mirrored branch stock.
+
+Docs updated:
+
+- `Read Me.txt` latest-fix notes updated with diagnostics tab + movement monitor semantics.
+- `TEST SCENARIOS.md` updated with:
+  - `WH-05` aggregated warehouse movement monitor test,
+  - `BR-08` dedicated diagnostics tab visibility/refresh test.
