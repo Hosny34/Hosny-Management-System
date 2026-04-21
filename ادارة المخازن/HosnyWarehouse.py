@@ -8,6 +8,7 @@ import sys, subprocess
 import sqlite3
 import time
 import tempfile
+import unicodedata
 import webbrowser
 from dataclasses import dataclass
 from datetime import datetime, date   # +date for calendar
@@ -30,6 +31,15 @@ DEFAULT_BRANCH_POS_NAMES = [
     "POS-BAH",
     "POS-CEN",
 ]
+BRANCH_UI_NAME_BY_DEVICE = {
+    "POS-ZAY": "فرع زايد",
+    "POS-OCT": "فرع اكتوبر",
+    "POS-BAH": "فرع بهتيم",
+    "POS-CEN": "فرع السنتر",
+    "POS-OBO": "فرع العبور",
+    "POS-GESR": "فرع جسر السويس",
+}
+BRANCH_DEVICE_BY_UI_NAME = {v: k for k, v in BRANCH_UI_NAME_BY_DEVICE.items()}
 WAREHOUSE_NUMBER_VALUES = ["1", "2", "3", "4", "5", "6", "7"]
 WAREHOUSE_NUMBER_LABELS = {
     "1": "مخزن 1",
@@ -49,7 +59,57 @@ def normalize_branch_customer_name(value: Any) -> Optional[str]:
         return None
     if raw.startswith("فرع:"):
         raw = raw.split(":", 1)[1].strip()
-    return raw if raw in DEFAULT_BRANCH_POS_NAMES else None
+    if raw in DEFAULT_BRANCH_POS_NAMES:
+        return raw
+    return BRANCH_DEVICE_BY_UI_NAME.get(raw)
+
+
+def canonical_branch_device_name(value: Any, known_devices: Optional[Sequence[str]] = None) -> Optional[str]:
+    """Resolve any branch-facing label to canonical POS device name.
+
+    Accepts internal names (POS-*), Arabic UI names, and mixed labels like:
+    "فرع: فرع زايد (POS-ZAY)".
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    direct = normalize_branch_customer_name(raw)
+    if direct:
+        return direct
+    if raw.startswith("فرع:"):
+        raw = raw.split(":", 1)[1].strip()
+    if "(" in raw and ")" in raw:
+        inside = raw.rsplit("(", 1)[1].split(")", 1)[0].strip()
+        if inside in DEFAULT_BRANCH_POS_NAMES:
+            return inside
+        if known_devices:
+            for d in known_devices:
+                if str(d or "").strip().upper() == inside.upper():
+                    return str(d or "").strip()
+    if known_devices:
+        for d in known_devices:
+            clean = str(d or "").strip()
+            if not clean:
+                continue
+            if clean.upper() == raw.upper():
+                return clean
+    return None
+
+
+def branch_display_name(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return BRANCH_UI_NAME_BY_DEVICE.get(raw, raw)
+
+
+def branch_customer_label(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("فرع:"):
+        raw = raw.split(":", 1)[1].strip()
+    return f"فرع: {branch_display_name(raw)}"
 
 
 def warehouse_display_label(value: Any) -> str:
@@ -385,6 +445,20 @@ def _html(s: str) -> str:
 _AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
 def _normalize_size_label(s: str) -> str:
     return (s or "").strip().translate(_AR_DIGITS).upper()
+
+def _normalize_spec_label(s: Any) -> str:
+    """Normalize free-text spec labels for stable grouping/display.
+
+    Handles hidden Unicode differences that make labels look identical
+    in UI but different in DB keys (ZW chars, tatweel, diacritics, etc.).
+    """
+    txt = unicodedata.normalize("NFKC", str(s or ""))
+    # Drop invisible direction/zero-width artifacts that often come from copy/paste.
+    txt = txt.replace("\u200c", "").replace("\u200d", "").replace("\u200e", "").replace("\u200f", "").replace("\ufeff", "")
+    # Drop Arabic tatweel and combining marks (tashkeel/harakat).
+    txt = txt.replace("\u0640", "")
+    txt = "".join(ch for ch in txt if unicodedata.category(ch) != "Mn")
+    return " ".join(txt.strip().split())
 
 
 
@@ -1216,16 +1290,71 @@ class SqliteDatabase:
             if count == 0:
                 return 0
 
+            old_specs = self.conn.execute(
+                f"SELECT DISTINCT item_type, school, color, size FROM stocks WHERE id IN ({ph})",
+                ids,
+            ).fetchall()
+
             self.conn.execute(
                 f"UPDATE stocks SET {', '.join(sets)} WHERE id IN ({ph})",
                 (*args, *ids),
             )
 
-            # record new values in history so they appear in autocompletes
+            self._cascade_spec_rename(old_specs, changes)
+
             self._upsert_history(changes)
         self.cleanup_unused_specs()
         return count
 
+
+    def _cascade_spec_rename(
+        self,
+        old_specs: Sequence[Any],
+        changes: Dict[str, Any],
+    ) -> None:
+        """Propagate a completed spec rename from `stocks` to historical tables.
+
+        For each old (item_type, school, color, size) tuple we just rewrote,
+        if no `stocks` row still references that tuple, it was a full rename —
+        cascade the same field changes to `movements`, `bill_items`, and
+        (best-effort) the POS mirror tables so audit views stay consistent.
+        """
+        if not changes or not old_specs:
+            return
+        sets_parts: List[str] = []
+        new_vals: List[Any] = []
+        for fld in ("item_type", "school", "color", "size"):
+            if fld in changes:
+                sets_parts.append(f"{fld} = ?")
+                new_vals.append(changes[fld])
+        if not sets_parts:
+            return
+        set_sql = ", ".join(sets_parts)
+
+        for row in old_specs:
+            old_it = row["item_type"] if isinstance(row, sqlite3.Row) else row[0]
+            old_sc = row["school"]    if isinstance(row, sqlite3.Row) else row[1]
+            old_cl = row["color"]     if isinstance(row, sqlite3.Row) else row[2]
+            old_sz = row["size"]      if isinstance(row, sqlite3.Row) else row[3]
+
+            still = self.conn.execute(
+                "SELECT 1 FROM stocks WHERE item_type=? AND school=? AND color=? AND size=? LIMIT 1",
+                (old_it, old_sc, old_cl, old_sz),
+            ).fetchone()
+            if still:
+                continue
+
+            where_sql = "item_type=? AND school=? AND color=? AND size=?"
+            where_args = (old_it, old_sc, old_cl, old_sz)
+
+            for tbl in ("movements", "bill_items", "pos_stocks_mirror", "pos_reservations_mirror"):
+                try:
+                    self.conn.execute(
+                        f"UPDATE {tbl} SET {set_sql} WHERE {where_sql}",
+                        (*new_vals, *where_args),
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
     def update_specs_in_package(
         self,
@@ -1276,12 +1405,19 @@ class SqliteDatabase:
             if count == 0:
                 return 0
 
+            old_specs = self.conn.execute(
+                "SELECT DISTINCT item_type, school, color, size FROM stocks "
+                "WHERE warehouse_no=? AND package_no=?",
+                (w, p),
+            ).fetchall()
+
             self.conn.execute(
                 f"UPDATE stocks SET {', '.join(sets)} WHERE warehouse_no=? AND package_no=?",
                 (*args, w, p),
             )
 
-            # record new values in history so they appear in autocompletes
+            self._cascade_spec_rename(old_specs, changes)
+
             self._upsert_history(changes)
         self.cleanup_unused_specs()
         return count
@@ -3139,6 +3275,137 @@ class SqliteDatabase:
         except sqlite3.OperationalError:
             return []
 
+    def list_branch_cycle_reconciliation(
+        self,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Per-branch cycle summary:
+        - shipped bill value from warehouse
+        - received cash net from POS financial ledger
+        - current branch stock value from latest snapshot
+        - cycle gap = shipped - cash - stock_value
+        """
+        def _in_range(ts: str) -> bool:
+            d = (str(ts or "").strip()[:10] if ts else "")
+            if not d:
+                return False
+            if date_from and d < date_from[:10]:
+                return False
+            if date_to and d > date_to[:10]:
+                return False
+            return True
+
+        out: Dict[str, Dict[str, Any]] = {}
+        approved = list(DEFAULT_BRANCH_POS_NAMES)
+        for dev in approved:
+            out[dev] = {
+                "branch_device": dev,
+                "branch_name": branch_display_name(dev),
+                "shipment_bills_count": 0,
+                "shipment_qty": 0,
+                "shipment_value": 0.0,
+                "cash_net": 0.0,
+                "stock_qty": 0,
+                "stock_value": 0.0,
+                "cycle_gap": 0.0,
+            }
+
+        # 1) Warehouse branch shipments
+        try:
+            bills = self.list_bills()
+        except Exception:
+            bills = []
+        for b in bills:
+            if (b.get("status") or "CONFIRMED") != "CONFIRMED":
+                continue
+            if not _in_range(str(b.get("created_at") or "")):
+                continue
+            branch_dev = normalize_branch_customer_name(b.get("customer"))
+            if not branch_dev or branch_dev not in out:
+                continue
+            bid = int(b.get("id") or 0)
+            lines = self.list_bill_items(bid)
+            bucket = out[branch_dev]
+            bucket["shipment_bills_count"] = int(bucket["shipment_bills_count"]) + 1
+            for ln in lines:
+                q = int(ln.get("qty") or 0)
+                v = float(ln.get("line_total") or 0.0)
+                bucket["shipment_qty"] = int(bucket["shipment_qty"]) + q
+                bucket["shipment_value"] = float(bucket["shipment_value"]) + v
+
+        # 2) Net cash received from branch POS ledgers
+        for dev in approved:
+            frag, frag_args = self.resolve_pos_mirror_device_sql_filter(dev)
+            sql = "SELECT COALESCE(SUM(amount),0) FROM pos_financial_ledger WHERE 1=1"
+            args: List[Any] = []
+            if frag:
+                sql += frag
+                args.extend(frag_args)
+            if date_from:
+                sql += " AND day >= ?"
+                args.append(date_from[:10])
+            if date_to:
+                sql += " AND day <= ?"
+                args.append(date_to[:10])
+            try:
+                row = self.conn.execute(sql, args).fetchone()
+                out[dev]["cash_net"] = float((row[0] if row else 0.0) or 0.0)
+            except sqlite3.OperationalError:
+                out[dev]["cash_net"] = 0.0
+
+        # 3) Current stock value from latest snapshot source per branch
+        latest_src: Dict[str, str] = {}
+        try:
+            snaps = self.conn.execute(
+                """
+                SELECT pm.source_device, pm.snapshot_at,
+                       COALESCE(kd.device_name, pm.source_device) AS branch_name
+                FROM pos_stocks_snapshot_meta pm
+                LEFT JOIN known_devices kd
+                    ON kd.device_name = pm.source_device
+                    OR kd.device_uuid = pm.source_device
+                """
+            ).fetchall()
+            latest_at: Dict[str, str] = {}
+            for r in snaps:
+                src = str(r[0] or "").strip()
+                snap_at = str(r[1] or "").strip()
+                branch = str(r[2] or "").strip()
+                if branch not in out:
+                    continue
+                if branch not in latest_at or snap_at > latest_at[branch]:
+                    latest_at[branch] = snap_at
+                    latest_src[branch] = src
+        except sqlite3.OperationalError:
+            latest_src = {}
+
+        for dev in approved:
+            src = latest_src.get(dev)
+            if not src:
+                continue
+            try:
+                row = self.conn.execute(
+                    """
+                    SELECT COALESCE(SUM(count),0), COALESCE(SUM(count*unit_price),0)
+                    FROM pos_stocks_mirror
+                    WHERE source_device = ?
+                    """,
+                    (src,),
+                ).fetchone()
+                out[dev]["stock_qty"] = int((row[0] if row else 0) or 0)
+                out[dev]["stock_value"] = float((row[1] if row else 0.0) or 0.0)
+            except sqlite3.OperationalError:
+                pass
+
+        for dev in approved:
+            b = out[dev]
+            b["cycle_gap"] = float(b["shipment_value"]) - float(b["cash_net"]) - float(b["stock_value"])
+
+        rows = list(out.values())
+        rows.sort(key=lambda r: str(r.get("branch_name") or ""))
+        return rows
+
     def get_branch_inventory_queue_item(self, queue_id: int) -> Optional[Dict[str, Any]]:
         row = self.conn.execute(
             """
@@ -3335,6 +3602,15 @@ class SqliteDatabase:
         except Exception:
             pass
 
+        known = []
+        try:
+            known = self.list_known_pos_device_names() or []
+        except Exception:
+            known = []
+        canonical_target = canonical_branch_device_name(target_name, known) or (target_name or "").strip()
+        if not canonical_target:
+            raise ValueError("اسم الفرع المستهدف غير صالح.")
+
         payload = {
             "shipment_uuid":   shipment_uuid,
             "from_device":     device_name or "WAREHOUSE-MAIN",
@@ -3342,7 +3618,7 @@ class SqliteDatabase:
             "items":           lines,
             "size_profiles":   self._branch_shipment_size_profiles(lines),
         }
-        target_scope = f"pos:{target_name}"
+        target_scope = f"pos:{canonical_target}"
 
         event_uuid = (_new_uuid() if _new_uuid else _fallback_uuid())
         try:
@@ -3615,10 +3891,10 @@ class SqliteDatabase:
 
         def _to_key(row: Any) -> Tuple[str, str, str, str]:
             return (
-                str(row[0] or "").strip(),
-                str(row[1] or "").strip(),
-                str(row[2] or "").strip(),
-                str(row[3] or "").strip(),
+                _normalize_spec_label(row[0]),
+                _normalize_spec_label(row[1]),
+                _normalize_spec_label(row[2]),
+                _normalize_size_label(str(row[3] or "")),
             )
 
         def _spec_match(key: Tuple[str, str, str, str]) -> bool:
@@ -3630,6 +3906,10 @@ class SqliteDatabase:
             )
             for fld, actual in checks:
                 want = str(filters.get(fld) or "").strip()
+                if fld == "size":
+                    want = _normalize_size_label(want)
+                else:
+                    want = _normalize_spec_label(want)
                 if want and actual.lower() != want.lower():
                     return False
             txt = str(filters.get("text") or "").strip().lower()
@@ -3669,20 +3949,60 @@ class SqliteDatabase:
             key = _to_key(r)
             _bucket(key)["warehouse_qty"] = int(r[4] or 0)
 
-        # Current branch stock mirror
+        # Current branch stock mirror (deduplicated by logical branch):
+        # We choose ONE latest snapshot source per branch (canonical device),
+        # then aggregate mirror rows only from those selected sources.
+        # This avoids doubling when the same branch exists under both
+        # device_name and device_uuid in mirror history.
+        branch_spec_totals: Dict[Tuple[str, str, str, str], int] = {}
         try:
-            rows = cur.execute(
+            snaps = cur.execute(
                 """
-                SELECT item_type, school, color, size, COALESCE(SUM(count),0)
-                FROM pos_stocks_mirror
-                GROUP BY item_type, school, color, size
+                SELECT
+                    pm.source_device,
+                    pm.snapshot_at,
+                    COALESCE(kd.device_name, pm.source_device) AS canonical_branch
+                FROM pos_stocks_snapshot_meta pm
+                LEFT JOIN known_devices kd
+                    ON kd.device_name = pm.source_device
+                    OR kd.device_uuid = pm.source_device
                 """
             ).fetchall()
+            approved_branches = set(DEFAULT_BRANCH_POS_NAMES)
+            latest_source_by_branch: Dict[str, Tuple[str, str]] = {}
+            for rr in snaps:
+                src = str(rr[0] or "").strip()
+                snap_at = str(rr[1] or "").strip()
+                branch = str(rr[2] or "").strip()
+                if not src or not branch:
+                    continue
+                # Ignore unknown/test devices (e.g. POS-01) so movement monitor
+                # reflects only configured real branches.
+                if branch not in approved_branches:
+                    continue
+                prev = latest_source_by_branch.get(branch)
+                if prev is None or snap_at > prev[1]:
+                    latest_source_by_branch[branch] = (src, snap_at)
+
+            selected_sources = [v[0] for v in latest_source_by_branch.values()]
+            if selected_sources:
+                ph = ",".join("?" for _ in selected_sources)
+                raw_rows = cur.execute(
+                    f"""
+                    SELECT item_type, school, color, size, COALESCE(SUM(count),0) AS qty
+                    FROM pos_stocks_mirror
+                    WHERE source_device IN ({ph})
+                    GROUP BY item_type, school, color, size
+                    """,
+                    tuple(selected_sources),
+                ).fetchall()
+                for rr in raw_rows:
+                    key4 = _to_key(rr)
+                    branch_spec_totals[key4] = int(rr[4] or 0)
         except sqlite3.OperationalError:
-            rows = []
-        for r in rows:
-            key = _to_key(r)
-            _bucket(key)["branch_qty"] = int(r[4] or 0)
+            branch_spec_totals = {}
+        for key, qty in branch_spec_totals.items():
+            _bucket(key)["branch_qty"] = int(qty or 0)
 
         # Reserved qty mirrored from branches (active only)
         try:
@@ -3700,13 +4020,27 @@ class SqliteDatabase:
             key = _to_key(r)
             _bucket(key)["reserved_qty"] = int(r[4] or 0)
 
-        # Warehouse incoming movements (period-filtered)
+        # Warehouse incoming flow (period-filtered):
+        # - normal stock incoming movements (IN)
+        # - factory-direct sold lines (OUT_FACTORY, non-branch customer)
+        #   are counted as virtual incoming so per-item math stays coherent
+        #   in the movement monitor (incoming/sold/remaining).
         d_sql, d_args = _date_clause("m.ts")
         rows = cur.execute(
             f"""
             SELECT m.item_type, m.school, m.color, m.size, COALESCE(SUM(m.qty),0)
             FROM movements m
-            WHERE m.direction = 'IN'
+            LEFT JOIN bills b ON b.id = m.bill_id
+            WHERE (
+                    m.direction = 'IN'
+                 OR (
+                        m.direction = 'OUT_FACTORY'
+                    AND (
+                            b.id IS NULL
+                         OR LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))
+                        )
+                    )
+                  )
             {d_sql}
             GROUP BY m.item_type, m.school, m.color, m.size
             """,
@@ -5417,7 +5751,6 @@ class OutcomeFrame(ttk.Frame):
             # so the user can tell a shipment bill apart from a sale
             # bill at a glance. Picking one routes the bill through
             # Phase-3 STOCK_TRANSFER_OUT on save.
-            branch_prefix = "فرع: "
             pos_names = []
             try:
                 pos_names = self.db.list_known_pos_device_names() or []
@@ -5445,15 +5778,14 @@ class OutcomeFrame(ttk.Frame):
                 raw = (customer or "").strip()
                 if not raw:
                     continue
-                unprefixed = raw[len(branch_prefix):].strip() if raw.startswith(branch_prefix) else raw
-                if unprefixed in branch_set:
+                if normalize_branch_customer_name(raw):
                     continue
                 if raw in seen_customers:
                     continue
                 seen_customers.add(raw)
                 clean_customers.append(raw)
 
-            return [f"{branch_prefix}{n}" for n in branch_names] + clean_customers
+            return [branch_customer_label(n) for n in branch_names] + clean_customers
 
         self.customer.set_supplier(_customer_supplier)
         for ev in ("<FocusIn>", "<Button-1>", "<KeyRelease>"):
@@ -6338,17 +6670,17 @@ class OutcomeFrame(ttk.Frame):
             show_toast(self, "يرجى اختيار اسم عميل أولاً", bg="#dc2626")
             return
 
-        # Phase 3: "فرع: POS-01" → shipment to POS-01.
-        branch_prefix = "فرع: "
+        # Phase 3: "فرع: <branch ui name>" or raw device name → shipment.
         known_pos = set(self.db.list_known_pos_device_names() or [])
-        if customer_raw.startswith(branch_prefix):
-            target_pos = customer_raw[len(branch_prefix):].strip()
-            customer = customer_raw   # keep the label on the bill row
+        norm_target = canonical_branch_device_name(customer_raw, known_pos)
+        if norm_target:
+            target_pos = norm_target
+            customer = branch_customer_label(norm_target)
         elif customer_raw in known_pos:
             # Accept a raw device name too, not only the prefixed dropdown
             # value, so manually typed branch names still sync as shipments.
             target_pos = customer_raw
-            customer = customer_raw
+            customer = branch_customer_label(customer_raw)
         else:
             target_pos = None
             customer = customer_raw
@@ -9215,7 +9547,10 @@ class BranchInventoryQueueWindow(tk.Toplevel):
         names = self.db.list_known_pos_device_names()
         if row:
             names = [n for n in names if n != row.get("source_device")]
-        self._target_cb["values"] = names
+        ui_names = [branch_display_name(n) for n in names]
+        ui_to_dev = {branch_display_name(n): n for n in names}
+        self._target_ui_to_dev = ui_to_dev
+        self._target_cb["values"] = ui_names
 
         try:
             wh = int((self._wh_var.get() or "1").strip())
@@ -9225,10 +9560,11 @@ class BranchInventoryQueueWindow(tk.Toplevel):
             info = self.db.package_numbers_summary(wh)
             self._pkg_var.set(str(info.get("next") or 1))
 
-        if row and row.get("requested_target_device") in names:
-            self._target_var.set(row["requested_target_device"])
-        elif self._target_var.get() not in names:
-            self._target_var.set(names[0] if names else "")
+        req = branch_display_name(row.get("requested_target_device")) if row else ""
+        if row and req in ui_names:
+            self._target_var.set(req)
+        elif self._target_var.get() not in ui_names:
+            self._target_var.set(ui_names[0] if ui_names else "")
 
     def _refresh(self):
         rows = self.db.list_branch_inventory_queue(self._status.get() or None)
@@ -9238,8 +9574,8 @@ class BranchInventoryQueueWindow(tk.Toplevel):
             self._tree.insert(
                 "", tk.END, iid=str(row["id"]),
                 values=(
-                    row["id"], kind, row.get("source_device") or "",
-                    row.get("requested_target_device") or "", row.get("item_type") or "",
+                    row["id"], kind, branch_display_name(row.get("source_device") or ""),
+                    branch_display_name(row.get("requested_target_device") or ""), row.get("item_type") or "",
                     row.get("school") or "", row.get("color") or "", row.get("size") or "",
                     row.get("qty") or 0, f"{float(row.get('unit_price') or 0):.2f}",
                     row.get("status") or "", row.get("note") or "",
@@ -9289,13 +9625,14 @@ class BranchInventoryQueueWindow(tk.Toplevel):
         if queue_id is None:
             messagebox.showwarning("تنبيه", "اختر عنصرًا من القائمة أولاً.", parent=self)
             return
-        target = (self._target_var.get() or "").strip()
+        target_ui = (self._target_var.get() or "").strip()
+        target = getattr(self, "_target_ui_to_dev", {}).get(target_ui, target_ui)
         if not target:
             messagebox.showerror("بيانات ناقصة", "اختر الفرع الهدف أولاً.", parent=self)
             return
         try:
             self.db.reroute_branch_inventory_queue_item(queue_id, target, self._note_var.get())
-            show_toast(self, f"تم تحويل العنصر إلى الفرع {target}")
+            show_toast(self, f"تم تحويل العنصر إلى الفرع {branch_display_name(target)}")
             self._note_var.set("")
             self._refresh()
         except Exception as ex:
@@ -9464,10 +9801,13 @@ class BranchStockWindow(tk.Toplevel):
                 names.append(k[0])
 
         self._device_cb["values"] = names
+        self._device_ui_to_raw = {branch_display_name(n): n for n in names}
+        ui_names = [branch_display_name(n) for n in names]
+        self._device_cb["values"] = ui_names
         if names:
             current = self._device_var.get()
-            if current not in names:
-                self._device_var.set(names[0])
+            if current not in ui_names:
+                self._device_var.set(ui_names[0])
             self._reload_stock()
         else:
             self._device_var.set("")
@@ -9476,7 +9816,8 @@ class BranchStockWindow(tk.Toplevel):
             self._status_var.set("")
 
     def _reload_stock(self):
-        name = (self._device_var.get() or "").strip()
+        pick = (self._device_var.get() or "").strip()
+        name = getattr(self, "_device_ui_to_raw", {}).get(pick, pick)
         self._tree.delete(*self._tree.get_children())
         if not name:
             return
@@ -9858,7 +10199,7 @@ class DashboardFrame(ttk.Frame):
                     "",
                     tk.END,
                     values=(
-                        r[0] or "",
+                        branch_display_name(r[0] or ""),
                         status,
                         snap,
                         age_min if age_min is not None else "",
@@ -10038,7 +10379,7 @@ class SyncDiagnosticsFrame(ttk.Frame):
                     "",
                     tk.END,
                     values=(
-                        r[0] or "",
+                        branch_display_name(r[0] or ""),
                         status,
                         snap,
                         age_min if age_min is not None else "",
@@ -10818,6 +11159,92 @@ class PosBranchFinancialWindow(tk.Toplevel):
         apply_zebra_tags(self._det_tree)
 
 
+class BranchCycleSummaryWindow(tk.Toplevel):
+    """Per-branch cycle reconciliation: shipments vs cash vs current stock value."""
+
+    def __init__(self, master, db: "SqliteDatabase"):
+        super().__init__(master)
+        self.db = db
+        self.title("ملخص دورة الفروع")
+        self.geometry("1180x600")
+        self._build()
+
+    def _build(self):
+        top = ttk.Frame(self)
+        top.pack(fill=tk.X, padx=8, pady=8)
+        ttk.Label(top, text="من تاريخ:").pack(side=tk.RIGHT, padx=4)
+        self._df = tk.StringVar(value="")
+        ttk.Entry(top, textvariable=self._df, width=12).pack(side=tk.RIGHT)
+        ttk.Label(top, text="إلى:").pack(side=tk.RIGHT, padx=4)
+        self._dt = tk.StringVar(value="")
+        ttk.Entry(top, textvariable=self._dt, width=12).pack(side=tk.RIGHT)
+        ttk.Button(top, text="تحديث", command=self._refresh).pack(side=tk.LEFT)
+
+        cols = (
+            "branch", "bills", "ship_qty", "ship_value", "cash_net",
+            "stock_qty", "stock_value", "gap",
+        )
+        self._tree = ttk.Treeview(self, columns=cols, show="headings", height=19)
+        for col, txt, w in [
+            ("branch", "الفرع", 160),
+            ("bills", "عدد فواتير الشحن", 110),
+            ("ship_qty", "كمية الشحنات", 95),
+            ("ship_value", "قيمة الشحنات", 120),
+            ("cash_net", "صافي المتحصل", 110),
+            ("stock_qty", "كمية المخزون الحالي", 120),
+            ("stock_value", "قيمة المخزون الحالي", 130),
+            ("gap", "فجوة الدورة", 120),
+        ]:
+            self._tree.heading(col, text=txt)
+            self._tree.column(col, width=w, anchor="center")
+        wrap = ttk.Frame(self)
+        wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        ysb = ttk.Scrollbar(wrap, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=ysb.set)
+        self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ysb.pack(side=tk.RIGHT, fill=tk.Y)
+        _bind_mousewheel(self._tree)
+
+        self._sum = tk.StringVar(value="")
+        ttk.Label(self, textvariable=self._sum).pack(fill=tk.X, padx=10, pady=(0, 8))
+
+        self._refresh()
+
+    def _refresh(self):
+        self._tree.delete(*self._tree.get_children())
+        df = (self._df.get() or "").strip() or None
+        dt = (self._dt.get() or "").strip() or None
+        rows = self.db.list_branch_cycle_reconciliation(df, dt)
+        t_ship = 0.0
+        t_cash = 0.0
+        t_stock = 0.0
+        t_gap = 0.0
+        for r in rows:
+            t_ship += float(r.get("shipment_value") or 0.0)
+            t_cash += float(r.get("cash_net") or 0.0)
+            t_stock += float(r.get("stock_value") or 0.0)
+            t_gap += float(r.get("cycle_gap") or 0.0)
+            self._tree.insert(
+                "",
+                tk.END,
+                values=(
+                    r.get("branch_name") or "",
+                    int(r.get("shipment_bills_count") or 0),
+                    int(r.get("shipment_qty") or 0),
+                    f"{float(r.get('shipment_value') or 0.0):.2f}",
+                    f"{float(r.get('cash_net') or 0.0):.2f}",
+                    int(r.get("stock_qty") or 0),
+                    f"{float(r.get('stock_value') or 0.0):.2f}",
+                    f"{float(r.get('cycle_gap') or 0.0):.2f}",
+                ),
+            )
+        apply_zebra_tags(self._tree)
+        self._sum.set(
+            f"إجمالي قيمة الشحنات: {t_ship:.2f}  |  إجمالي صافي المتحصل: {t_cash:.2f}  |  "
+            f"إجمالي قيمة المخزون الحالي: {t_stock:.2f}  |  الفجوة الكلية: {t_gap:.2f}"
+        )
+
+
 # ------------------- App -------------------
 
 class WarehouseApp(tk.Tk):
@@ -11095,6 +11522,9 @@ class WarehouseApp(tk.Tk):
         sync_menu.add_command(label="سجل شحنات الفروع والوارد المتزامن…", command=self._open_branch_bills_sync_log)
         sync_menu.add_command(label="حجوزات الفروع (مرآة)…", command=self._open_pos_reservations_mirror)
         sync_menu.add_command(label="التدفقات المالية للفروع (يومي)…", command=self._open_pos_financial_by_day)
+        sync_menu.add_command(label="ملخص دورة الفروع…", command=self._open_branch_cycle_summary)
+        sync_menu.add_separator()
+        sync_menu.add_command(label="تشخيص المزامنة (F11)", command=lambda: self._switch_tab("sync_diagnostics"))
         menubar.add_cascade(label="المزامنة", menu=sync_menu)
 
         # ======== HEADER BAR (Premium dark slate) ========
@@ -11294,6 +11724,12 @@ class WarehouseApp(tk.Tk):
             PosBranchFinancialWindow(self, self.db)
         except Exception as e:
             messagebox.showerror("التدفقات المالية", f"تعذّر فتح النافذة:\n{e}", parent=self)
+
+    def _open_branch_cycle_summary(self):
+        try:
+            BranchCycleSummaryWindow(self, self.db)
+        except Exception as e:
+            messagebox.showerror("ملخص دورة الفروع", f"تعذّر فتح النافذة:\n{e}", parent=self)
 
     def _open_inventory(self):
         InventoryWindow(self, self.db)

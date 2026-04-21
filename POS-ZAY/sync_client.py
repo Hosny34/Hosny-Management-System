@@ -675,6 +675,7 @@ class SyncClient:
         pulled_total = 0
         cursor = int(cfg.get("last_pulled_seq") or 0)
         pull_url_base = cfg["server_url"].rstrip("/") + "/v1/sync/pull"
+        recovery_attempted = False
 
         while True:
             qs = urllib.parse.urlencode({"since": cursor, "limit": PULL_BATCH_SIZE})
@@ -692,6 +693,22 @@ class SyncClient:
                 raise SyncError(f"pull returned HTTP {status}")
 
             events = body.get("events", []) or []
+            # Detect a server-side reset: when the server reports its own
+            # highest server_seq is lower than our cursor, its event log
+            # was wiped (common with Railway ephemeral storage). In that
+            # case we rewind to 0 so the next iteration re-pulls from the
+            # start. Inbox inserts are idempotent via event_uuid.
+            srv_max = body.get("max_server_seq")
+            if (
+                not recovery_attempted
+                and srv_max is not None
+                and cursor > 0
+                and int(srv_max) < cursor
+            ):
+                recovery_attempted = True
+                note("اكتشاف إعادة ضبط للسيرفر — إعادة ضبط المؤشر وإعادة التنزيل…")
+                cursor = 0
+                continue
             if not events:
                 break
 

@@ -21,6 +21,14 @@ DB_PATH = os.path.join(APP_DATA_DIR, DB_FILE_NAME)
 STALE_MINUTES_WARNING = 15
 STALE_MINUTES_CRITICAL = 60
 ALL_BRANCHES_PICK = "كل الفروع"
+BRANCH_UI_NAME_BY_DEVICE = {
+    "POS-ZAY": "فرع زايد",
+    "POS-OCT": "فرع اكتوبر",
+    "POS-BAH": "فرع بهتيم",
+    "POS-CEN": "فرع السنتر",
+    "POS-OBO": "فرع العبور",
+    "POS-GESR": "فرع جسر السويس",
+}
 WAREHOUSE_DIR = os.path.abspath(os.path.join(SOURCE_DIR, "..", "ادارة المخازن"))
 if not getattr(sys, "frozen", False) and WAREHOUSE_DIR not in sys.path:
     sys.path.insert(0, WAREHOUSE_DIR)
@@ -56,6 +64,13 @@ def _parse_iso_ts(value: Any) -> datetime:
     raw = str(value or "").strip()
     if not raw:
         return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _branch_display_name(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return BRANCH_UI_NAME_BY_DEVICE.get(raw, raw)
     try:
         if raw.endswith("Z"):
             raw = raw[:-1] + "+00:00"
@@ -446,20 +461,26 @@ class StockMonitorApp(tk.Tk):
     def _reload_devices(self) -> None:
         names, metas = self.db.list_device_picks()
         self._metas = metas
-        self._device_cb["values"] = names
+        self._device_ui_to_raw = {ALL_BRANCHES_PICK: ALL_BRANCHES_PICK}
+        for n in names:
+            if n != ALL_BRANCHES_PICK:
+                self._device_ui_to_raw[_branch_display_name(n)] = n
+        ui_names = [ALL_BRANCHES_PICK if n == ALL_BRANCHES_PICK else _branch_display_name(n) for n in names]
+        self._device_cb["values"] = ui_names
         self._refresh_observability()
-        if not names:
+        if not ui_names:
             self._device_var.set("")
             self._meta_var.set("لا توجد بيانات فروع بعد — شغّل المزامنة أولاً")
             self._all_rows = []
             self._apply_filters()
             return
-        if self._device_var.get() not in names:
-            self._device_var.set(names[0])
+        if self._device_var.get() not in ui_names:
+            self._device_var.set(ui_names[0])
         self._reload_stock()
 
     def _reload_stock(self) -> None:
-        pick = (self._device_var.get() or "").strip()
+        pick_ui = (self._device_var.get() or "").strip()
+        pick = getattr(self, "_device_ui_to_raw", {}).get(pick_ui, pick_ui)
         if not pick:
             return
         if pick == ALL_BRANCHES_PICK:
@@ -468,7 +489,7 @@ class StockMonitorApp(tk.Tk):
             meta = self._metas.get(pick)
             if meta:
                 self._meta_var.set(
-                    f"آخر لقطة: {meta['snapshot_at']}  |  عدد الصفوف: {meta['row_count']}  |  القيمة: {meta['total_value']:.2f}"
+                    f"{_branch_display_name(pick)} | آخر لقطة: {meta['snapshot_at']}  |  عدد الصفوف: {meta['row_count']}  |  القيمة: {meta['total_value']:.2f}"
                 )
             else:
                 self._meta_var.set("لا توجد لقطة مخزون مباشرة لهذا الاسم (قد يكون محفوظًا بالـ UUID)")
@@ -485,7 +506,7 @@ class StockMonitorApp(tk.Tk):
                 "",
                 tk.END,
                 values=(
-                    r["branch"],
+                    _branch_display_name(r["branch"]),
                     r["status"],
                     r["snapshot_at"],
                     r["age_min"],
@@ -500,11 +521,11 @@ class StockMonitorApp(tk.Tk):
         warning = [r for r in rows if str(r["status"]) == "WARNING"]
         if critical:
             self._alert_var.set(
-                "Critical branches: " + ", ".join(str(r["branch"]) for r in critical[:6])
+                "Critical branches: " + ", ".join(_branch_display_name(str(r["branch"])) for r in critical[:6])
             )
         elif warning:
             self._alert_var.set(
-                "Warning branches: " + ", ".join(str(r["branch"]) for r in warning[:6])
+                "Warning branches: " + ", ".join(_branch_display_name(str(r["branch"])) for r in warning[:6])
             )
         else:
             self._alert_var.set("All monitored branches are healthy.")
@@ -528,12 +549,13 @@ class StockMonitorApp(tk.Tk):
                 continue
             if fz and sz != fz:
                 continue
+            br_ui = _branch_display_name(br)
             if q:
-                blob = f"{br} {it} {sc} {cl} {sz}".lower()
+                blob = f"{br_ui} {it} {sc} {cl} {sz}".lower()
                 if q not in blob:
                     continue
             value = float(price) * int(count)
-            self._tree.insert("", tk.END, values=(br, it, sc, cl, sz, f"{price:.2f}", int(count), f"{value:.2f}"))
+            self._tree.insert("", tk.END, values=(br_ui, it, sc, cl, sz, f"{price:.2f}", int(count), f"{value:.2f}"))
             shown += 1
             total_qty += int(count)
             total_val += value

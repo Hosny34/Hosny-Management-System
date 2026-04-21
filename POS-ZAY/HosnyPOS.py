@@ -48,6 +48,15 @@ DEFAULT_BRANCH_POS_NAMES = [
     "POS-BAH",
     "POS-CEN",
 ]
+BRANCH_UI_NAME_BY_DEVICE = {
+    "POS-ZAY": "فرع زايد",
+    "POS-OCT": "فرع اكتوبر",
+    "POS-BAH": "فرع بهتيم",
+    "POS-CEN": "فرع السنتر",
+    "POS-OBO": "فرع العبور",
+    "POS-GESR": "فرع جسر السويس",
+}
+BRANCH_DEVICE_BY_UI_NAME = {v: k for k, v in BRANCH_UI_NAME_BY_DEVICE.items()}
 
 ALLOWED_NUMERIC_RANGES = {
     (0, 16): [str(i) for i in range(0, 18, 2)],
@@ -141,7 +150,16 @@ def _extract_branch_target(value: Any) -> Optional[str]:
         raw = raw[len(BRANCH_TARGET_PREFIX):].strip()
     if raw in DEFAULT_BRANCH_POS_NAMES:
         return raw
+    if raw in BRANCH_DEVICE_BY_UI_NAME:
+        return BRANCH_DEVICE_BY_UI_NAME[raw]
     return None
+
+
+def _branch_display_name(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return BRANCH_UI_NAME_BY_DEVICE.get(raw, raw)
 
 
 @dataclass
@@ -1335,14 +1353,70 @@ class SqliteDatabase:
             if count == 0:
                 return 0
 
+            old_specs = self.conn.execute(
+                f"SELECT DISTINCT item_type, school, color, size FROM stocks WHERE id IN ({ph})",
+                ids,
+            ).fetchall()
+
             self.conn.execute(
                 f"UPDATE stocks SET {', '.join(sets)} WHERE id IN ({ph})",
                 (*args, *ids),
             )
 
+            self._cascade_spec_rename(old_specs, changes)
+
             self._upsert_history(changes)
         self.cleanup_unused_specs()
         return count
+
+    def _cascade_spec_rename(
+        self,
+        old_specs: Sequence[Any],
+        changes: Dict[str, Any],
+    ) -> None:
+        """Propagate a completed spec rename from `stocks` to historical tables.
+
+        For each old (item_type, school, color, size) tuple we just rewrote,
+        if no `stocks` row still references that tuple, it was a full rename —
+        cascade the same field changes to `movements`, `bill_items`, and
+        `reservations` so audit/history views stay consistent.
+        """
+        if not changes or not old_specs:
+            return
+        sets_parts: List[str] = []
+        new_vals: List[Any] = []
+        for fld in ("item_type", "school", "color", "size"):
+            if fld in changes:
+                sets_parts.append(f"{fld} = ?")
+                new_vals.append(changes[fld])
+        if not sets_parts:
+            return
+        set_sql = ", ".join(sets_parts)
+
+        for row in old_specs:
+            old_it = row["item_type"] if isinstance(row, sqlite3.Row) else row[0]
+            old_sc = row["school"]    if isinstance(row, sqlite3.Row) else row[1]
+            old_cl = row["color"]     if isinstance(row, sqlite3.Row) else row[2]
+            old_sz = row["size"]      if isinstance(row, sqlite3.Row) else row[3]
+
+            still = self.conn.execute(
+                "SELECT 1 FROM stocks WHERE item_type=? AND school=? AND color=? AND size=? LIMIT 1",
+                (old_it, old_sc, old_cl, old_sz),
+            ).fetchone()
+            if still:
+                continue
+
+            where_sql = "item_type=? AND school=? AND color=? AND size=?"
+            where_args = (old_it, old_sc, old_cl, old_sz)
+
+            for tbl in ("movements", "bill_items", "reservations"):
+                try:
+                    self.conn.execute(
+                        f"UPDATE {tbl} SET {set_sql} WHERE {where_sql}",
+                        (*new_vals, *where_args),
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
     def get_distinct_filtered(self, target: str, constraints: Dict[str, Any]) -> List[str]:
         valid = {"item_type", "school", "color", "size"}
@@ -5273,6 +5347,8 @@ class POSFrame(ttk.Frame):
             "SELECT device_name FROM device_identity WHERE id = 1"
         ).fetchone() or [None])[0]
         choices = [n for n in DEFAULT_BRANCH_POS_NAMES if n != current_device]
+        ui_choices = [_branch_display_name(n) for n in choices]
+        ui_to_dev = {_branch_display_name(n): n for n in choices}
         dlg = tk.Toplevel(self.winfo_toplevel())
         dlg.title("طلب تحويل إلى فرع")
         dlg.geometry("320x140")
@@ -5281,13 +5357,15 @@ class POSFrame(ttk.Frame):
         frm = ttk.Frame(dlg, padding=12)
         frm.pack(fill=tk.BOTH, expand=True)
         ttk.Label(frm, text="اختر الفرع المطلوب لإرسال الطلب إلى المخزن:").pack(anchor="w", pady=(0, 8))
-        var = tk.StringVar(value=choices[0] if choices else "")
-        cb = ttk.Combobox(frm, textvariable=var, values=choices, state="readonly")
+        var = tk.StringVar(value=ui_choices[0] if ui_choices else "")
+        cb = ttk.Combobox(frm, textvariable=var, values=ui_choices, state="readonly")
         cb.pack(fill=tk.X)
 
         def _apply():
-            if var.get():
-                self._customer_var.set(f"{BRANCH_TARGET_PREFIX}{var.get()}")
+            picked = (var.get() or "").strip()
+            dev = ui_to_dev.get(picked, picked)
+            if dev:
+                self._customer_var.set(f"{BRANCH_TARGET_PREFIX}{_branch_display_name(dev)}")
             dlg.destroy()
 
         btns = ttk.Frame(frm)
@@ -5314,7 +5392,9 @@ class POSFrame(ttk.Frame):
                 (f"%{query}%",)
             ).fetchall()
             names = [r["customer"] for r in rows if r["customer"]]
-            special = [WAREHOUSE_RETURN_LABEL] + [f"{BRANCH_TARGET_PREFIX}{n}" for n in DEFAULT_BRANCH_POS_NAMES]
+            special = [WAREHOUSE_RETURN_LABEL] + [
+                f"{BRANCH_TARGET_PREFIX}{_branch_display_name(n)}" for n in DEFAULT_BRANCH_POS_NAMES
+            ]
             for label in reversed(special):
                 if query.lower() in label.lower() and label not in names:
                     names.insert(0, label)
