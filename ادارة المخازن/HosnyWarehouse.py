@@ -9698,8 +9698,15 @@ class BranchInventoryQueueWindow(tk.Toplevel):
                      state="readonly", width=16).grid(row=0, column=1, sticky="w", padx=6, pady=6)
 
         ttk.Label(top, text="مخزن:").grid(row=0, column=2, sticky="e", padx=6, pady=6)
-        self._wh_var = tk.StringVar(value="1")
-        ttk.Entry(top, textvariable=self._wh_var, width=8).grid(row=0, column=3, sticky="w", padx=6, pady=6)
+        self._wh_var = tk.StringVar(value=WAREHOUSE_NUMBER_LABELS.get("1", "1"))
+        self._wh_cb = ttk.Combobox(
+            top,
+            textvariable=self._wh_var,
+            values=list(WAREHOUSE_NUMBER_DISPLAY_VALUES),
+            state="readonly",
+            width=14,
+        )
+        self._wh_cb.grid(row=0, column=3, sticky="w", padx=6, pady=6)
 
         ttk.Label(top, text="عبوة:").grid(row=0, column=4, sticky="e", padx=6, pady=6)
         self._pkg_var = tk.StringVar(value="")
@@ -9744,6 +9751,7 @@ class BranchInventoryQueueWindow(tk.Toplevel):
         _bind_mousewheel(self._tree)
         add_context_menu(self._tree)
         self._tree.bind("<<TreeviewSelect>>", lambda _e: self._load_selected_defaults())
+        self._wh_cb.bind("<<ComboboxSelected>>", lambda _e: self._set_next_package_for_selected_warehouse(force=True))
 
         self._status_var = tk.StringVar(value="")
         tk.Label(self, textvariable=self._status_var, bg=_UI["BG"], fg=_UI["TEXT_SEC"]).pack(fill=tk.X, padx=8, pady=(0, 8))
@@ -9765,13 +9773,7 @@ class BranchInventoryQueueWindow(tk.Toplevel):
         self._target_ui_to_dev = ui_to_dev
         self._target_cb["values"] = ui_names
 
-        try:
-            wh = int((self._wh_var.get() or "1").strip())
-        except Exception:
-            wh = 1
-        if not (self._pkg_var.get() or "").strip():
-            info = self.db.package_numbers_summary(wh)
-            self._pkg_var.set(str(info.get("next") or 1))
+        self._set_next_package_for_selected_warehouse(force=False)
 
         req = branch_display_name(row.get("requested_target_device")) if row else ""
         if row and req in ui_names:
@@ -9798,13 +9800,30 @@ class BranchInventoryQueueWindow(tk.Toplevel):
         self._status_var.set(f"عدد العناصر: {len(rows)}")
         self._load_selected_defaults()
 
+    def _selected_warehouse_no(self) -> int:
+        raw = warehouse_numeric_value(self._wh_var.get())
+        try:
+            w = int((raw or "").strip())
+        except Exception:
+            w = 1
+        return max(1, w)
+
+    def _set_next_package_for_selected_warehouse(self, *, force: bool) -> None:
+        if (self._pkg_var.get() or "").strip() and not force:
+            return
+        try:
+            info = self.db.package_numbers_summary(self._selected_warehouse_no())
+            self._pkg_var.set(str(info.get("next") or 1))
+        except Exception:
+            self._pkg_var.set("1")
+
     def _assign_selected(self):
         queue_id = self._selected_queue_id()
         if queue_id is None:
             messagebox.showwarning("تنبيه", "اختر عنصرًا من القائمة أولاً.", parent=self)
             return
         try:
-            w = int((self._wh_var.get() or "").strip())
+            w = self._selected_warehouse_no()
             p = int((self._pkg_var.get() or "").strip())
         except Exception:
             messagebox.showerror("بيانات غير صالحة", "أدخل رقم مخزن وعبوة صحيحين.", parent=self)

@@ -127,6 +127,22 @@ def apply_sync_migration(conn: sqlite3.Connection) -> None:
             last_error      TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS sync_dead_letter (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_uuid     TEXT NOT NULL,
+            event_type     TEXT NOT NULL,
+            server_seq     INTEGER,
+            source_device  TEXT,
+            payload_json   TEXT,
+            apply_error    TEXT,
+            attempts       INTEGER NOT NULL DEFAULT 0,
+            first_failed_at TEXT NOT NULL,
+            last_failed_at  TEXT NOT NULL,
+            UNIQUE(event_uuid)
+        );
+        CREATE INDEX IF NOT EXISTS ix_sync_dead_letter_seq
+            ON sync_dead_letter(server_seq DESC);
+
         INSERT OR IGNORE INTO sync_state (channel, last_pulled_seq)
             VALUES ('main', 0);
         """
@@ -448,6 +464,15 @@ def outbox_total_count(conn: sqlite3.Connection) -> int:
     """Total number of outbox events (any status)."""
     try:
         cur = conn.execute("SELECT COUNT(*) FROM sync_outbox")
+        return int(cur.fetchone()[0] or 0)
+    except sqlite3.OperationalError:
+        return 0
+
+
+def dead_letter_count(conn: sqlite3.Connection) -> int:
+    """Number of inbox events parked in dead-letter table."""
+    try:
+        cur = conn.execute("SELECT COUNT(*) FROM sync_dead_letter")
         return int(cur.fetchone()[0] or 0)
     except sqlite3.OperationalError:
         return 0

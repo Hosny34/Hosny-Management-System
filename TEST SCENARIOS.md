@@ -1008,11 +1008,15 @@ Steps:
 
 1. Open unhandled branch products window
 2. Use available filters/search if present
+3. Verify `مخزن` is a dropdown (readonly), not a free-typing field
+4. Change warehouse selection and verify `عبوة` auto-fills to the next available package number
 
 Expected:
 
 - window opens
 - rows can be filtered safely
+- warehouse selector only allows valid warehouse values from list
+- package value is suggested automatically based on selected warehouse
 
 ### `BR-05` Branch bill log and sync queue log window
 

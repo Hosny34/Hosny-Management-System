@@ -31,6 +31,7 @@ WAREHOUSE_DEVICE_NAME = "WAREHOUSE"
 WAREHOUSE_RETURN_LABEL = "الى المصنع"
 # Bill rows for stock sent to warehouse review — not retail sales (no POS income / dashboard sales).
 WAREHOUSE_RETURN_BILL_TYPE = "WAREHOUSE_RETURN"
+BRANCH_TRANSFER_BILL_TYPE = "BRANCH_TRANSFER_REQUEST"
 BRANCH_TARGET_PREFIX = "فرع: "
 POS_CASHIER_LOCKDOWN = True
 POS_DISCOUNT_PRESETS = (5, 10, 15)
@@ -667,7 +668,7 @@ class SqliteDatabase:
             CREATE TABLE IF NOT EXISTS movements(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts TEXT NOT NULL,
-                direction TEXT NOT NULL, -- IN | OUT | ADJUST_OUT | OUT_FACTORY | PRICE_UPDATE | RESERVE
+                direction TEXT NOT NULL, -- IN | OUT | ADJUST_OUT | OUT_FACTORY | PRICE_UPDATE | RESERVE | RESERVE_PAY | DELIVER_PAY
                 stock_id INTEGER,
                 qty INTEGER NOT NULL,
                 note TEXT,
@@ -2127,6 +2128,11 @@ class SqliteDatabase:
                     ],
                 )
             elif branch_target:
+                # Branch-to-branch via warehouse is a transfer request, not a retail cash sale.
+                self.conn.execute(
+                    "UPDATE bills SET bill_type=? WHERE id=?",
+                    (BRANCH_TRANSFER_BILL_TYPE, bill_id),
+                )
                 self._record_transfer_via_warehouse_event(
                     request_uuid=bill_uuid or "",
                     target_device=branch_target,
@@ -2423,6 +2429,14 @@ class SqliteDatabase:
                      None, line["item_type"], line["school"], line["color"], line["size"],
                      float(line["unit_price"])),
                 )
+                if alloc_paid > 1e-9:
+                    self.conn.execute(
+                        """INSERT INTO movements(ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,unit_price)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        (now_iso(), "RESERVE_PAY", None, 0, f"عربون حجز #{cur.lastrowid}",
+                         None, line["item_type"], line["school"], line["color"], line["size"],
+                         alloc_paid),
+                    )
             if created:
                 uuid_rows = self.conn.execute(
                     "SELECT id, uuid FROM reservations WHERE id IN (%s)"
@@ -2672,16 +2686,34 @@ class SqliteDatabase:
         return [dict(r) for r in rows]
 
     def update_reservation_payment(self, res_id, new_paid):
+        rid = int(res_id)
+        row_prev = self.conn.execute(
+            "SELECT paid_amount, item_type, school, color, size FROM reservations WHERE id=?",
+            (rid,),
+        ).fetchone()
+        if not row_prev:
+            raise ValueError("الحجز غير موجود")
+        old_paid = float(row_prev["paid_amount"] or 0.0)
+        new_paid_f = float(new_paid)
         self.conn.execute(
             "UPDATE reservations SET paid_amount=? WHERE id=?",
-            (float(new_paid), int(res_id)))
+            (new_paid_f, rid))
+        delta = new_paid_f - old_paid
+        if abs(delta) > 1e-9:
+            self.conn.execute(
+                """INSERT INTO movements(ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,unit_price)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (now_iso(), "RESERVE_PAY", None, 0, f"تعديل عربون حجز #{rid}",
+                 None, row_prev["item_type"], row_prev["school"], row_prev["color"], row_prev["size"],
+                 delta),
+            )
         row = self.conn.execute(
-            "SELECT uuid FROM reservations WHERE id=?", (int(res_id),)
+            "SELECT uuid FROM reservations WHERE id=?", (rid,)
         ).fetchone()
         self._record_sync_event("RESERVATION_PAYMENT_UPDATED", {
             "reservation_uuid": row[0] if row else None,
-            "reservation_id":   int(res_id),
-            "paid_amount":      float(new_paid),
+            "reservation_id":   rid,
+            "paid_amount":      new_paid_f,
         })
 
     def complete_reservation(self, res_id):
@@ -2895,15 +2927,15 @@ class SqliteDatabase:
             (started, ended))
         inflow_items = [dict(r) for r in cur.fetchall()]
 
-        # Retail sales only: SALE/legacy rows, excluding warehouse return (customer الى المصنع)
+        # Retail sales only: non-void SALE/legacy rows.
         cur = self.conn.execute(
             """
             SELECT COUNT(*) as cnt, COALESCE(SUM(total),0) as total FROM bills
              WHERE created_at >= ? AND created_at <= ?
                AND (bill_type='SALE' OR bill_type IS NULL)
-               AND TRIM(COALESCE(customer,'')) != ?
+               AND UPPER(COALESCE(status,'CONFIRMED')) != 'VOID'
             """,
-            (started, ended, WAREHOUSE_RETURN_LABEL),
+            (started, ended),
         )
         sales = dict(cur.fetchone())
 
@@ -2911,6 +2943,10 @@ class SqliteDatabase:
             "SELECT COUNT(*) as cnt, COALESCE(SUM(total_amount),0) as total, COALESCE(SUM(paid_amount),0) as paid FROM reservations WHERE created_at >= ? AND created_at <= ?",
             (started, ended))
         res = dict(cur.fetchone())
+        cur = self.conn.execute(
+            "SELECT COALESCE(SUM(unit_price),0) as total FROM movements WHERE direction='RESERVE_PAY' AND ts >= ? AND ts <= ?",
+            (started, ended))
+        res_paid_row = dict(cur.fetchone())
 
         # Delivery payments collected during this shift
         cur = self.conn.execute(
@@ -2935,7 +2971,7 @@ class SqliteDatabase:
             "inflow_count": inflow["cnt"], "inflow_total_qty": inflow["total_qty"],
             "inflow_items": inflow_items,
             "sales_count": sales["cnt"], "sales_total": float(sales["total"]),
-            "res_count": res["cnt"], "res_total": float(res["total"]), "res_paid": float(res["paid"]),
+            "res_count": res["cnt"], "res_total": float(res["total"]), "res_paid": float(res_paid_row["total"]),
             "deliver_count": deliver["cnt"], "deliver_total": float(deliver["total"]),
             "return_count": returns["cnt"], "return_total": float(returns["total"]),
             "exchange_count": exchanges["cnt"], "exchange_total": float(exchanges["total"]),
@@ -2960,15 +2996,15 @@ class SqliteDatabase:
             r = dict(row)
             started = r["started_at"]
             ended = r["ended_at"] or now_iso()
-            # Retail sales (exclude warehouse returns)
+            # Retail sales (exclude VOID; transfer workflows are non-SALE bill_type)
             cur = self.conn.execute(
                 """
                 SELECT COUNT(*) as cnt, COALESCE(SUM(total),0) as total FROM bills
                  WHERE created_at >= ? AND created_at <= ?
                    AND (bill_type='SALE' OR bill_type IS NULL)
-                   AND TRIM(COALESCE(customer,'')) != ?
+                   AND UPPER(COALESCE(status,'CONFIRMED')) != 'VOID'
                 """,
-                (started, ended, WAREHOUSE_RETURN_LABEL),
+                (started, ended),
             )
             sales = dict(cur.fetchone())
             # reservations
@@ -2976,6 +3012,10 @@ class SqliteDatabase:
                 "SELECT COUNT(*) as cnt, COALESCE(SUM(total_amount),0) as total, COALESCE(SUM(paid_amount),0) as paid FROM reservations WHERE created_at >= ? AND created_at <= ?",
                 (started, ended))
             res = dict(cur.fetchone())
+            cur = self.conn.execute(
+                "SELECT COALESCE(SUM(unit_price),0) as total FROM movements WHERE direction='RESERVE_PAY' AND ts >= ? AND ts <= ?",
+                (started, ended))
+            res_paid = dict(cur.fetchone())
             # deliveries
             cur = self.conn.execute(
                 "SELECT COUNT(*) as cnt, COALESCE(SUM(unit_price),0) as total FROM movements WHERE direction='DELIVER_PAY' AND ts >= ? AND ts <= ?",
@@ -3000,7 +3040,7 @@ class SqliteDatabase:
             r["sales_total"] = float(sales["total"])
             r["res_count"] = res["cnt"]
             r["res_total"] = float(res["total"])
-            r["res_paid"] = float(res["paid"])
+            r["res_paid"] = float(res_paid["total"])
             r["deliver_count"] = deliver["cnt"]
             r["deliver_total"] = float(deliver["total"])
             r["inflow_count"] = inflow["cnt"]
@@ -3221,8 +3261,7 @@ class SqliteDatabase:
             bill_args.append(date_to)
 
         bill_where.append("(COALESCE(b.bill_type,'SALE')='SALE' OR b.bill_type IS NULL)")
-        bill_where.append("TRIM(COALESCE(b.customer,'')) != ?")
-        bill_args.append(WAREHOUSE_RETURN_LABEL)
+        bill_where.append("UPPER(COALESCE(b.status,'CONFIRMED')) != 'VOID'")
 
         if school or item_type or color:
             # Need to join bill_items for spec filtering
@@ -3280,6 +3319,30 @@ class SqliteDatabase:
         )
         res_row = dict(cur.fetchone())
 
+        pwhere = ["direction='RESERVE_PAY'"]
+        pargs: List[Any] = []
+        if date_from:
+            pwhere.append("date(ts) >= date(?)")
+            pargs.append(date_from)
+        if date_to:
+            pwhere.append("date(ts) <= date(?)")
+            pargs.append(date_to)
+        if school:
+            pwhere.append("LOWER(TRIM(school)) = LOWER(?)")
+            pargs.append(school.strip())
+        if item_type:
+            pwhere.append("LOWER(TRIM(item_type)) = LOWER(?)")
+            pargs.append(item_type.strip())
+        if color:
+            pwhere.append("LOWER(TRIM(color)) = LOWER(?)")
+            pargs.append(color.strip())
+        cur = self.conn.execute(
+            f"SELECT COALESCE(SUM(unit_price), 0) AS pt FROM movements WHERE {' AND '.join(pwhere)}",
+            pargs,
+        )
+        pr = cur.fetchone()
+        reserve_cash = float(pr["pt"] if pr and pr["pt"] is not None else 0)
+
         dwhere = ["direction='DELIVER_PAY'"]
         dargs: List[Any] = []
         if date_from:
@@ -3308,7 +3371,7 @@ class SqliteDatabase:
             "sales_count": bill_row["cnt"],
             "sales_total": float(bill_row["total"]) + deliver_cash,
             "res_count": res_row["cnt"], "res_total": float(res_row["total"]),
-            "res_paid": float(res_row["paid"]),
+            "res_paid": reserve_cash,
             "deliver_cash": deliver_cash,
         }
 

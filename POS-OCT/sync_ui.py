@@ -483,7 +483,12 @@ class SyncDialog(tk.Toplevel):
             pending = sync_core.outbox_pending_count(self.db_conn)
         except Exception:
             pending = 0
-        self._lbl_counts.set(f"{pending} حدث غير مُرسَل")
+        try:
+            dead = sync_core.dead_letter_count(self.db_conn)
+        except Exception:
+            dead = 0
+        extra = f"  •  DLQ={dead}" if dead else ""
+        self._lbl_counts.set(f"{pending} حدث غير مُرسَل{extra}")
         last_push = _fmt(cfg.get("last_push_at"))
         last_pull = _fmt(cfg.get("last_pull_at"))
         seq = cfg.get("last_pulled_seq") or 0
@@ -564,7 +569,9 @@ class SyncDialog(tk.Toplevel):
                         f"تمت المزامنة • رفع {summary['pushed']} "
                         f"• تنزيل {summary['pulled']} "
                         f"• تخطي {summary.get('skipped', 0)} "
-                        f"• seq={summary['next_seq']}",
+                        f"• DLQ={summary.get('dead_lettered', 0)} "
+                        f"• seq={summary['next_seq']} "
+                        f"• cycle={summary.get('cycle_id', '-')}",
                         "ok",
                     )
                     self._enable_buttons()

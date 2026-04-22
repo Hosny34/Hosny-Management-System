@@ -25,6 +25,7 @@ Design notes
 from __future__ import annotations
 
 import json
+import random
 import sqlite3
 import ssl
 import time
@@ -38,6 +39,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 DEFAULT_TIMEOUT = 15.0  # seconds per HTTP request
 PUSH_BATCH_SIZE = 200   # events per /sync/push call
 PULL_BATCH_SIZE = 500   # events per /sync/pull call
+HTTP_RETRY_ATTEMPTS = 3
+DEAD_LETTER_MAX_ATTEMPTS = 5
 
 
 def format_inbound_event_brief(event_type: str, payload: Any) -> str:
@@ -238,20 +241,31 @@ def _http_request(
 
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     ctx = _build_ssl_ctx(verify_tls) if url.lower().startswith("https://") else None
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-            raw = resp.read().decode("utf-8")
-            return resp.status, (json.loads(raw) if raw else {})
-    except urllib.error.HTTPError as e:
+    for attempt in range(1, HTTP_RETRY_ATTEMPTS + 1):
         try:
-            detail = json.loads(e.read().decode("utf-8"))
-        except Exception:
-            detail = {"detail": str(e)}
-        raise SyncError(f"HTTP {e.code}: {detail.get('detail', detail)}")
-    except urllib.error.URLError as e:
-        raise SyncError(f"network error: {e.reason}")
-    except TimeoutError:
-        raise SyncError("timeout")
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                raw = resp.read().decode("utf-8")
+                return resp.status, (json.loads(raw) if raw else {})
+        except urllib.error.HTTPError as e:
+            can_retry = int(getattr(e, "code", 0) or 0) in (408, 429, 500, 502, 503, 504)
+            if can_retry and attempt < HTTP_RETRY_ATTEMPTS:
+                time.sleep((0.35 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.25))
+                continue
+            try:
+                detail = json.loads(e.read().decode("utf-8"))
+            except Exception:
+                detail = {"detail": str(e)}
+            raise SyncError(f"HTTP {e.code}: {detail.get('detail', detail)}")
+        except urllib.error.URLError as e:
+            if attempt < HTTP_RETRY_ATTEMPTS:
+                time.sleep((0.35 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.25))
+                continue
+            raise SyncError(f"network error: {e.reason}")
+        except TimeoutError:
+            if attempt < HTTP_RETRY_ATTEMPTS:
+                time.sleep((0.35 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.25))
+                continue
+            raise SyncError("timeout")
 
 
 # ------------------------------ SyncClient ------------------------------- #
@@ -290,6 +304,7 @@ class SyncClient:
     def test_connection(self) -> Dict[str, Any]:
         """Call /v1/health and /v1/auth/token. Used by the setup dialog."""
         cfg = load_sync_config(self.conn)
+        cycle_id = "c" + _utc_now_iso().replace("-", "").replace(":", "").replace(".", "")
         if not cfg.get("server_url"):
             raise SyncError("server URL is not configured")
         health_url = cfg["server_url"].rstrip("/") + "/v1/health"
@@ -349,25 +364,26 @@ class SyncClient:
                 progress(msg)
 
         cfg = load_sync_config(self.conn)
+        cycle_id = "c" + _utc_now_iso().replace("-", "").replace(":", "").replace(".", "")
         if not cfg.get("server_url") or not cfg.get("device_name"):
             raise SyncError("sync is not configured yet — open Setup first")
 
-        note("تسجيل الدخول...")
+        note(f"[{cycle_id}] تسجيل الدخول...")
         token = self._fetch_jwt(cfg)
 
         # Phase 3: POS emits a full stock snapshot before pushing, so
         # the warehouse always has a fresh mirror after the round-trip.
         if (cfg.get("device_role") or "").lower() == "pos":
             try:
-                note("تحديث لقطة المخزون...")
+                note(f"[{cycle_id}] تحديث لقطة المخزون...")
                 self.emit_stock_snapshot_event(cfg)
             except Exception as e:
                 note(f"تعذّر إنشاء لقطة المخزون: {e}")
 
-        note("جارٍ رفع الأحداث...")
+        note(f"[{cycle_id}] جارٍ رفع الأحداث...")
         push_stats = self._push_loop(cfg, token, note)
 
-        note("جارٍ تنزيل الأحداث...")
+        note(f"[{cycle_id}] جارٍ تنزيل الأحداث...")
         pull_stats = self._pull_loop(cfg, token, note)
 
         # Phase 3: warehouse refreshes its known-device cache from the
@@ -375,12 +391,12 @@ class SyncClient:
         # names in the Customer dropdown. Non-fatal on failure.
         if (cfg.get("device_role") or "").lower() == "warehouse":
             try:
-                note("تحديث قائمة الفروع...")
+                note(f"[{cycle_id}] تحديث قائمة الفروع...")
                 self.refresh_device_list(cfg, token)
             except Exception as e:
                 note(f"تعذّر تحديث قائمة الفروع: {e}")
 
-        note("جارٍ تطبيق الأحداث الواردة...")
+        note(f"[{cycle_id}] جارٍ تطبيق الأحداث الواردة...")
         apply_stats = self.apply_inbox(cfg, note)
 
         summary = {
@@ -394,11 +410,14 @@ class SyncClient:
             "applied_events":  apply_stats.get("applied_events") or [],
             "skipped_events":  apply_stats.get("skipped_events") or [],
             "error_events":    apply_stats.get("error_events") or [],
+            "dead_lettered": apply_stats.get("dead_lettered", 0),
+            "cycle_id": cycle_id,
         }
         note(
             f"تم: رفع {summary['pushed']} • تنزيل {summary['pulled']} "
             f"• تطبيق {summary['applied']}"
             + (f" • فشل {summary['apply_errors']}" if summary["apply_errors"] else "")
+            + (f" • DLQ {summary['dead_lettered']}" if summary["dead_lettered"] else "")
         )
         return summary
 
@@ -462,6 +481,7 @@ class SyncClient:
         applied = 0
         skipped = 0
         errors = 0
+        dead_lettered = 0
         now = _utc_now_iso()
         applied_events: List[Dict[str, Any]] = []
         skipped_events: List[Dict[str, Any]] = []
@@ -542,19 +562,49 @@ class SyncClient:
             except Exception as e:
                 errors += 1
                 err_text = str(e)[:500]
+                next_attempts = attempts + 1
                 # Separate write so the error lands even though the
                 # applier's transaction rolled back.
                 with self.conn:
-                    self.conn.execute(
-                        """
-                        UPDATE sync_inbox
-                           SET apply_status   = 'error',
-                               apply_error    = ?,
-                               apply_attempts = ?
-                         WHERE event_uuid = ?
-                        """,
-                        (err_text, attempts + 1, event_uuid),
-                    )
+                    if next_attempts >= DEAD_LETTER_MAX_ATTEMPTS:
+                        self.conn.execute(
+                            """
+                            INSERT INTO sync_dead_letter
+                                (event_uuid, event_type, server_seq, source_device, payload_json,
+                                 apply_error, attempts, first_failed_at, last_failed_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(event_uuid) DO UPDATE SET
+                                apply_error = excluded.apply_error,
+                                attempts = excluded.attempts,
+                                last_failed_at = excluded.last_failed_at
+                            """,
+                            (
+                                event_uuid, event_type, int(server_seq), source_dev, payload_json,
+                                err_text, next_attempts, now, now,
+                            ),
+                        )
+                        self.conn.execute(
+                            """
+                            UPDATE sync_inbox
+                               SET apply_status   = 'dead',
+                                   apply_error    = ?,
+                                   apply_attempts = ?
+                             WHERE event_uuid = ?
+                            """,
+                            (err_text, next_attempts, event_uuid),
+                        )
+                        dead_lettered += 1
+                    else:
+                        self.conn.execute(
+                            """
+                            UPDATE sync_inbox
+                               SET apply_status   = 'error',
+                                   apply_error    = ?,
+                                   apply_attempts = ?
+                             WHERE event_uuid = ?
+                            """,
+                            (err_text, next_attempts, event_uuid),
+                        )
                 note(f"فشل تطبيق {event_type}: {err_text}")
                 try:
                     payload_err = json.loads(payload_json or "{}")
@@ -573,6 +623,7 @@ class SyncClient:
             "applied": applied,
             "skipped": skipped,
             "errors": errors,
+            "dead_lettered": dead_lettered,
             "applied_events": applied_events,
             "skipped_events": skipped_events,
             "error_events": error_events,

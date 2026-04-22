@@ -1191,3 +1191,11 @@ Immediate receiver sync wake-up (server + clients):
 - New server endpoint: `GET /v1/sync/wait` (long-poll by device scope and `since` cursor).
 - Clients call wait in a background thread and trigger immediate sync when `has_updates=true`.
 - Periodic sync remains enabled as fallback; long-poll acts as low-latency nudge.
+
+## Update (2026-04): Unhandled branch queue warehouse/package UX
+
+Warehouse queue window (`منتجات الفروع غير المعالجة`) in `ادارة المخازن/HosnyWarehouse.py`:
+
+- `مخزن` input changed from free text to a readonly dropdown using shared warehouse-number labels (`WAREHOUSE_NUMBER_DISPLAY_VALUES`).
+- `عبوة` now auto-fills with the next available package number for the selected warehouse via `package_numbers_summary(...)`.
+- Warehouse selection parsing in assign flow now uses `warehouse_numeric_value(...)` so labels and numeric IDs resolve consistently.

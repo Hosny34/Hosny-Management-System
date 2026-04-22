@@ -25,6 +25,7 @@ Design notes
 from __future__ import annotations
 
 import json
+import random
 import sqlite3
 import ssl
 import time
@@ -38,6 +39,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 DEFAULT_TIMEOUT = 15.0  # seconds per HTTP request
 PUSH_BATCH_SIZE = 200   # events per /sync/push call
 PULL_BATCH_SIZE = 500   # events per /sync/pull call
+HTTP_RETRY_ATTEMPTS = 3
+DEAD_LETTER_MAX_ATTEMPTS = 5
 
 
 def format_inbound_event_brief(event_type: str, payload: Any) -> str:
@@ -238,20 +241,31 @@ def _http_request(
 
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     ctx = _build_ssl_ctx(verify_tls) if url.lower().startswith("https://") else None
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-            raw = resp.read().decode("utf-8")
-            return resp.status, (json.loads(raw) if raw else {})
-    except urllib.error.HTTPError as e:
+    for attempt in range(1, HTTP_RETRY_ATTEMPTS + 1):
         try:
-            detail = json.loads(e.read().decode("utf-8"))
-        except Exception:
-            detail = {"detail": str(e)}
-        raise SyncError(f"HTTP {e.code}: {detail.get('detail', detail)}")
-    except urllib.error.URLError as e:
-        raise SyncError(f"network error: {e.reason}")
-    except TimeoutError:
-        raise SyncError("timeout")
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                raw = resp.read().decode("utf-8")
+                return resp.status, (json.loads(raw) if raw else {})
+        except urllib.error.HTTPError as e:
+            can_retry = int(getattr(e, "code", 0) or 0) in (408, 429, 500, 502, 503, 504)
+            if can_retry and attempt < HTTP_RETRY_ATTEMPTS:
+                time.sleep((0.35 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.25))
+                continue
+            try:
+                detail = json.loads(e.read().decode("utf-8"))
+            except Exception:
+                detail = {"detail": str(e)}
+            raise SyncError(f"HTTP {e.code}: {detail.get('detail', detail)}")
+        except urllib.error.URLError as e:
+            if attempt < HTTP_RETRY_ATTEMPTS:
+                time.sleep((0.35 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.25))
+                continue
+            raise SyncError(f"network error: {e.reason}")
+        except TimeoutError:
+            if attempt < HTTP_RETRY_ATTEMPTS:
+                time.sleep((0.35 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.25))
+                continue
+            raise SyncError("timeout")
 
 
 # ------------------------------ SyncClient ------------------------------- #

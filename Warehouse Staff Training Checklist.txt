@@ -172,6 +172,8 @@ Mark each item after you explain it and let the trainee try it.
 [ ] Explain POS return to warehouse workflow
 [ ] Explain POS to POS via warehouse workflow
 [ ] Show queue statuses
+[ ] Explain that warehouse number is now selected from dropdown (not typed) in this window
+[ ] Show selecting warehouse from dropdown and confirm package number auto-fills to next available
 [ ] Show how to assign to warehouse stock
 [ ] Show how to discard as defective
 [ ] Show how to reroute to another branch

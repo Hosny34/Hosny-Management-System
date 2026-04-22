@@ -179,6 +179,8 @@ Important:
 
 - If a branch sends items back and you do nothing in this queue, those items stay pending
 - Pending items are not yet part of warehouse stock
+- In `منتجات الفروع غير المعالجة`, `مخزن` is now a dropdown of configured warehouse numbers/labels (not manual typing)
+- In the same window, `عبوة` now auto-fills with the next available package number for the selected warehouse (same behavior style as income flow)
 
 
 ========================================
