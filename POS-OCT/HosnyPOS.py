@@ -727,6 +727,25 @@ class SqliteDatabase:
             CREATE INDEX IF NOT EXISTS idx_reservations_status ON reservations(status);
             CREATE INDEX IF NOT EXISTS idx_reservations_created ON reservations(created_at DESC);
 
+            CREATE TABLE IF NOT EXISTS reservation_alerts(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sync_event_uuid TEXT NOT NULL UNIQUE,
+                request_uuid TEXT,
+                customer TEXT NOT NULL,
+                branch_device TEXT,
+                item_type TEXT NOT NULL,
+                school TEXT NOT NULL,
+                color TEXT NOT NULL,
+                size TEXT NOT NULL,
+                qty INTEGER NOT NULL,
+                hold_until TEXT,
+                note TEXT,
+                created_at TEXT NOT NULL,
+                shown_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_reservation_alerts_shown
+            ON reservation_alerts(shown_at, created_at DESC);
+
             CREATE TABLE IF NOT EXISTS shifts(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 started_at TEXT NOT NULL,
@@ -953,6 +972,23 @@ class SqliteDatabase:
         try:
             self.conn.execute("UPDATE reservations SET status='معلق' WHERE status='PENDING'")
             self.conn.execute("UPDATE reservations SET status='تم التسليم' WHERE status='COMPLETED'")
+            self.conn.commit()
+        except Exception:
+            pass
+
+        # Reservation bill grouping for partial delivery flow.
+        try:
+            cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reservations)")}
+            if "reservation_group_uuid" not in cols:
+                self.conn.execute("ALTER TABLE reservations ADD COLUMN reservation_group_uuid TEXT")
+            self.conn.execute(
+                "UPDATE reservations "
+                "SET reservation_group_uuid = COALESCE(reservation_group_uuid, 'legacy-' || id) "
+                "WHERE COALESCE(TRIM(reservation_group_uuid), '') = ''"
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reservations_group ON reservations(reservation_group_uuid, status)"
+            )
             self.conn.commit()
         except Exception:
             pass
@@ -2335,15 +2371,18 @@ class SqliteDatabase:
         if not lines:
             raise ValueError("لا توجد أصناف للحجز")
         created = []
+        import uuid as _uuid
+        group_uuid = f"grp-{_uuid.uuid4()}"
         with self.conn:
-            for line in lines:
+            for idx, line in enumerate(lines):
                 total = float(line["unit_price"]) * int(line["qty"])
+                alloc_paid = float(paid_amount) if idx == 0 else 0.0
                 cur = self.conn.execute(
-                    """INSERT INTO reservations(created_at,customer,item_type,school,color,size,qty,unit_price,total_amount,paid_amount,status,note)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    """INSERT INTO reservations(created_at,customer,item_type,school,color,size,qty,unit_price,total_amount,paid_amount,status,note,reservation_group_uuid)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (now_iso(), (customer or "").strip(), line["item_type"], line["school"],
                      line["color"], line["size"], int(line["qty"]), float(line["unit_price"]),
-                     total, float(paid_amount), "معلق", line.get("note", "")),
+                     total, alloc_paid, "معلق", line.get("note", ""), group_uuid),
                 )
                 created.append(cur.lastrowid)
                 self.conn.execute(
@@ -2361,6 +2400,7 @@ class SqliteDatabase:
                 ).fetchall()
                 id_to_uuid = {int(r[0]): r[1] for r in uuid_rows}
                 self._record_sync_event("RESERVATION_CREATED", {
+                    "reservation_group_uuid": group_uuid,
                     "customer": (customer or "").strip() or None,
                     "paid_amount": float(paid_amount),
                     "reservations": [
@@ -2379,6 +2419,52 @@ class SqliteDatabase:
                     "shift_id": self.active_shift_id,
                 })
         return created
+
+    def get_available_qty_for_reservation(self, item_type: str, school: str, color: str, size: str) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COALESCE(SUM(count),0)
+            FROM stocks
+            WHERE LOWER(TRIM(item_type))=LOWER(TRIM(?))
+              AND LOWER(TRIM(school))=LOWER(TRIM(?))
+              AND LOWER(TRIM(color))=LOWER(TRIM(?))
+              AND LOWER(TRIM(size))=LOWER(TRIM(?))
+            """,
+            (item_type, school, color, size),
+        ).fetchone()
+        on_hand = int((row[0] if row else 0) or 0)
+        row2 = self.conn.execute(
+            """
+            SELECT COALESCE(SUM(qty),0)
+            FROM reservations
+            WHERE status='معلق'
+              AND LOWER(TRIM(item_type))=LOWER(TRIM(?))
+              AND LOWER(TRIM(school))=LOWER(TRIM(?))
+              AND LOWER(TRIM(color))=LOWER(TRIM(?))
+              AND LOWER(TRIM(size))=LOWER(TRIM(?))
+            """,
+            (item_type, school, color, size),
+        ).fetchone()
+        reserved = int((row2[0] if row2 else 0) or 0)
+        return max(0, on_hand - reserved)
+
+    def get_next_reservation_alert(self) -> Optional[Dict[str, Any]]:
+        row = self.conn.execute(
+            """
+            SELECT id, customer, item_type, school, color, size, qty, hold_until, note, created_at
+            FROM reservation_alerts
+            WHERE shown_at IS NULL
+            ORDER BY id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        return dict(row) if row else None
+
+    def mark_reservation_alert_shown(self, alert_id: int) -> None:
+        self.conn.execute(
+            "UPDATE reservation_alerts SET shown_at=? WHERE id=?",
+            (now_iso(), int(alert_id)),
+        )
 
     def list_reservations(self, status=None, date_from=None, date_to=None, school=None, item_type=None, color=None):
         where = ["1=1"]
@@ -2404,6 +2490,21 @@ class SqliteDatabase:
         cur = self.conn.execute(
             f"SELECT * FROM reservations WHERE {' AND '.join(where)} ORDER BY id DESC", args)
         return [dict(r) for r in cur.fetchall()]
+
+    def list_reservation_group_items(self, reservation_id: int) -> List[Dict[str, Any]]:
+        rid = int(reservation_id)
+        row = self.conn.execute(
+            "SELECT reservation_group_uuid FROM reservations WHERE id=?",
+            (rid,),
+        ).fetchone()
+        if not row:
+            return []
+        group_uuid = str(row[0] or "").strip() or f"legacy-{rid}"
+        rows = self.conn.execute(
+            "SELECT * FROM reservations WHERE reservation_group_uuid=? ORDER BY id ASC",
+            (group_uuid,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def update_reservation_payment(self, res_id, new_paid):
         self.conn.execute(
@@ -2459,6 +2560,115 @@ class SqliteDatabase:
                 "paid_amount_total": float(new_paid),
                 "shift_id": self.active_shift_id,
             })
+
+    def deliver_reservation_items(self, reservation_ids: Sequence[int], collected_amount: float = 0.0) -> Dict[str, Any]:
+        """Deliver selected reservation items with strict payment rules."""
+        self._require_shift()
+        ids = sorted({int(x) for x in reservation_ids})
+        if not ids:
+            raise ValueError("اختر عنصر حجز واحد على الأقل.")
+        ph = ",".join("?" for _ in ids)
+        rows = self.conn.execute(
+            f"SELECT * FROM reservations WHERE id IN ({ph})",
+            tuple(ids),
+        ).fetchall()
+        if len(rows) != len(ids):
+            raise ValueError("بعض عناصر الحجز غير موجودة.")
+        pending_rows = [r for r in rows if str(r["status"]) != "تم التسليم"]
+        if not pending_rows:
+            raise ValueError("العناصر المحددة تم تسليمها مسبقاً.")
+        group_uuid = str((rows[0]["reservation_group_uuid"] or "")).strip()
+        selected_ids = {int(r["id"]) for r in pending_rows}
+        selected_total = sum(float(r["total_amount"] or 0.0) for r in pending_rows)
+        selected_credit = sum(float(r["paid_amount"] or 0.0) for r in pending_rows)
+
+        other_pending: List[sqlite3.Row] = []
+        if group_uuid:
+            ph_sel = ",".join("?" for _ in selected_ids)
+            other_pending = self.conn.execute(
+                f"""
+                SELECT * FROM reservations
+                WHERE reservation_group_uuid=?
+                  AND status!='تم التسليم'
+                  AND id NOT IN ({ph_sel})
+                ORDER BY id ASC
+                """,
+                (group_uuid, *tuple(sorted(selected_ids))),
+            ).fetchall()
+
+        partial_mode = bool(other_pending)
+        required_collect = selected_total if partial_mode else max(0.0, selected_total - selected_credit)
+        collect = max(0.0, float(collected_amount))
+        if abs(collect - required_collect) > 1e-6:
+            raise ValueError(
+                f"المبلغ المطلوب لهذه العملية هو {required_collect:.2f} "
+                f"({'قيمة العناصر المسلمة بالكامل' if partial_mode else 'المتبقي بعد العربون'})."
+            )
+
+        cash_alloc: Dict[int, float] = {}
+        for r in pending_rows:
+            rid = int(r["id"])
+            total = float(r["total_amount"] or 0.0)
+            paid = float(r["paid_amount"] or 0.0)
+            cash_alloc[rid] = total if partial_mode else max(0.0, total - paid)
+
+        with self.conn:
+            if partial_mode and selected_credit > 1e-9:
+                # Keep existing reservation prepayment on the still-pending items.
+                credit_left = selected_credit
+                for rr in other_pending:
+                    rr_id = int(rr["id"])
+                    rr_total = float(rr["total_amount"] or 0.0)
+                    rr_paid = float(rr["paid_amount"] or 0.0)
+                    room = max(0.0, rr_total - rr_paid)
+                    if room <= 1e-9:
+                        continue
+                    add_credit = min(room, credit_left)
+                    self.conn.execute(
+                        "UPDATE reservations SET paid_amount=? WHERE id=?",
+                        (rr_paid + add_credit, rr_id),
+                    )
+                    credit_left -= add_credit
+                    if credit_left <= 1e-9:
+                        break
+            for r in pending_rows:
+                rid = int(r["id"])
+                row_total = float(r["total_amount"] or 0.0)
+                add_paid = float(cash_alloc.get(rid, 0.0))
+                new_paid = row_total
+                self.conn.execute(
+                    "UPDATE reservations SET status='تم التسليم', paid_amount=? WHERE id=?",
+                    (new_paid, rid),
+                )
+                if add_paid > 1e-9:
+                    self.conn.execute(
+                        """INSERT INTO movements(ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,unit_price)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        (now_iso(), "DELIVER_PAY", None, 0,
+                         f"تحصيل باقي حجز #{rid}",
+                         None, r["item_type"], r["school"], r["color"], r["size"],
+                         add_paid),
+                    )
+                self._record_sync_event("RESERVATION_DELIVERED", {
+                    "reservation_uuid": r["uuid"] if "uuid" in r.keys() else None,
+                    "reservation_id":   rid,
+                    "collected_amount": add_paid,
+                    "paid_amount_total": float(new_paid),
+                    "shift_id": self.active_shift_id,
+                })
+        group_done = False
+        if group_uuid:
+            left_cnt = self.conn.execute(
+                "SELECT COUNT(*) FROM reservations WHERE reservation_group_uuid=? AND status!='تم التسليم'",
+                (group_uuid,),
+            ).fetchone()
+            group_done = int((left_cnt[0] if left_cnt else 0) or 0) == 0
+        return {
+            "delivered_items": len(pending_rows),
+            "collected_amount": collect,
+            "group_completed": group_done,
+            "group_uuid": group_uuid or None,
+        }
 
     # -------- Shift Management --------
     def start_shift(self) -> int:
@@ -5753,6 +5963,11 @@ class POSFrame(ttk.Frame):
                     f"تم إنشاء {WAREHOUSE_RETURN_LABEL} #{bill_id} وسيتم إرساله للمراجعة في المخزن",
                     toast_type="success",
                 )
+                try:
+                    import sync_ui
+                    sync_ui.run_sync_now(self.winfo_toplevel(), self.db.conn, reason=WAREHOUSE_RETURN_LABEL)
+                except Exception:
+                    pass
                 print_title = "طباعة مستند الإرجاع"
                 print_body = f"طباعة مستند {WAREHOUSE_RETURN_LABEL} #{bill_id}؟"
             elif branch_target:
@@ -5761,6 +5976,11 @@ class POSFrame(ttk.Frame):
                     f"تم إنشاء طلب تحويل #{bill_id} إلى {branch_target} عبر المخزن",
                     toast_type="success",
                 )
+                try:
+                    import sync_ui
+                    sync_ui.run_sync_now(self.winfo_toplevel(), self.db.conn, reason=f"تحويل إلى {branch_target}")
+                except Exception:
+                    pass
                 print_title = "طباعة مستند التحويل"
                 print_body = f"طباعة مستند التحويل إلى {branch_target} #{bill_id}؟"
             else:
@@ -6679,11 +6899,12 @@ class ReservationsFrame(ttk.Frame):
 
         self._res_table = ttk.Treeview(
             tbl_wrap,
-            columns=("id", "created", "customer", "item", "school", "color", "size", "qty", "total", "paid", "status"),
+            columns=("bill", "id", "created", "customer", "item", "school", "color", "size", "qty", "total", "paid", "status"),
             show="headings",
             height=12,
         )
         for col, txt, w in [
+            ("bill", "الفاتورة", 88),
             ("id", "رقم", 40), ("created", "التاريخ", 100), ("customer", "العميل", 100),
             ("item", "النوع", 90), ("school", "المدرسة", 110), ("color", "اللون", 70),
             ("size", "المقاس", 55), ("qty", "الكمية", 55), ("total", "الإجمالي", 80),
@@ -6703,7 +6924,7 @@ class ReservationsFrame(ttk.Frame):
         # ---- Buttons row ----
         btns = ttk.Frame(self)
         btns.pack(fill=tk.X, padx=4, pady=4)
-        ttk.Button(btns, text="تسليم الحجز", command=self._deliver_reservation).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(btns, text="تسليم الحجز", command=self._deliver_reservation_partial).pack(side=tk.RIGHT, padx=(4, 0))
         ttk.Button(btns, text="طباعة القائمة", command=self._print_reservations).pack(side=tk.RIGHT)
 
         self._refresh()
@@ -6750,8 +6971,10 @@ class ReservationsFrame(ttk.Frame):
             self._res_table.delete(*self._res_table.get_children())
             for r in self.db.list_reservations(status=status, date_from=df, date_to=dt,
                                                 school=school, item_type=item_type, color=color):
+                grp = str(r.get("reservation_group_uuid") or "").strip()
+                bill_code = grp[:8] if grp else f"legacy-{int(r['id'])}"
                 self._res_table.insert("", tk.END, values=(
-                    r["id"], r["created_at"][:10], r.get("customer", ""),
+                    bill_code, r["id"], r["created_at"][:10], r.get("customer", ""),
                     r["item_type"], r["school"], r["color"], r["size"],
                     r["qty"], f"{float(r['total_amount']):.2f}",
                     f"{float(r['paid_amount']):.2f}", r["status"]
@@ -6814,6 +7037,62 @@ class ReservationsFrame(ttk.Frame):
             except Exception as ex:
                 messagebox.showerror("خطأ", str(ex), parent=dlg)
 
+        ttk.Button(frm, text="تأكيد التسليم", command=_confirm).pack(anchor="e")
+
+    def _deliver_reservation_partial(self):
+        """Deliver selected items from a reservation bill (partial by default)."""
+        sel = self._res_table.selection()
+        if not sel:
+            messagebox.showwarning("تنبيه", "اختر حجزاً من الجدول أولاً.", parent=self)
+            return
+        vals = self._res_table.item(sel[0], "values")
+        res_id = int(vals[1]); status = vals[11]
+        if status == "تم التسليم":
+            messagebox.showinfo("تنبيه", "هذا السطر تم تسليمه مسبقاً.", parent=self)
+            return
+        group_items = self.db.list_reservation_group_items(res_id)
+        pending_items = [r for r in group_items if str(r.get("status")) != "تم التسليم"]
+        if not pending_items:
+            messagebox.showinfo("تنبيه", "كل عناصر الفاتورة تم تسليمها مسبقاً.", parent=self)
+            return
+        group_code = str(group_items[0].get("reservation_group_uuid") or f"legacy-{res_id}")[:8]
+        remaining = sum(max(0.0, float(r.get("total_amount") or 0.0) - float(r.get("paid_amount") or 0.0)) for r in pending_items)
+        dlg = tk.Toplevel(self); dlg.title("تسليم عناصر الحجز"); dlg.geometry("760x420"); dlg.transient(self.winfo_toplevel()); dlg.grab_set()
+        frm = ttk.Frame(dlg, padding=12); frm.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frm, text=f"فاتورة الحجز: {group_code}", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 4))
+        ttk.Label(frm, text="اختر العناصر التي تم تسليمها الآن (تسليم جزئي افتراضياً)").pack(anchor="w")
+        ttk.Label(frm, text="مهم: في التسليم الجزئي يجب تحصيل قيمة العناصر المسلمة بالكامل، والعربون يبقى للعناصر المعلقة.", foreground="#7a3e00").pack(anchor="w")
+        ttk.Label(frm, text=f"المتبقي للعناصر غير المسلمة: {remaining:.2f}", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
+        table_wrap = ttk.Frame(frm); table_wrap.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        tv = ttk.Treeview(table_wrap, columns=("sel", "id", "item", "school", "color", "size", "qty", "remain"), show="headings", height=8)
+        for col, txt, w in [("sel", "تحديد", 56), ("id", "رقم", 48), ("item", "النوع", 120), ("school", "المدرسة", 110), ("color", "اللون", 90), ("size", "المقاس", 70), ("qty", "كمية", 60), ("remain", "متبقي", 90)]:
+            tv.heading(col, text=txt); tv.column(col, width=w, anchor="center")
+        ysb = ttk.Scrollbar(table_wrap, orient="vertical", command=tv.yview); tv.configure(yscrollcommand=ysb.set); tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True); ysb.pack(side=tk.RIGHT, fill=tk.Y)
+        selected_ids: set[int] = set()
+        for r in pending_items:
+            rid = int(r["id"]); rem = max(0.0, float(r.get("total_amount") or 0.0) - float(r.get("paid_amount") or 0.0))
+            tv.insert("", tk.END, iid=str(rid), values=("☐", rid, r.get("item_type", ""), r.get("school", ""), r.get("color", ""), r.get("size", ""), int(r.get("qty") or 0), f"{rem:.2f}"))
+        def _toggle_selected(_e=None):
+            cur = tv.focus() or (tv.selection()[0] if tv.selection() else None)
+            if not cur: return
+            rid = int(cur); vals2 = list(tv.item(cur, "values"))
+            if rid in selected_ids: selected_ids.remove(rid); vals2[0] = "☐"
+            else: selected_ids.add(rid); vals2[0] = "☑"
+            tv.item(cur, values=vals2)
+        tv.bind("<Double-1>", _toggle_selected, add="+")
+        ttk.Label(frm, text="المبلغ المحصّل الآن:").pack(anchor="w")
+        collect_var = tk.StringVar(value="0"); ttk.Entry(frm, textvariable=collect_var, width=15).pack(anchor="w", pady=(0, 8))
+        def _confirm():
+            if not selected_ids: messagebox.showwarning("تنبيه", "اختر عنصراً واحداً على الأقل للتسليم.", parent=dlg); return
+            try: collected = _parse_money_amount(collect_var.get())
+            except ValueError: messagebox.showerror("خطأ", "أدخل مبلغاً صحيحاً.", parent=dlg); return
+            try:
+                summary = self.db.deliver_reservation_items(sorted(selected_ids), collected); dlg.destroy()
+                msg = f"تم تسليم {int(summary.get('delivered_items') or 0)} عنصر."
+                msg += " وتم إغلاق الفاتورة بالكامل." if summary.get("group_completed") else " وباقي العناصر لا تزال معلقة."
+                ToastNotification.show(self.winfo_toplevel(), msg, toast_type="success"); self._refresh()
+            except Exception as ex:
+                messagebox.showerror("خطأ", str(ex), parent=dlg)
         ttk.Button(frm, text="تأكيد التسليم", command=_confirm).pack(anchor="e")
 
     def _print_reservations(self):
@@ -8201,7 +8480,8 @@ class AdminWindow(tk.Toplevel):
 
         imp_btns = ttk.Frame(imp_tab)
         imp_btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
-        ttk.Button(imp_btns, text="استيراد", command=self._do_import).pack(side=tk.RIGHT)
+        self._import_btn = ttk.Button(imp_btns, text="استيراد", command=self._do_import)
+        self._import_btn.pack(side=tk.RIGHT)
 
         # ---- Tab 4: Adjustment ----
         adj_tab = ttk.Frame(nb, padding=12)
@@ -8242,7 +8522,8 @@ class AdminWindow(tk.Toplevel):
 
         adj_btns = ttk.Frame(adj_tab)
         adj_btns.grid(row=9, column=0, columnspan=2, sticky="e", pady=(12, 0))
-        ttk.Button(adj_btns, text="تطبيق التعديل", command=self._do_adjustment).pack(side=tk.RIGHT)
+        self._adjust_btn = ttk.Button(adj_btns, text="تطبيق التعديل", command=self._do_adjustment)
+        self._adjust_btn.pack(side=tk.RIGHT)
 
         # ---- Tab 5: Reset Counts ----
         reset_tab = ttk.Frame(nb, padding=12)
@@ -8264,10 +8545,12 @@ class AdminWindow(tk.Toplevel):
 
         reset_btns = ttk.Frame(reset_tab)
         reset_btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
-        ttk.Button(reset_btns, text="إعادة التعيين", command=self._reset_counts).pack(side=tk.RIGHT)
+        self._reset_btn = ttk.Button(reset_btns, text="إعادة التعيين", command=self._reset_counts)
+        self._reset_btn.pack(side=tk.RIGHT)
 
         # ---- Close button ----
         ttk.Button(self, text="إغلاق", command=self.destroy).pack(side=tk.BOTTOM, pady=8)
+        self._apply_feature_button_states()
 
     # ---- Actions ----
 
@@ -8302,6 +8585,7 @@ class AdminWindow(tk.Toplevel):
     def _reload_feature_permissions(self):
         for key, var in self._feature_vars.items():
             var.set(self.db.is_manager_feature_enabled(key))
+        self._apply_feature_button_states()
 
     def _save_feature_permissions(self):
         pw = self._perm_pw.get()
@@ -8310,8 +8594,26 @@ class AdminWindow(tk.Toplevel):
             return
         for key, var in self._feature_vars.items():
             self.db.set_manager_feature_enabled(key, bool(var.get()))
+        self._apply_feature_button_states()
+        app = getattr(self.winfo_toplevel(), "_app_controller", None)
+        if app is not None and hasattr(app, "_refresh_feature_states"):
+            try:
+                app._refresh_feature_states()
+            except Exception:
+                pass
         ToastNotification.show(self.winfo_toplevel(), "تم حفظ صلاحيات المدير بنجاح", toast_type="success")
         self._perm_pw.delete(0, tk.END)
+
+    def _apply_feature_button_states(self):
+        self._import_btn.configure(
+            state=("normal" if self.db.is_manager_feature_enabled("allow_excel_import") else "disabled")
+        )
+        self._adjust_btn.configure(
+            state=("normal" if self.db.is_manager_feature_enabled("allow_manual_adjustment") else "disabled")
+        )
+        self._reset_btn.configure(
+            state=("normal" if self.db.is_manager_feature_enabled("allow_reset_counts") else "disabled")
+        )
 
     def _do_import(self):
         if not self.db.is_manager_feature_enabled("allow_excel_import"):
@@ -8674,6 +8976,7 @@ class WarehouseApp:
         self._check_shift_state()
         self._bind_shortcuts()
         self._update_clock()
+        self.root.after(1500, self._poll_reservation_alerts)
         try:
             import sync_periodic
 
@@ -8709,10 +9012,12 @@ class WarehouseApp:
         self._toolbar.pack(fill=tk.X, side=tk.TOP, padx=6, pady=(4, 0))
 
         # Old fully-disabled toolbar buttons were commented during the first lockdown pass.
-        ttk.Button(self._toolbar, text="\u0627\u0644\u0645\u062E\u0632\u0648\u0646", command=self._open_inventory).pack(side=tk.LEFT, padx=2)
+        self._inventory_btn = ttk.Button(self._toolbar, text="\u0627\u0644\u0645\u062E\u0632\u0648\u0646", command=self._open_inventory)
+        self._inventory_btn.pack(side=tk.LEFT, padx=2)
         ttk.Button(self._toolbar, text="\u0633\u062C\u0644 \u0627\u0644\u0641\u0648\u0627\u062A\u064A\u0631", command=self._open_bills_history).pack(side=tk.LEFT, padx=2)
         ttk.Button(self._toolbar, text="\u0633\u062C\u0644 \u0627\u0644\u062D\u0631\u0643\u0627\u062A", command=self._open_movements).pack(side=tk.LEFT, padx=2)
-        ttk.Button(self._toolbar, text="\u062A\u0639\u062F\u064A\u0644 \u0627\u0644\u0623\u0633\u0639\u0627\u0631", command=self._open_bulk_price).pack(side=tk.LEFT, padx=2)
+        self._bulk_price_btn = ttk.Button(self._toolbar, text="\u062A\u0639\u062F\u064A\u0644 \u0627\u0644\u0623\u0633\u0639\u0627\u0631", command=self._open_bulk_price)
+        self._bulk_price_btn.pack(side=tk.LEFT, padx=2)
 
         # Right side toolbar
         ttk.Button(self._toolbar, text="\u0627\u0644\u0625\u0639\u062F\u0627\u062F\u0627\u062A", command=self._open_admin).pack(side=tk.RIGHT, padx=2)
@@ -8769,6 +9074,7 @@ class WarehouseApp:
         self._shifts_frame.pack(fill=tk.BOTH, expand=True)
 
         self._nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        self._refresh_feature_states()
 
         # ---- Status Bar ----
         self._statusbar = tk.Frame(self.root, bg=T.get("EDGE", "#cbd5e1"), height=26)
@@ -8805,6 +9111,28 @@ class WarehouseApp:
         except Exception:
             pass
         self.root.after(1000, self._update_clock)
+
+    def _poll_reservation_alerts(self):
+        try:
+            alert = self.db.get_next_reservation_alert()
+            if alert:
+                hold_txt = str(alert.get("hold_until") or "").strip()
+                msg = (
+                    "طلب حجز جديد من الكول سنتر:\n\n"
+                    f"العميل: {alert.get('customer')}\n"
+                    f"الصنف: {alert.get('item_type')} | {alert.get('school')} | {alert.get('color')} | {alert.get('size')}\n"
+                    f"الكمية: {alert.get('qty')}"
+                )
+                if hold_txt:
+                    msg += f"\nمدة الحجز حتى: {hold_txt}"
+                note = str(alert.get("note") or "").strip()
+                if note:
+                    msg += f"\nملاحظة: {note}"
+                messagebox.showinfo("طلب حجز جديد", msg, parent=self.root)
+                self.db.mark_reservation_alert_shown(int(alert["id"]))
+        except Exception:
+            pass
+        self.root.after(4000, self._poll_reservation_alerts)
 
     def _bind_shortcuts(self):
         self.root.bind("<F5>", lambda e: self._shortcut_refresh())
@@ -8943,6 +9271,20 @@ class WarehouseApp:
             messagebox.showerror("مرفوض", "كلمة المرور غير صحيحة.", parent=self.root)
             return
         BulkPriceDialog(self.root, self.db)
+
+    def _refresh_feature_states(self):
+        try:
+            self._inventory_btn.configure(
+                state=("normal" if self.db.is_manager_feature_enabled("allow_inventory_window") else "disabled")
+            )
+        except Exception:
+            pass
+        try:
+            self._bulk_price_btn.configure(
+                state=("normal" if self.db.is_manager_feature_enabled("allow_bulk_price") else "disabled")
+            )
+        except Exception:
+            pass
 
     def _check_shift_state(self):
         shift = self.db.get_open_shift()

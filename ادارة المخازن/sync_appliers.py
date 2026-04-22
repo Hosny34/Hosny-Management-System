@@ -990,6 +990,32 @@ def apply_wh_pos_ledger_sale_exchanged(
     return {"amount": diff}
 
 
+def apply_shipment_receipt_reported(
+    conn: sqlite3.Connection,
+    payload: Dict[str, Any],
+    event_uuid: str,
+) -> Dict[str, Any]:
+    """Queue POS shipment verification report for warehouse decision."""
+    shipment_uuid = _clean(payload.get("shipment_uuid")) or event_uuid
+    src = _src_device(conn, payload, event_uuid) or _clean(payload.get("source_device")) or "POS"
+    note = _clean(payload.get("note"))
+    has_diff = int(bool(payload.get("has_diff")))
+    try:
+        payload_json = json.dumps(payload.get("lines") or [], ensure_ascii=False, default=str)
+    except Exception:
+        payload_json = "[]"
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO shipment_receipt_reviews(
+            sync_event_uuid, shipment_uuid, source_device,
+            payload_json, has_diff, note, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (event_uuid, shipment_uuid, src, payload_json, has_diff, note, _now_iso()),
+    )
+    return {"queued": True, "shipment_uuid": shipment_uuid, "has_diff": bool(has_diff)}
+
+
 # ----------------------------- registry ------------------------------- #
 
 ApplierFn = Callable[[sqlite3.Connection, Dict[str, Any], str], Dict[str, Any]]
@@ -1014,6 +1040,7 @@ _WAREHOUSE_REGISTRY: Dict[str, ApplierFn] = {
     "SALE_RETURNED": apply_wh_pos_ledger_sale_returned,
     "SALE_VOIDED": apply_wh_pos_ledger_sale_voided,
     "SALE_EXCHANGED": apply_wh_pos_ledger_sale_exchanged,
+    "SHIPMENT_RECEIPT_REPORTED": apply_shipment_receipt_reported,
 }
 
 

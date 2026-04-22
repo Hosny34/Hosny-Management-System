@@ -141,7 +141,7 @@ def apply_stock_transfer_out(
     payload: Dict[str, Any],
     event_uuid: str,
 ) -> Dict[str, Any]:
-    """Apply a warehouse → this-POS stock shipment.
+    """Queue a warehouse → POS shipment for cashier verification.
 
     Payload shape (see create_branch_shipment on the warehouse side):
         {
@@ -159,16 +159,12 @@ def apply_stock_transfer_out(
         }
 
     Behaviour:
-        - Adds one `stocks` row per item (matching existing POS
-          `add_stock` convention of row-per-batch, not merged).
-        - Inserts a `movements` row with direction='IN' and a note
-          referencing the shipment.
-        - Auto-heals `spec_history` and `item_defaults` so the new
-          specs show up in dropdowns next time the user opens a
-          picker.
-        - Applies `size_profiles` from the warehouse payload so POS
-          size pickers match the warehouse configuration for shipped
-          (item_type, school, color) keys.
+        - Stores shipment lines into `incoming_shipment_items_pending`
+          (no stock mutation yet).
+        - Creates one `incoming_shipment_alerts` row so the POS UI can
+          open an item-by-item checklist for the cashier.
+        - Auto-heals `spec_history` and `item_defaults` and applies
+          `size_profiles` immediately (safe metadata updates).
     """
     items = payload.get("items") or []
     if not isinstance(items, list) or not items:
@@ -179,7 +175,16 @@ def apply_stock_transfer_out(
     short_ship = (shipment_uuid[:8] if shipment_uuid else event_uuid[:8])
     note_base = f"شحنة من {from_dev} #{short_ship}"
 
-    added_rows = 0
+    # Idempotency guard by shipment UUID.
+    if shipment_uuid:
+        dup = conn.execute(
+            "SELECT id FROM incoming_shipment_alerts WHERE shipment_uuid=? LIMIT 1",
+            (shipment_uuid,),
+        ).fetchone()
+        if dup:
+            return {"queued": True, "duplicate": True, "shipment": shipment_uuid}
+
+    queued_rows = 0
     total_qty = 0
 
     for item in items:
@@ -206,32 +211,42 @@ def apply_stock_transfer_out(
         _upsert_spec_history(conn, {"item_type": it, "school": sc, "color": cl, "size": sz})
         _ensure_item_default_price(conn, it, price)
 
-        cur = conn.execute(
-            """INSERT INTO stocks(item_type, school, color, size, unit_price, count)
-               VALUES(?,?,?,?,?,?)""",
-            (it, sc, cl, sz, price, qty),
-        )
-        stock_id = int(cur.lastrowid)
-
         conn.execute(
-            """INSERT INTO movements
-               (ts, direction, stock_id, qty, note, bill_id,
-                item_type, school, color, size, unit_price)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                _now_iso(), "IN", stock_id, qty, note_base, None,
-                it, sc, cl, sz, price,
-            ),
+            """
+            INSERT INTO incoming_shipment_items_pending(
+                shipment_uuid, line_index, item_type, school, color, size,
+                unit_price, expected_qty, received_qty, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'PENDING')
+            ON CONFLICT(shipment_uuid, line_index) DO NOTHING
+            """,
+            (shipment_uuid or event_uuid, queued_rows, it, sc, cl, sz, price, qty),
         )
-        added_rows += 1
+        queued_rows += 1
         total_qty += qty
 
     profile_rows = _apply_size_profile_rows(conn, payload.get("size_profiles"))
+    conn.execute(
+        """
+        INSERT INTO incoming_shipment_alerts(
+            sync_event_uuid, shipment_uuid, from_device, note, total_qty, created_at, shown_at
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL)
+        ON CONFLICT(sync_event_uuid) DO NOTHING
+        """,
+        (
+            event_uuid,
+            shipment_uuid or event_uuid,
+            from_dev,
+            note_base,
+            total_qty,
+            _now_iso(),
+        ),
+    )
 
     return {
-        "added_rows": added_rows,
+        "queued_rows": queued_rows,
         "total_qty":  total_qty,
         "shipment":   shipment_uuid or None,
+        "needs_verification": True,
         "size_profiles_applied": profile_rows,
     }
 
@@ -562,6 +577,143 @@ def apply_catalog_upsert(
         "profiles": seeded_profiles,
         "history":  seeded_history,
     }
+
+
+def apply_remote_reservation_request(
+    conn: sqlite3.Connection,
+    payload: Dict[str, Any],
+    event_uuid: str,
+) -> Dict[str, Any]:
+    """Apply a call-center reservation request on the POS.
+
+    Rules:
+    - Creates a pending reservation line and a RESERVE movement.
+    - Rejects the request when resulting available quantity would be < 4.
+    - Stores a one-shot alert so the POS UI can pop a reservation notice.
+    """
+    if conn.execute(
+        "SELECT 1 FROM reservation_alerts WHERE sync_event_uuid=? LIMIT 1",
+        (event_uuid,),
+    ).fetchone():
+        return {"already_applied": True}
+
+    line = payload.get("line") or {}
+    if not isinstance(line, dict):
+        raise ApplyError("REMOTE_RESERVATION_REQUEST: missing line payload")
+    customer = _clean(payload.get("customer"))
+    if not customer:
+        raise ApplyError("REMOTE_RESERVATION_REQUEST: customer is required")
+    it = _clean(line.get("item_type"))
+    sc = _clean(line.get("school"))
+    cl = _clean(line.get("color"))
+    sz = _clean(line.get("size"))
+    if not (it and sc and cl and sz):
+        raise ApplyError("REMOTE_RESERVATION_REQUEST: incomplete item specs")
+    try:
+        qty = int(line.get("qty") or 0)
+    except (TypeError, ValueError):
+        raise ApplyError("REMOTE_RESERVATION_REQUEST: invalid qty")
+    if qty <= 0:
+        raise ApplyError("REMOTE_RESERVATION_REQUEST: qty must be > 0")
+
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(count),0)
+        FROM stocks
+        WHERE LOWER(TRIM(item_type))=LOWER(TRIM(?))
+          AND LOWER(TRIM(school))=LOWER(TRIM(?))
+          AND LOWER(TRIM(color))=LOWER(TRIM(?))
+          AND LOWER(TRIM(size))=LOWER(TRIM(?))
+        """,
+        (it, sc, cl, sz),
+    ).fetchone()
+    on_hand = int((row[0] if row else 0) or 0)
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(qty),0)
+        FROM reservations
+        WHERE status='معلق'
+          AND LOWER(TRIM(item_type))=LOWER(TRIM(?))
+          AND LOWER(TRIM(school))=LOWER(TRIM(?))
+          AND LOWER(TRIM(color))=LOWER(TRIM(?))
+          AND LOWER(TRIM(size))=LOWER(TRIM(?))
+        """,
+        (it, sc, cl, sz),
+    ).fetchone()
+    reserved_pending = int((row[0] if row else 0) or 0)
+    available = max(0, on_hand - reserved_pending)
+    if qty > available:
+        raise ApplyError(f"REMOTE_RESERVATION_REQUEST: requested qty {qty} exceeds available {available}")
+    if (available - qty) < 4:
+        raise ApplyError("REMOTE_RESERVATION_REQUEST: cannot reserve because remaining stock would be < 4")
+
+    try:
+        unit_price = float(line.get("unit_price") or 0)
+    except (TypeError, ValueError):
+        unit_price = 0.0
+    if unit_price <= 0:
+        prow = conn.execute(
+            """
+            SELECT unit_price
+            FROM stocks
+            WHERE LOWER(TRIM(item_type))=LOWER(TRIM(?))
+              AND LOWER(TRIM(school))=LOWER(TRIM(?))
+              AND LOWER(TRIM(color))=LOWER(TRIM(?))
+              AND LOWER(TRIM(size))=LOWER(TRIM(?))
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (it, sc, cl, sz),
+        ).fetchone()
+        if prow and prow[0] is not None:
+            unit_price = float(prow[0] or 0)
+
+    try:
+        hold_days = int(payload.get("hold_days") or 2)
+    except (TypeError, ValueError):
+        hold_days = 2
+    if hold_days <= 0:
+        hold_days = 2
+    hold_until = conn.execute(
+        "SELECT datetime('now', ?)",
+        (f"+{hold_days} days",),
+    ).fetchone()[0]
+    note = f"طلب حجز من الكول سنتر (ينتهي {hold_until})"
+    total = float(unit_price) * int(qty)
+    ts = _now_iso()
+    cur = conn.execute(
+        """
+        INSERT INTO reservations(created_at, customer, item_type, school, color, size, qty, unit_price, total_amount, paid_amount, status, note)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'معلق', ?)
+        """,
+        (ts, customer, it, sc, cl, sz, qty, float(unit_price), total, note),
+    )
+    reservation_id = int(cur.lastrowid)
+    conn.execute(
+        """
+        INSERT INTO movements(ts, direction, stock_id, qty, note, bill_id, item_type, school, color, size, unit_price)
+        VALUES (?, 'RESERVE', NULL, ?, ?, NULL, ?, ?, ?, ?, ?)
+        """,
+        (ts, qty, f"حجز - {customer}", it, sc, cl, sz, float(unit_price)),
+    )
+    conn.execute(
+        """
+        INSERT INTO reservation_alerts
+            (sync_event_uuid, request_uuid, customer, branch_device, item_type, school, color, size, qty, hold_until, note, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event_uuid,
+            _clean(payload.get("request_uuid")) or None,
+            customer,
+            _clean(payload.get("__target_device__")) or None,
+            it, sc, cl, sz, qty,
+            hold_until,
+            note,
+            ts,
+        ),
+    )
+    return {"reservation_id": reservation_id, "qty": qty, "hold_until": hold_until}
 
 
 # ---------------- warehouse: POS mirror + financial ledger appliers ---------------- #
@@ -999,6 +1151,7 @@ _POS_REGISTRY: Dict[str, ApplierFn] = {
     "STOCK_TRANSFER_OUT": apply_stock_transfer_out,
     "PRICE_UPDATE":       apply_price_update,
     "CATALOG_UPSERT":     apply_catalog_upsert,
+    "REMOTE_RESERVATION_REQUEST": apply_remote_reservation_request,
 }
 
 

@@ -13,6 +13,7 @@ import queue
 import random
 import sqlite3
 import threading
+import time
 import tkinter as tk
 import zlib
 from typing import Any, Dict, Optional
@@ -38,10 +39,13 @@ class PeriodicSyncController:
         self._failures = 0
         self._after_id: Optional[str] = None
         self._thr: Optional[threading.Thread] = None
+        self._wait_thr: Optional[threading.Thread] = None
+        self._last_nudge_at = 0.0
 
     def start(self) -> None:
         self._schedule_after(self._startup_delay_ms())
         self._pump_queue()
+        self._start_waiter()
 
     def _startup_delay_ms(self) -> int:
         """Stagger first sync attempts to reduce overlap across apps/devices."""
@@ -156,6 +160,49 @@ class PeriodicSyncController:
 
         self._thr = threading.Thread(target=worker, daemon=True)
         self._thr.start()
+
+    def _start_waiter(self) -> None:
+        if self._wait_thr is not None and self._wait_thr.is_alive():
+            return
+
+        def waiter() -> None:
+            while True:
+                try:
+                    conn = sqlite3.connect(self.db_path, isolation_level=None, check_same_thread=False)
+                    conn.row_factory = sqlite3.Row
+                    try:
+                        conn.execute("PRAGMA busy_timeout=8000;")
+                        cfg = sync_client.load_sync_config(conn)
+                        if not (cfg or {}).get("server_url") or not (cfg or {}).get("device_name"):
+                            time.sleep(10.0)
+                            continue
+                        client = sync_client.SyncClient(conn, verify_tls=self.verify_tls)
+                        res = client.wait_for_updates(timeout_s=25)
+                    finally:
+                        conn.close()
+                except Exception:
+                    time.sleep(4.0)
+                    continue
+
+                if not bool((res or {}).get("has_updates")):
+                    continue
+
+                def _wake() -> None:
+                    now = time.monotonic()
+                    if now - self._last_nudge_at < 2.0:
+                        return
+                    self._last_nudge_at = now
+                    if self._thr is not None and self._thr.is_alive():
+                        return
+                    self._schedule_after(250)
+
+                try:
+                    self.root.after(0, _wake)
+                except Exception:
+                    return
+
+        self._wait_thr = threading.Thread(target=waiter, daemon=True)
+        self._wait_thr.start()
 
 
 def attach_periodic_sync(root: tk.Misc, db_path: str, *, verify_tls: bool = True) -> None:

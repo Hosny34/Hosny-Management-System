@@ -601,3 +601,52 @@ def open_sync_dialog(master: tk.Misc, db_conn: sqlite3.Connection) -> None:
 def open_sync_setup(master: tk.Misc, db_conn: sqlite3.Connection) -> None:
     """Open the setup dialog directly."""
     SyncSetupDialog(master, db_conn)
+
+
+def run_sync_now(master: tk.Misc, db_conn: sqlite3.Connection, *, reason: str = "") -> None:
+    """Run one sync cycle immediately in background.
+
+    Useful for "send + sync now" workflows after enqueuing business events.
+    """
+    host = master.winfo_toplevel()
+    note = f" ({reason})" if str(reason or "").strip() else ""
+    try:
+        db_path = db_conn.execute("PRAGMA database_list").fetchone()[2]
+    except Exception as e:
+        messagebox.showerror("المزامنة", f"تعذر بدء المزامنة{note}:\n{e}", parent=host)
+        return
+
+    q: "queue.Queue[tuple]" = queue.Queue()
+
+    def worker() -> None:
+        conn = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        try:
+            client = sync_client.SyncClient(conn)
+            summary = client.run_cycle(progress=None)
+            q.put(("done", summary))
+        except Exception as ex:
+            q.put(("error", str(ex)))
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def pump() -> None:
+        try:
+            kind, payload = q.get_nowait()
+        except queue.Empty:
+            host.after(120, pump)
+            return
+        if kind == "done":
+            try:
+                present_sync_cycle_summary(host, payload)
+            except Exception:
+                _notify_host_synced(host)
+        else:
+            present_sync_cycle_failure(host, str(payload))
+
+    host.after(120, pump)

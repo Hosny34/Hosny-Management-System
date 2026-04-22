@@ -303,6 +303,40 @@ class SyncClient:
         token = self._fetch_jwt(cfg)
         return {"health": body, "auth_ok": True, "token_prefix": token[:16] + "…"}
 
+    def wait_for_updates(self, *, timeout_s: int = 25) -> Dict[str, Any]:
+        """Long-poll server for incoming updates visible to this device."""
+        cfg = load_sync_config(self.conn)
+        if not cfg.get("server_url") or not cfg.get("device_name"):
+            return {
+                "has_updates": False,
+                "next_seq": int(cfg.get("last_pulled_seq") or 0),
+                "max_server_seq": 0,
+            }
+
+        token = self._fetch_jwt(cfg)
+        since = int(cfg.get("last_pulled_seq") or 0)
+        wait_url = (
+            cfg["server_url"].rstrip("/")
+            + "/v1/sync/wait?"
+            + urllib.parse.urlencode(
+                {"since": since, "timeout_s": int(max(1, min(timeout_s, 60)))}
+            )
+        )
+        status, body = _http_request(
+            "GET",
+            wait_url,
+            token=token,
+            timeout=float(max(5, timeout_s + 5)),
+            verify_tls=self.verify_tls,
+        )
+        if status != 200:
+            raise SyncError(f"wait returned HTTP {status}")
+        return {
+            "has_updates": bool(body.get("has_updates")),
+            "next_seq": int(body.get("next_seq") or since),
+            "max_server_seq": int(body.get("max_server_seq") or 0),
+        }
+
     def run_cycle(self, progress: Optional[ProgressFn] = None) -> Dict[str, Any]:
         """Run one full push + pull + apply cycle. Returns a summary dict.
 

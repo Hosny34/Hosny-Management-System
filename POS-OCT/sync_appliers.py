@@ -564,6 +564,143 @@ def apply_catalog_upsert(
     }
 
 
+def apply_remote_reservation_request(
+    conn: sqlite3.Connection,
+    payload: Dict[str, Any],
+    event_uuid: str,
+) -> Dict[str, Any]:
+    """Apply a call-center reservation request on the POS.
+
+    Rules:
+    - Creates a pending reservation line and a RESERVE movement.
+    - Rejects the request when resulting available quantity would be < 4.
+    - Stores a one-shot alert so the POS UI can pop a reservation notice.
+    """
+    if conn.execute(
+        "SELECT 1 FROM reservation_alerts WHERE sync_event_uuid=? LIMIT 1",
+        (event_uuid,),
+    ).fetchone():
+        return {"already_applied": True}
+
+    line = payload.get("line") or {}
+    if not isinstance(line, dict):
+        raise ApplyError("REMOTE_RESERVATION_REQUEST: missing line payload")
+    customer = _clean(payload.get("customer"))
+    if not customer:
+        raise ApplyError("REMOTE_RESERVATION_REQUEST: customer is required")
+    it = _clean(line.get("item_type"))
+    sc = _clean(line.get("school"))
+    cl = _clean(line.get("color"))
+    sz = _clean(line.get("size"))
+    if not (it and sc and cl and sz):
+        raise ApplyError("REMOTE_RESERVATION_REQUEST: incomplete item specs")
+    try:
+        qty = int(line.get("qty") or 0)
+    except (TypeError, ValueError):
+        raise ApplyError("REMOTE_RESERVATION_REQUEST: invalid qty")
+    if qty <= 0:
+        raise ApplyError("REMOTE_RESERVATION_REQUEST: qty must be > 0")
+
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(count),0)
+        FROM stocks
+        WHERE LOWER(TRIM(item_type))=LOWER(TRIM(?))
+          AND LOWER(TRIM(school))=LOWER(TRIM(?))
+          AND LOWER(TRIM(color))=LOWER(TRIM(?))
+          AND LOWER(TRIM(size))=LOWER(TRIM(?))
+        """,
+        (it, sc, cl, sz),
+    ).fetchone()
+    on_hand = int((row[0] if row else 0) or 0)
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(qty),0)
+        FROM reservations
+        WHERE status='معلق'
+          AND LOWER(TRIM(item_type))=LOWER(TRIM(?))
+          AND LOWER(TRIM(school))=LOWER(TRIM(?))
+          AND LOWER(TRIM(color))=LOWER(TRIM(?))
+          AND LOWER(TRIM(size))=LOWER(TRIM(?))
+        """,
+        (it, sc, cl, sz),
+    ).fetchone()
+    reserved_pending = int((row[0] if row else 0) or 0)
+    available = max(0, on_hand - reserved_pending)
+    if qty > available:
+        raise ApplyError(f"REMOTE_RESERVATION_REQUEST: requested qty {qty} exceeds available {available}")
+    if (available - qty) < 4:
+        raise ApplyError("REMOTE_RESERVATION_REQUEST: cannot reserve because remaining stock would be < 4")
+
+    try:
+        unit_price = float(line.get("unit_price") or 0)
+    except (TypeError, ValueError):
+        unit_price = 0.0
+    if unit_price <= 0:
+        prow = conn.execute(
+            """
+            SELECT unit_price
+            FROM stocks
+            WHERE LOWER(TRIM(item_type))=LOWER(TRIM(?))
+              AND LOWER(TRIM(school))=LOWER(TRIM(?))
+              AND LOWER(TRIM(color))=LOWER(TRIM(?))
+              AND LOWER(TRIM(size))=LOWER(TRIM(?))
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (it, sc, cl, sz),
+        ).fetchone()
+        if prow and prow[0] is not None:
+            unit_price = float(prow[0] or 0)
+
+    try:
+        hold_days = int(payload.get("hold_days") or 2)
+    except (TypeError, ValueError):
+        hold_days = 2
+    if hold_days <= 0:
+        hold_days = 2
+    hold_until = conn.execute(
+        "SELECT datetime('now', ?)",
+        (f"+{hold_days} days",),
+    ).fetchone()[0]
+    note = f"طلب حجز من الكول سنتر (ينتهي {hold_until})"
+    total = float(unit_price) * int(qty)
+    ts = _now_iso()
+    cur = conn.execute(
+        """
+        INSERT INTO reservations(created_at, customer, item_type, school, color, size, qty, unit_price, total_amount, paid_amount, status, note)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'معلق', ?)
+        """,
+        (ts, customer, it, sc, cl, sz, qty, float(unit_price), total, note),
+    )
+    reservation_id = int(cur.lastrowid)
+    conn.execute(
+        """
+        INSERT INTO movements(ts, direction, stock_id, qty, note, bill_id, item_type, school, color, size, unit_price)
+        VALUES (?, 'RESERVE', NULL, ?, ?, NULL, ?, ?, ?, ?, ?)
+        """,
+        (ts, qty, f"حجز - {customer}", it, sc, cl, sz, float(unit_price)),
+    )
+    conn.execute(
+        """
+        INSERT INTO reservation_alerts
+            (sync_event_uuid, request_uuid, customer, branch_device, item_type, school, color, size, qty, hold_until, note, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event_uuid,
+            _clean(payload.get("request_uuid")) or None,
+            customer,
+            _clean(payload.get("__target_device__")) or None,
+            it, sc, cl, sz, qty,
+            hold_until,
+            note,
+            ts,
+        ),
+    )
+    return {"reservation_id": reservation_id, "qty": qty, "hold_until": hold_until}
+
+
 # ---------------- warehouse: POS mirror + financial ledger appliers ---------------- #
 
 
@@ -999,6 +1136,7 @@ _POS_REGISTRY: Dict[str, ApplierFn] = {
     "STOCK_TRANSFER_OUT": apply_stock_transfer_out,
     "PRICE_UPDATE":       apply_price_update,
     "CATALOG_UPSERT":     apply_catalog_upsert,
+    "REMOTE_RESERVATION_REQUEST": apply_remote_reservation_request,
 }
 
 

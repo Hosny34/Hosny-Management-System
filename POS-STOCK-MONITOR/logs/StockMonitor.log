@@ -1,0 +1,22 @@
+2026-04-21 16:02:06 INFO hosny: ============================================================
+2026-04-21 16:02:06 INFO hosny: StockMonitor starting up (frozen=True, pid=13880, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-STOCK-MONITOR)
+2026-04-21 16:02:07 ERROR hosny: UNCAUGHT EXCEPTION
+Traceback (most recent call last):
+  File "StockMonitor.py", line 605, in <module>
+    main()
+  File "StockMonitor.py", line 600, in main
+    app = StockMonitorApp()
+          ^^^^^^^^^^^^^^^^^
+  File "StockMonitor.py", line 331, in __init__
+    self._reload_devices()
+  File "StockMonitor.py", line 477, in _reload_devices
+    self._refresh_observability()
+  File "StockMonitor.py", line 509, in _refresh_observability
+    rows = self.db.list_branch_health_rows()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "StockMonitor.py", line 267, in list_branch_health_rows
+    age_min = int((now - dt).total_seconds() // 60) if dt > datetime.min.replace(tzinfo=timezone.utc) else -1
+                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: '>' not supported between instances of 'NoneType' and 'datetime.datetime'
+2026-04-21 16:04:00 INFO hosny: ============================================================
+2026-04-21 16:04:00 INFO hosny: StockMonitor starting up (frozen=True, pid=17524, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-STOCK-MONITOR)

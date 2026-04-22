@@ -845,6 +845,27 @@ class SqliteDatabase:
                 ON branch_inventory_queue(source_device, created_at DESC);
         """)
 
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS shipment_receipt_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sync_event_uuid TEXT NOT NULL UNIQUE,
+                shipment_uuid TEXT NOT NULL,
+                source_device TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                has_diff INTEGER NOT NULL DEFAULT 0,
+                note TEXT,
+                status TEXT NOT NULL DEFAULT 'PENDING', -- PENDING | ACCEPTED | REJECTED
+                decision_note TEXT,
+                decided_at TEXT,
+                created_at TEXT NOT NULL,
+                shown_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_shipment_receipt_reviews_status
+                ON shipment_receipt_reviews(status, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_shipment_receipt_reviews_shown
+                ON shipment_receipt_reviews(shown_at, created_at DESC);
+        """)
+
         # ------------------- Sync layer (Phase 1) -------------------
         # Additive: creates sync_outbox/inbox/state/device_identity tables
         # and backfills a `uuid` column on every syncable domain table.
@@ -3663,6 +3684,152 @@ class SqliteDatabase:
                 ),
             )
 
+    def get_next_shipment_receipt_review(self) -> Optional[Dict[str, Any]]:
+        row = self.conn.execute(
+            """
+            SELECT id, sync_event_uuid, shipment_uuid, source_device, payload_json,
+                   has_diff, note, created_at
+            FROM shipment_receipt_reviews
+            WHERE status='PENDING' AND shown_at IS NULL
+            ORDER BY id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        return dict(row) if row else None
+
+    def mark_shipment_receipt_review_shown(self, review_id: int) -> None:
+        self.conn.execute(
+            "UPDATE shipment_receipt_reviews SET shown_at=? WHERE id=?",
+            (now_iso(), int(review_id)),
+        )
+
+    def list_branch_wrong_bill_counts(self) -> List[Dict[str, Any]]:
+        cur = self.conn.execute(
+            """
+            SELECT source_device, COUNT(*) AS wrong_reports
+            FROM shipment_receipt_reviews
+            WHERE has_diff=1
+            GROUP BY source_device
+            ORDER BY wrong_reports DESC, source_device ASC
+            """
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_branch_wrong_bill_count(self, source_device: str) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM shipment_receipt_reviews
+            WHERE has_diff=1 AND LOWER(TRIM(source_device))=LOWER(TRIM(?))
+            """,
+            (str(source_device or "").strip(),),
+        ).fetchone()
+        return int((row[0] if row else 0) or 0)
+
+    def decide_shipment_receipt_review(self, review_id: int, accept: bool, note: str = "") -> Dict[str, Any]:
+        row = self.conn.execute(
+            """
+            SELECT id, shipment_uuid, source_device, payload_json, status
+            FROM shipment_receipt_reviews
+            WHERE id=?
+            """,
+            (int(review_id),),
+        ).fetchone()
+        if not row:
+            raise ValueError("مراجعة الشحنة غير موجودة.")
+        if str(row["status"]) != "PENDING":
+            raise ValueError("تم اتخاذ قرار مسبقاً لهذه المراجعة.")
+
+        lines: List[Dict[str, Any]] = []
+        try:
+            parsed = json.loads(row["payload_json"] or "[]")
+            if isinstance(parsed, list):
+                lines = [x for x in parsed if isinstance(x, dict)]
+        except Exception:
+            lines = []
+        applied = 0
+
+        with self.conn:
+            if accept:
+                for ln in lines:
+                    diff = int(ln.get("diff_qty") or 0)
+                    if diff == 0:
+                        continue
+                    it = str(ln.get("item_type") or "").strip()
+                    sc = str(ln.get("school") or "").strip()
+                    cl = str(ln.get("color") or "").strip()
+                    sz = str(ln.get("size") or "").strip()
+                    price = float(ln.get("unit_price") or 0.0)
+                    if not (it and sc and cl and sz):
+                        continue
+
+                    if diff < 0:
+                        qty = abs(diff)
+                        self.conn.execute(
+                            """
+                            INSERT INTO stocks(item_type,school,color,size,warehouse_no,package_no,unit_price,count,has_badge)
+                            VALUES(?,?,?,?,?,?,?,?,0)
+                            """,
+                            (it, sc, cl, sz, 1, 1, price, qty),
+                        )
+                        self.conn.execute(
+                            """INSERT INTO movements
+                               (ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,warehouse_no,package_no,unit_price,has_badge)
+                               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
+                            (
+                                now_iso(), "ADJUST_IN", None, qty,
+                                f"قبول فرق استلام شحنة #{str(row['shipment_uuid'])[:8]} من {row['source_device']}",
+                                None, it, sc, cl, sz, 1, 1, price,
+                            ),
+                        )
+                        applied += 1
+                    else:
+                        need = int(diff)
+                        stocks = self.conn.execute(
+                            """
+                            SELECT id,count,warehouse_no,package_no,unit_price
+                            FROM stocks
+                            WHERE count>0
+                              AND LOWER(TRIM(item_type))=LOWER(TRIM(?))
+                              AND LOWER(TRIM(school))=LOWER(TRIM(?))
+                              AND LOWER(TRIM(color))=LOWER(TRIM(?))
+                              AND LOWER(TRIM(size))=LOWER(TRIM(?))
+                            ORDER BY id ASC
+                            """,
+                            (it, sc, cl, sz),
+                        ).fetchall()
+                        for s in stocks:
+                            if need <= 0:
+                                break
+                            take = min(need, int(s["count"] or 0))
+                            if take <= 0:
+                                continue
+                            self.conn.execute("UPDATE stocks SET count=count-? WHERE id=?", (take, int(s["id"])))
+                            self.conn.execute(
+                                """INSERT INTO movements
+                                   (ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,warehouse_no,package_no,unit_price,has_badge)
+                                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
+                                (
+                                    now_iso(), "ADJUST_OUT", int(s["id"]), int(take),
+                                    f"قبول فرق استلام شحنة #{str(row['shipment_uuid'])[:8]} من {row['source_device']}",
+                                    None, it, sc, cl, sz,
+                                    int(s["warehouse_no"] or 0), int(s["package_no"] or 0),
+                                    float(s["unit_price"] or price),
+                                ),
+                            )
+                            need -= int(take)
+                            applied += 1
+
+            self.conn.execute(
+                """
+                UPDATE shipment_receipt_reviews
+                SET status=?, decision_note=?, decided_at=?
+                WHERE id=?
+                """,
+                ("ACCEPTED" if accept else "REJECTED", (note or "").strip(), now_iso(), int(review_id)),
+            )
+        return {"accepted": bool(accept), "adjustments_applied": applied, "shipment_uuid": row["shipment_uuid"]}
+
     # -------- Stock Audit --------
 
     def apply_stock_adjustments(self, adjustments: List[Dict[str, Any]],
@@ -3882,6 +4049,10 @@ class SqliteDatabase:
 
     def list_movement_item_totals(self, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Aggregate movement/stock metrics per item specs across warehouse + branches."""
+        branch_filter_raw = str(filters.get("branch_device") or "").strip()
+        branch_filter = ""
+        if branch_filter_raw and branch_filter_raw not in ("*", "all", "ALL"):
+            branch_filter = canonical_branch_device_name(branch_filter_raw, DEFAULT_BRANCH_POS_NAMES) or ""
         def _date_clause(col: str) -> Tuple[str, List[Any]]:
             parts: List[str] = []
             args: List[Any] = []
@@ -3990,7 +4161,13 @@ class SqliteDatabase:
                 if prev is None or snap_at > prev[1]:
                     latest_source_by_branch[branch] = (src, snap_at)
 
-            selected_sources = [v[0] for v in latest_source_by_branch.values()]
+            selected_sources = []
+            if branch_filter:
+                row = latest_source_by_branch.get(branch_filter)
+                if row:
+                    selected_sources = [row[0]]
+            else:
+                selected_sources = [v[0] for v in latest_source_by_branch.values()]
             if selected_sources:
                 ph = ",".join("?" for _ in selected_sources)
                 raw_rows = cur.execute(
@@ -4012,14 +4189,18 @@ class SqliteDatabase:
 
         # Reserved qty mirrored from branches (active only)
         try:
-            rows = cur.execute(
-                """
+            sql = """
                 SELECT item_type, school, color, size, COALESCE(SUM(qty),0)
                 FROM pos_reservations_mirror
                 WHERE status = 'معلق'
-                GROUP BY item_type, school, color, size
-                """
-            ).fetchall()
+            """
+            args: List[Any] = []
+            if branch_filter:
+                frag, frag_args = self.resolve_pos_mirror_device_sql_filter(branch_filter)
+                sql += frag
+                args.extend(frag_args)
+            sql += " GROUP BY item_type, school, color, size"
+            rows = cur.execute(sql, tuple(args)).fetchall()
         except sqlite3.OperationalError:
             rows = []
         for r in rows:
@@ -4079,6 +4260,12 @@ class SqliteDatabase:
 
         # Shipped to branches from warehouse bills (period-filtered on bill date)
         d_sql, d_args = _date_clause("b.created_at")
+        branch_customer = branch_customer_label(branch_filter) if branch_filter else ""
+        branch_sql = ""
+        branch_args: List[Any] = []
+        if branch_filter:
+            branch_sql = " AND LOWER(TRIM(COALESCE(b.customer,''))) = LOWER(TRIM(?)) "
+            branch_args.append(branch_customer)
         rows = cur.execute(
             f"""
             SELECT bi.item_type, bi.school, bi.color, bi.size, COALESCE(SUM(bi.qty),0)
@@ -4086,10 +4273,11 @@ class SqliteDatabase:
             JOIN bills b ON b.id = bi.bill_id
             WHERE COALESCE(b.status,'CONFIRMED') = 'CONFIRMED'
               AND LOWER(TRIM(COALESCE(b.customer,''))) LIKE LOWER(TRIM('فرع:%'))
+            {branch_sql}
             {d_sql}
             GROUP BY bi.item_type, bi.school, bi.color, bi.size
             """,
-            d_args,
+            tuple(branch_args + d_args),
         ).fetchall()
         for r in rows:
             key = _to_key(r)
@@ -6748,6 +6936,11 @@ class OutcomeFrame(ttk.Frame):
                 show_toast(self, f"الفاتورة #{bill_id} تم الحفظ والطباعة")
             elif target_pos:
                 show_toast(self, f"تم إنشاء شحنة الفرع #{bill_id} إلى {target_pos}")
+                try:
+                    import sync_ui
+                    sync_ui.run_sync_now(self.winfo_toplevel(), self.db.conn, reason=f"شحنة إلى {target_pos}")
+                except Exception:
+                    pass
             else:
                 show_toast(self, f"تم حفظ الفاتورة #{bill_id}")
 
@@ -8749,6 +8942,10 @@ class MovementsWindow(tk.Toplevel):
         self.fsch   = LabeledCombobox(top, "المدرسة", self.db, "school");     self.fsch.grid(row=0, column=1, padx=6, pady=4, sticky="ew")
         self.fclr   = LabeledCombobox(top, "اللون",   self.db, "color");      self.fclr.grid(row=0, column=2, padx=6, pady=4, sticky="ew")
         self.fsiz   = LabeledCombobox(top, "المقاس",  self.db, "size");       self.fsiz.grid(row=0, column=3, padx=6, pady=4, sticky="ew")
+        branch_vals = [""] + [branch_display_name(n) for n in DEFAULT_BRANCH_POS_NAMES]
+        branch_map = {n: branch_display_name(n) for n in DEFAULT_BRANCH_POS_NAMES}
+        self.fbranch = LabeledStaticCombo(top, "الفرع", branch_vals, value_map=branch_map, width=18)
+        self.fbranch.grid(row=0, column=4, padx=6, pady=4, sticky="ew")
         def _constraints(exclude: Optional[str] = None) -> Dict[str, Any]:
             data = {
                 "item_type": self.ftype.get() or None,
@@ -8768,7 +8965,7 @@ class MovementsWindow(tk.Toplevel):
             self.fsch.refresh_values()
             self.fclr.refresh_values()
             self.fsiz.refresh_values()
-        for widget in (self.ftype, self.fsch, self.fclr, self.fsiz):
+        for widget in (self.ftype, self.fsch, self.fclr, self.fsiz, self.fbranch):
             for ev in ("<<ComboboxSelected>>", "<KeyRelease>"):
                 widget.cb.bind(ev, lambda _e: (_refresh_filter_values(), self._refresh()), add="+")
 
@@ -8781,7 +8978,7 @@ class MovementsWindow(tk.Toplevel):
         top.columnconfigure(3, weight=1)
 
         btns = ttk.Frame(top)
-        btns.grid(row=0, column=4, rowspan=2, sticky="e", padx=6, pady=4)
+        btns.grid(row=0, column=5, rowspan=2, sticky="e", padx=6, pady=4)
         _mr = ttk.Button(btns, text="تحديث", command=self._refresh); _mr.pack(side=tk.LEFT)
         ToolTip(_mr, "تحديث قائمة الحركات")
         _mc = ttk.Button(btns, text="مسح", command=self._clear); _mc.pack(side=tk.LEFT, padx=6)
@@ -8831,6 +9028,7 @@ class MovementsWindow(tk.Toplevel):
             "school":    self.fsch.get(),
             "color":     self.fclr.get(),
             "size":      self.fsiz.get(),
+            "branch_device": self.fbranch.get() or None,
             "date_from": self.df.get() or None,           # DateField
             "date_to":   self.dt.get() or None,           # DateField
             "text":      (self.txt.get().strip() or None),
@@ -8846,14 +9044,16 @@ class MovementsWindow(tk.Toplevel):
             return
 
         self.table.delete(*self.table.get_children())
+        branch_selected = str(self.fbranch.get() or "").strip()
+        use_branch_only = bool(branch_selected)
         for r in rows:
             self.table.insert(
                 "", tk.END,
                 values=(
                     r.get("item_type",""), r.get("school",""), r.get("color",""), r.get("size",""),
                     int(r.get("incoming_qty") or 0),
-                    int(r.get("sold_total_qty") or 0),
-                    int(r.get("remaining_total_qty") or 0),
+                    int((r.get("sold_branch_qty") if use_branch_only else r.get("sold_total_qty")) or 0),
+                    int((r.get("remaining_branch_qty") if use_branch_only else r.get("remaining_total_qty")) or 0),
                     int(r.get("reserved_qty") or 0),
                 )
             )
@@ -8861,20 +9061,26 @@ class MovementsWindow(tk.Toplevel):
         s = {
             "n": len(rows),
             "incoming_qty": sum(int(r.get("incoming_qty") or 0) for r in rows),
-            "sold_total_qty": sum(int(r.get("sold_total_qty") or 0) for r in rows),
+            "sold_total_qty": sum(int((r.get("sold_branch_qty") if use_branch_only else r.get("sold_total_qty")) or 0) for r in rows),
             "reserved_qty": sum(int(r.get("reserved_qty") or 0) for r in rows),
-            "remaining_total_qty": sum(int(r.get("remaining_total_qty") or 0) for r in rows),
+            "remaining_total_qty": sum(int((r.get("remaining_branch_qty") if use_branch_only else r.get("remaining_total_qty")) or 0) for r in rows),
         }
+        sold_label = "إجمالي مباع الفرع" if use_branch_only else "إجمالي المباع"
+        rem_label = "إجمالي متبقي الفرع" if use_branch_only else "إجمالي المتبقي (المخزن + الفروع)"
+        branch_prefix = ""
+        if use_branch_only:
+            branch_prefix = f"الفرع المحدد: {branch_display_name(branch_selected)}  |  "
         self._summary_var.set(
+            f"{branch_prefix}"
             f"عدد المنتجات المعروضة: {s['n']}  |  "
             f"إجمالي الوارد: {s['incoming_qty']}  |  "
-            f"إجمالي المباع: {s['sold_total_qty']}  |  "
-            f"إجمالي المتبقي (المخزن + الفروع): {s['remaining_total_qty']}  |  "
+            f"{sold_label}: {s['sold_total_qty']}  |  "
+            f"{rem_label}: {s['remaining_total_qty']}  |  "
             f"إجمالي الحجوزات: {s['reserved_qty']}"
         )
 
     def _clear(self):
-        for w in (self.ftype, self.fsch, self.fclr, self.fsiz):
+        for w in (self.ftype, self.fsch, self.fclr, self.fsiz, self.fbranch):
             w.set("")
         self.df.set("")               # DateField
         self.dt.set("")               # DateField
@@ -8903,8 +9109,8 @@ class MovementsWindow(tk.Toplevel):
         table = [[
             m.get("item_type",""), m.get("school",""), m.get("color",""), m.get("size",""),
             int(m.get("incoming_qty") or 0),
-            int(m.get("sold_total_qty") or 0),
-            int(m.get("remaining_total_qty") or 0),
+            int((m.get("sold_branch_qty") if str(self.fbranch.get() or "").strip() else m.get("sold_total_qty")) or 0),
+            int((m.get("remaining_branch_qty") if str(self.fbranch.get() or "").strip() else m.get("remaining_total_qty")) or 0),
             int(m.get("reserved_qty") or 0),
         ] for m in rows]
         try:
@@ -8931,6 +9137,7 @@ class MovementsWindow(tk.Toplevel):
         f = self._filters()
         filter_bits = []
         for label, key in (
+            ("الفرع", "branch_device"),
             ("النوع", "item_type"),
             ("المدرسة", "school"),
             ("اللون", "color"),
@@ -8946,8 +9153,8 @@ class MovementsWindow(tk.Toplevel):
 
         totals = {
             "incoming": sum(int(r.get("incoming_qty") or 0) for r in rows),
-            "sold": sum(int(r.get("sold_total_qty") or 0) for r in rows),
-            "remaining": sum(int(r.get("remaining_total_qty") or 0) for r in rows),
+            "sold": sum(int((r.get("sold_branch_qty") if str(self.fbranch.get() or "").strip() else r.get("sold_total_qty")) or 0) for r in rows),
+            "remaining": sum(int((r.get("remaining_branch_qty") if str(self.fbranch.get() or "").strip() else r.get("remaining_total_qty")) or 0) for r in rows),
             "reserved": sum(int(r.get("reserved_qty") or 0) for r in rows),
         }
 
@@ -8960,8 +9167,8 @@ class MovementsWindow(tk.Toplevel):
                 f"<td>{_h(r.get('color',''))}</td>"
                 f"<td>{_h(r.get('size',''))}</td>"
                 f"<td class='num'>{int(r.get('incoming_qty') or 0)}</td>"
-                f"<td class='num'>{int(r.get('sold_total_qty') or 0)}</td>"
-                f"<td class='num'>{int(r.get('remaining_total_qty') or 0)}</td>"
+                f"<td class='num'>{int((r.get('sold_branch_qty') if str(self.fbranch.get() or '').strip() else r.get('sold_total_qty')) or 0)}</td>"
+                f"<td class='num'>{int((r.get('remaining_branch_qty') if str(self.fbranch.get() or '').strip() else r.get('remaining_total_qty')) or 0)}</td>"
                 f"<td class='num'>{int(r.get('reserved_qty') or 0)}</td>"
                 "</tr>"
             )
@@ -11267,12 +11474,68 @@ class WarehouseApp(tk.Tk):
         self._build()
         self._bind_shortcuts()
         self._tick_clock()
+        self.after(2600, self._poll_shipment_receipt_reviews)
         try:
             import sync_periodic
 
             sync_periodic.attach_periodic_sync(self, self.db.path)
         except Exception:
             pass
+
+    def _poll_shipment_receipt_reviews(self):
+        try:
+            review = self.db.get_next_shipment_receipt_review()
+            if review:
+                self._open_shipment_receipt_review_popup(review)
+                self.db.mark_shipment_receipt_review_shown(int(review["id"]))
+        except Exception:
+            pass
+        self.after(5000, self._poll_shipment_receipt_reviews)
+
+    def _open_shipment_receipt_review_popup(self, review: Dict[str, Any]) -> None:
+        source = str(review.get("source_device") or "").strip() or "POS"
+        shipment = str(review.get("shipment_uuid") or "").strip()
+        wrong_count = self.db.get_branch_wrong_bill_count(source)
+        payload = []
+        try:
+            raw = json.loads(review.get("payload_json") or "[]")
+            if isinstance(raw, list):
+                payload = [x for x in raw if isinstance(x, dict)]
+        except Exception:
+            payload = []
+        diffs = [x for x in payload if int(x.get("diff_qty") or 0) != 0]
+        if not diffs:
+            diffs = payload
+        lines_preview = []
+        for d in diffs[:8]:
+            lines_preview.append(
+                f"- {d.get('item_type','')} | {d.get('school','')} | {d.get('color','')} | {d.get('size','')}: "
+                f"مرسل {int(d.get('expected_qty') or 0)} / مستلم {int(d.get('received_qty') or 0)}"
+            )
+        preview_txt = "\n".join(lines_preview) if lines_preview else "(لا توجد فروقات)"
+        msg = (
+            f"مراجعة فرق استلام شحنة من: {source}\n"
+            f"مرجع الشحنة: {shipment[:8] if shipment else '-'}\n"
+            f"عدد مرات إبلاغ هذا الفرع بوجود خطأ: {wrong_count}\n\n"
+            f"{preview_txt}\n\n"
+            f"هل تريد اعتماد الكميات التي أبلغ بها الفرع؟"
+        )
+        accept = messagebox.askyesno("مراجعة فروق شحنة فرع", msg, parent=self)
+        note = ""
+        if not accept:
+            note = simpledialog.askstring("سبب الرفض (اختياري)", "اكتب ملاحظة للرفض:", parent=self) or ""
+        try:
+            out = self.db.decide_shipment_receipt_review(int(review["id"]), bool(accept), note)
+            if accept:
+                ToastNotification.show(
+                    self,
+                    f"تم قبول مراجعة الشحنة ({out.get('adjustments_applied', 0)} تعديل).",
+                    toast_type="success",
+                )
+            else:
+                ToastNotification.show(self, "تم رفض مراجعة الشحنة.", toast_type="warning")
+        except Exception as ex:
+            messagebox.showerror("خطأ", str(ex), parent=self)
 
     def _bind_shortcuts(self):
         """Global keyboard shortcuts."""

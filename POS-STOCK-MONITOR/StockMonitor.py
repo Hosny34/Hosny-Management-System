@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 import sys
 
@@ -227,6 +228,109 @@ class MonitorDatabase:
             "inbox_skipped": _count("SELECT COUNT(*) FROM sync_inbox WHERE apply_status='skipped'"),
         }
 
+    def _resolve_branch_device(self, value: str) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        for dev, ui in BRANCH_UI_NAME_BY_DEVICE.items():
+            if raw == dev or raw == ui:
+                return dev
+        return raw
+
+    def get_branch_available_qty(self, branch: str, item_type: str, school: str, color: str, size: str) -> int:
+        dev = self._resolve_branch_device(branch)
+        if not dev:
+            return 0
+        row = self.conn.execute(
+            """
+            SELECT COALESCE(SUM(count), 0)
+            FROM pos_stocks_mirror
+            WHERE source_device = ?
+              AND LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+              AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+              AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+              AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+            """,
+            (dev, item_type, school, color, size),
+        ).fetchone()
+        return int((row[0] if row else 0) or 0)
+
+    def create_reservation_request(
+        self,
+        *,
+        branch: str,
+        customer: str,
+        item_type: str,
+        school: str,
+        color: str,
+        size: str,
+        qty: int,
+        unit_price: float,
+    ) -> str:
+        dev = self._resolve_branch_device(branch)
+        if not dev:
+            raise ValueError("الفرع غير صالح.")
+        customer = str(customer or "").strip()
+        if not customer:
+            raise ValueError("اسم العميل مطلوب.")
+        item_type = str(item_type or "").strip()
+        school = str(school or "").strip()
+        color = str(color or "").strip()
+        size = str(size or "").strip()
+        if not (item_type and school and color and size):
+            raise ValueError("مواصفات الصنف غير مكتملة.")
+        try:
+            qty = int(qty)
+        except Exception:
+            raise ValueError("الكمية غير صالحة.")
+        if qty <= 0:
+            raise ValueError("الكمية يجب أن تكون أكبر من صفر.")
+        available = self.get_branch_available_qty(dev, item_type, school, color, size)
+        if available <= 0:
+            raise ValueError("الصنف غير متاح في هذا الفرع.")
+        if qty > available:
+            raise ValueError(f"الكمية المطلوبة أكبر من المتاح ({available}).")
+        if (available - qty) < 4:
+            raise ValueError(
+                f"لا يمكن الحجز لأن المتبقي سيكون أقل من 4 (المتاح: {available}, المطلوب: {qty})."
+            )
+        try:
+            unit_price = float(unit_price or 0)
+        except Exception:
+            unit_price = 0.0
+        event_uuid = sync_core.new_uuid()
+        request_uuid = sync_core.new_uuid()
+        created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        payload = {
+            "request_uuid": request_uuid,
+            "customer": customer,
+            "hold_days": 2,
+            "line": {
+                "item_type": item_type,
+                "school": school,
+                "color": color,
+                "size": size,
+                "qty": qty,
+                "unit_price": unit_price,
+            },
+            "requested_by": "STOCK-MONITOR",
+        }
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO sync_outbox
+                    (event_uuid, event_type, payload_json, created_at, status, attempts, target_scope)
+                VALUES (?, 'REMOTE_RESERVATION_REQUEST', ?, ?, 'pending', 0, ?)
+                """,
+                (
+                    event_uuid,
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                    created_at,
+                    f"pos:{dev}",
+                ),
+            )
+        return event_uuid
+
     def list_branch_health_rows(self) -> List[Dict[str, Any]]:
         now = datetime.now(timezone.utc)
         snaps: Dict[str, Dict[str, Any]] = {}
@@ -353,6 +457,7 @@ class StockMonitorApp(tk.Tk):
 
         ttk.Button(top, text="تحديث", command=self._reload_devices).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="مزامنة الآن", command=self._run_sync_and_reload).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="طلب حجز", command=self._open_reservation_request).pack(side=tk.LEFT, padx=4)
         self._alert_var = tk.StringVar(value="")
         ttk.Label(
             self,
@@ -590,6 +695,75 @@ class StockMonitorApp(tk.Tk):
             self.after(500, self._reload_devices)
         except Exception as ex:
             messagebox.showerror("المزامنة", str(ex), parent=self)
+
+    def _open_reservation_request(self) -> None:
+        sel = self._tree.selection()
+        if not sel:
+            messagebox.showwarning("تنبيه", "اختر صنفاً من الجدول أولاً.", parent=self)
+            return
+        vals = self._tree.item(sel[0], "values")
+        if not vals or len(vals) < 8:
+            messagebox.showwarning("تنبيه", "تعذر قراءة بيانات الصنف المحدد.", parent=self)
+            return
+        branch_ui, item_type, school, color, size, unit_price_txt, count_txt, _ = vals
+        try:
+            available = int(float(count_txt))
+        except Exception:
+            available = 0
+        if available <= 0:
+            messagebox.showwarning("تنبيه", "هذا الصنف غير متاح للحجز.", parent=self)
+            return
+        dlg = tk.Toplevel(self)
+        dlg.title("طلب حجز للفرع")
+        dlg.transient(self)
+        dlg.grab_set()
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frm, text=f"الفرع: {branch_ui}", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(frm, text=f"{item_type} | {school} | {color} | {size}").grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        ttk.Label(frm, text=f"المتاح حالياً: {available}").grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(frm, text="اسم العميل:").grid(row=3, column=0, sticky="e", padx=6, pady=4)
+        customer_var = tk.StringVar()
+        ttk.Entry(frm, textvariable=customer_var, width=28).grid(row=3, column=1, sticky="ew", padx=6, pady=4)
+        ttk.Label(frm, text="الكمية المطلوبة:").grid(row=4, column=0, sticky="e", padx=6, pady=4)
+        qty_var = tk.StringVar(value="1")
+        ttk.Entry(frm, textvariable=qty_var, width=12).grid(row=4, column=1, sticky="w", padx=6, pady=4)
+        frm.columnconfigure(1, weight=1)
+
+        def _submit() -> None:
+            try:
+                qty = int((qty_var.get() or "").strip())
+            except Exception:
+                messagebox.showwarning("تنبيه", "الكمية غير صالحة.", parent=dlg)
+                return
+            try:
+                event_uuid = self.db.create_reservation_request(
+                    branch=str(branch_ui),
+                    customer=customer_var.get(),
+                    item_type=str(item_type),
+                    school=str(school),
+                    color=str(color),
+                    size=str(size),
+                    qty=qty,
+                    unit_price=float(unit_price_txt or 0),
+                )
+                dlg.destroy()
+                try:
+                    sync_ui.run_sync_now(self, self.db.conn, reason="طلب حجز")
+                except Exception:
+                    pass
+                messagebox.showinfo(
+                    "تم الإرسال",
+                    f"تم إنشاء طلب الحجز بنجاح.\nرقم الحدث: {event_uuid[:8]}\nسيتم إرسال الطلب فورًا عبر مزامنة تلقائية.",
+                    parent=self,
+                )
+            except Exception as ex:
+                messagebox.showerror("فشل طلب الحجز", str(ex), parent=dlg)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(btns, text="إلغاء", command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="إرسال الطلب", command=_submit).pack(side=tk.RIGHT, padx=6)
 
     def _on_close(self) -> None:
         self.db.close()

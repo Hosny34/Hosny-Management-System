@@ -87,6 +87,7 @@ Important note:
 - A POS may show upload count because it sends its stock snapshot to the warehouse
 - That does not mean warehouse shipment failed
 - Periodic sync is enabled in all apps every ~10 minutes with staggered startup offsets to reduce overlap
+- Long-poll wake-up is enabled via `/v1/sync/wait` so receiving apps can sync quickly after new events arrive
 
 
 ========================================
@@ -109,6 +110,9 @@ Important:
 - Selecting a branch sends the bill as a branch shipment event
 - A normal customer sale is not the same as a branch shipment
 - Branch names in the dropdown are intentionally prefixed with "فرع: "
+- POS now shows an item-by-item shipment receipt checklist before finalizing incoming stock
+- if POS confirms different received quantities, warehouse gets a review popup to accept/reject those differences
+- warehouse tracks per branch how many times shipment mismatch was reported
 
 Warehouse number note:
 
