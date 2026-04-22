@@ -4,6 +4,13 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+
+try:
+    import logging_setup
+    logging_setup.install_crash_logging("StockMonitor")
+except Exception:
+    pass
+
 import tkinter as tk
 from datetime import datetime, timezone
 from tkinter import messagebox, ttk
@@ -64,13 +71,6 @@ def _parse_iso_ts(value: Any) -> datetime:
     raw = str(value or "").strip()
     if not raw:
         return datetime.min.replace(tzinfo=timezone.utc)
-
-
-def _branch_display_name(value: Any) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    return BRANCH_UI_NAME_BY_DEVICE.get(raw, raw)
     try:
         if raw.endswith("Z"):
             raw = raw[:-1] + "+00:00"
@@ -80,6 +80,13 @@ def _branch_display_name(value: Any) -> str:
         return dt.astimezone(timezone.utc)
     except Exception:
         return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _branch_display_name(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return BRANCH_UI_NAME_BY_DEVICE.get(raw, raw)
 
 
 class MonitorDatabase:

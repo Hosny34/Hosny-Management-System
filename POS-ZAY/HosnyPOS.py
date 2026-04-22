@@ -1,6 +1,12 @@
 # filepath: app/warehouse_manager_nosqlite_excel_billing.py
 # Python 3.10+
 
+try:
+    import logging_setup
+    logging_setup.install_crash_logging("HosnyPOS-ZAY")
+except Exception:
+    pass
+
 import json
 import os
 import hashlib
