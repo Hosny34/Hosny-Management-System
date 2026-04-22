@@ -1166,3 +1166,28 @@ Docs updated:
 - `TEST SCENARIOS.md` updated with:
   - `WH-05` aggregated warehouse movement monitor test,
   - `BR-08` dedicated diagnostics tab visibility/refresh test.
+
+## Update (2026-04): Partial reservation delivery + shipment receipt verification + long-poll nudge
+
+Reservation delivery (POS):
+
+- Reservation bills now support **partial item-level delivery** instead of forcing full-bill delivery.
+- Grouping is persisted with `reservations.reservation_group_uuid` so one bill can track multiple item rows coherently.
+- Delivery/payment rule implemented:
+  - if delivery is partial, cashier must collect full value of delivered items now,
+  - any existing upfront paid amount stays allocated to still-pending reservation items.
+- Bill is considered fully delivered only when all rows in the group are delivered.
+
+Shipment receipt verification (POS + warehouse):
+
+- POS no longer auto-applies incoming branch shipment quantities blindly.
+- Incoming shipment lines are staged, then cashier confirms received quantity per line via checklist popup.
+- POS emits `SHIPMENT_RECEIPT_REPORTED` back to warehouse when cashier confirms (including diffs).
+- Warehouse receives review popup, can **accept/reject** diffs, and applies compensating stock adjustments only on acceptance.
+- Warehouse now tracks per-branch mismatch frequency (`wrong bill` count) from receipt reviews.
+
+Immediate receiver sync wake-up (server + clients):
+
+- New server endpoint: `GET /v1/sync/wait` (long-poll by device scope and `since` cursor).
+- Clients call wait in a background thread and trigger immediate sync when `has_updates=true`.
+- Periodic sync remains enabled as fallback; long-poll acts as low-latency nudge.

@@ -34,6 +34,7 @@ Mark each item after you explain it and let the trainee try it.
 [ ] Explain how to read sync log messages
 [ ] Explain that warehouse should sync before POS when sending stock
 [ ] Explain that warehouse may need another sync after POS pushes updates
+[ ] Explain that receiver apps now wake quickly via long-poll nudge (do not wait full periodic interval in most cases)
 
 ==================================================
 4. WAREHOUSE NUMBERS / PACKAGE NUMBERS
@@ -124,6 +125,7 @@ Mark each item after you explain it and let the trainee try it.
 [ ] Confirm shipment saves in bill history
 [ ] Explain that warehouse must sync after creating the shipment
 [ ] Explain that target POS must sync after warehouse
+[ ] Explain that target POS must confirm received quantities item-by-item before final stock apply
 
 ==================================================
 10. BILL HISTORY
@@ -174,6 +176,16 @@ Mark each item after you explain it and let the trainee try it.
 [ ] Show how to discard as defective
 [ ] Show how to reroute to another branch
 [ ] Explain that queued items do NOT become stock until warehouse processes them
+
+==================================================
+12b. SHIPMENT RECEIPT REVIEW (POS DIFF REPORTS)
+==================================================
+
+[ ] Show shipment receipt review popup when POS reports quantity differences
+[ ] Explain line-level expected vs received quantities
+[ ] Show Accept behavior (warehouse compensating adjustment movement)
+[ ] Show Reject behavior (no compensating stock adjustment)
+[ ] Explain/verify "wrong bill" count per branch and why it matters for quality follow-up
 
 ==================================================
 13. RETURNS / REFUNDS

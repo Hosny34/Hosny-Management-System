@@ -34,6 +34,7 @@ Mark each item after you explain it and let the trainee try it.
 [ ] Explain when POS should sync
 [ ] Explain that POS sync may show upload because it sends a stock snapshot too
 [ ] Explain that POS must sync after warehouse when receiving stock
+[ ] Explain that app can wake and sync quickly when server has updates (long-poll nudge), not only periodic sync
 
 ==================================================
 4. RECEIVING STOCK FROM WAREHOUSE
@@ -44,6 +45,19 @@ Mark each item after you explain it and let the trainee try it.
 [ ] Show the received stock in POS
 [ ] Show that selling screen refreshes after sync
 [ ] Explain how to confirm the stock really arrived
+[ ] Show incoming shipment checklist popup (expected vs received per line)
+[ ] Show how cashier edits received quantity when mismatch exists
+[ ] Confirm receipt and explain warehouse will review any reported differences
+
+==================================================
+4b. RESERVATIONS AND PARTIAL DELIVERY
+==================================================
+
+[ ] Create reservation bill with multiple items
+[ ] Explain upfront payment recording
+[ ] Show partial delivery dialog (select delivered lines only)
+[ ] Explain payment rule: delivered lines are fully collected now; existing upfront amount remains for pending lines
+[ ] Explain bill becomes fully delivered only when all reservation lines are delivered
 
 ==================================================
 5. SELLING SCREEN
