@@ -25,6 +25,7 @@ import queue
 import sqlite3
 import threading
 import tkinter as tk
+from datetime import datetime
 from tkinter import messagebox, ttk
 from typing import Any, Dict, List, Optional
 
@@ -35,7 +36,22 @@ import sync_core
 # ------------------------------- helpers -------------------------------- #
 
 def _fmt(value: Optional[str], empty: str = "—") -> str:
-    return str(value) if value not in (None, "", "None") else empty
+    raw = str(value) if value not in (None, "", "None") else ""
+    if not raw:
+        return empty
+    try:
+        txt = raw.strip()
+        if txt.endswith("Z"):
+            dt = datetime.fromisoformat(txt[:-1] + "+00:00")
+            return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        if "T" in txt:
+            dt = datetime.fromisoformat(txt)
+            if dt.tzinfo is not None:
+                return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+    return raw.replace("T", " ")
 
 
 def _notify_host_synced(master: tk.Misc) -> None:

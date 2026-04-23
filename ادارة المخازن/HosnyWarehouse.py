@@ -109,6 +109,20 @@ def branch_display_name(value: Any) -> str:
     return BRANCH_UI_NAME_BY_DEVICE.get(raw, raw)
 
 
+def fmt_local_ts(value: Any, empty: str = "—") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return empty
+    try:
+        txt = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        dt = datetime.fromisoformat(txt)
+        if dt.tzinfo is None:
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return raw.replace("T", " ")
+
+
 def branch_customer_label(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -5737,7 +5751,8 @@ class OutcomeFrame(ttk.Frame):
 
         # ============ LEFT PANEL (Product Selection) ============
         left = tk.Frame(hsplit, bg=_UI["BG"])
-        hsplit.add(left, weight=5)
+        # Match POS startup split: selector side slightly wider.
+        hsplit.add(left, weight=6)
 
         # -- Search bar (card-like) --
         sf = tk.Frame(left, bg=_UI["SURFACE"],
@@ -5932,7 +5947,8 @@ class OutcomeFrame(ttk.Frame):
             try:
                 w = hsplit.winfo_width()
                 if w > 100:
-                    hsplit.sashpos(0, int(w * 0.48))
+                    # Start close to the operator-tuned warehouse ratio.
+                    hsplit.sashpos(0, int(w * 0.60))
                     hsplit.unbind("<Map>")
             except Exception:
                 pass
@@ -6106,8 +6122,12 @@ class OutcomeFrame(ttk.Frame):
             btn = tk.Button(row, text=label, command=lambda v=label: on_click(v),
                             **self._BTN_PRODUCT)
             btn.pack(side=tk.LEFT, padx=4, pady=4, ipadx=4, ipady=2)
-            _add_hover(btn, _UI["BRAND_L"], _UI["SURFACE"],
-                       _UI["SEL_FG"], _UI["TEXT"])
+            # Keep hover transitions aligned with the actual base button style.
+            base_bg = self._BTN_PRODUCT.get("bg", _UI["ACCENT"])
+            base_fg = self._BTN_PRODUCT.get("fg", "#FFFFFF")
+            hover_bg = self._BTN_PRODUCT.get("activebackground", _UI["ACCENT_H"])
+            hover_fg = self._BTN_PRODUCT.get("activeforeground", "#FFFFFF")
+            _add_hover(btn, hover_bg, base_bg, hover_fg, base_fg)
 
     # ---------------- Cascading Quick Filters ----------------
     def _warehouse_no_from_filter(self) -> Optional[int]:
@@ -8675,7 +8695,7 @@ class BillsHistoryWindow(tk.Toplevel):
             kind_txt = "شحن فرع" if b.get("bill_kind") == "BRANCH_SHIPMENT" else "فاتورة"
             self.bills_table.insert(
                 "", tk.END, iid=str(b["id"]),
-                values=(b["id"], b["created_at"], kind_txt, b.get("customer") or "",
+                values=(b["id"], fmt_local_ts(b["created_at"], ""), kind_txt, b.get("customer") or "",
                         f"{float(b['total']):.2f}", status_txt)
             )
         apply_zebra_tags(self.bills_table)
@@ -10113,7 +10133,7 @@ class BranchStockWindow(tk.Toplevel):
         meta = self._metas.get(name)
         if meta:
             self._meta_var.set(
-                f"آخر لقطة: {meta['snapshot_at']}  |  "
+                f"آخر لقطة: {fmt_local_ts(meta['snapshot_at'])}  |  "
                 f"عدد الصفوف: {meta['row_count']}  |  "
                 f"القيمة: {meta['total_value']:.2f}"
             )
@@ -10490,7 +10510,7 @@ class DashboardFrame(ttk.Frame):
                     values=(
                         branch_display_name(r[0] or ""),
                         status,
-                        snap,
+                        fmt_local_ts(snap, ""),
                         age_min if age_min is not None else "",
                         int(r[2] or 0),
                         f"{float(r[3] or 0.0):,.2f}",
@@ -10670,7 +10690,7 @@ class SyncDiagnosticsFrame(ttk.Frame):
                     values=(
                         branch_display_name(r[0] or ""),
                         status,
-                        snap,
+                        fmt_local_ts(snap, ""),
                         age_min if age_min is not None else "",
                         int(r[2] or 0),
                         f"{float(r[3] or 0.0):,.2f}",
@@ -11608,13 +11628,19 @@ class WarehouseApp(tk.Tk):
         try:
             out = self.db.decide_shipment_receipt_review(int(review["id"]), bool(accept), note)
             if accept:
-                ToastNotification.show(
+                show_toast(
                     self,
                     f"تم قبول مراجعة الشحنة ({out.get('adjustments_applied', 0)} تعديل).",
-                    toast_type="success",
+                    bg="#166534",
+                    fg="#dcfce7",
                 )
             else:
-                ToastNotification.show(self, "تم رفض مراجعة الشحنة.", toast_type="warning")
+                show_toast(
+                    self,
+                    "تم رفض مراجعة الشحنة.",
+                    bg="#854d0e",
+                    fg="#fef9c3",
+                )
         except Exception as ex:
             messagebox.showerror("خطأ", str(ex), parent=self)
 

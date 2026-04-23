@@ -99,6 +99,20 @@ def _parse_iso_ts(value: Any) -> datetime:
         return datetime.min.replace(tzinfo=timezone.utc)
 
 
+def _fmt_local_ts(value: Any, empty: str = "—") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return empty
+    try:
+        txt = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        dt = datetime.fromisoformat(txt)
+        if dt.tzinfo is None:
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return raw.replace("T", " ")
+
+
 def _branch_display_name(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -462,23 +476,31 @@ class StockMonitorApp(tk.Tk):
     def _build(self) -> None:
         top = ttk.Frame(self, padding=8)
         top.pack(fill=tk.X)
+        top_main = ttk.Frame(top)
+        top_main.pack(fill=tk.X)
         ttk.Label(
-            top,
+            top_main,
             text="Read-only lookup tool for call center availability checks.",
             foreground=_UI["TEXT_SEC"],
         ).pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Label(top, text="الفرع:").pack(side=tk.RIGHT, padx=(0, 4))
+        ttk.Label(top_main, text="الفرع:").pack(side=tk.RIGHT, padx=(0, 4))
         self._device_var = tk.StringVar()
-        self._device_cb = ttk.Combobox(top, textvariable=self._device_var, state="readonly", width=30)
+        self._device_cb = ttk.Combobox(top_main, textvariable=self._device_var, state="readonly", width=30)
         self._device_cb.pack(side=tk.RIGHT, padx=4)
         self._device_cb.bind("<<ComboboxSelected>>", lambda _e: self._reload_stock())
 
         self._meta_var = tk.StringVar(value="—")
-        ttk.Label(top, textvariable=self._meta_var, foreground=_UI["TEXT_DIM"]).pack(side=tk.RIGHT, padx=(12, 0))
+        ttk.Label(
+            top,
+            textvariable=self._meta_var,
+            foreground=_UI["TEXT_DIM"],
+            anchor="e",
+            justify="right",
+        ).pack(fill=tk.X, pady=(4, 0))
 
-        ttk.Button(top, text="تحديث", command=self._reload_devices).pack(side=tk.LEFT, padx=4)
-        ttk.Button(top, text="مزامنة الآن", command=self._run_sync_and_reload).pack(side=tk.LEFT, padx=4)
-        ttk.Button(top, text="طلب حجز", command=self._open_reservation_request).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top_main, text="تحديث", command=self._reload_devices).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top_main, text="مزامنة الآن", command=self._run_sync_and_reload).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top_main, text="طلب حجز", command=self._open_reservation_request).pack(side=tk.LEFT, padx=4)
         self._alert_var = tk.StringVar(value="")
         ttk.Label(
             self,
@@ -662,7 +684,7 @@ class StockMonitorApp(tk.Tk):
             meta = self._metas.get(pick)
             if meta:
                 self._meta_var.set(
-                    f"{_branch_display_name(pick)} | آخر لقطة: {meta['snapshot_at']}  |  عدد الصفوف: {meta['row_count']}  |  القيمة: {meta['total_value']:.2f}"
+                    f"{_branch_display_name(pick)} | آخر لقطة: {_fmt_local_ts(meta['snapshot_at'])}  |  عدد الصفوف: {meta['row_count']}  |  القيمة: {meta['total_value']:.2f}"
                 )
             else:
                 self._meta_var.set("لا توجد لقطة مخزون مباشرة لهذا الاسم (قد يكون محفوظًا بالـ UUID)")
@@ -681,7 +703,7 @@ class StockMonitorApp(tk.Tk):
                 values=(
                     _branch_display_name(r["branch"]),
                     r["status"],
-                    r["snapshot_at"],
+                    _fmt_local_ts(r["snapshot_at"], ""),
                     r["age_min"],
                     r["rows"],
                     "{:.2f}".format(float(r["value"])),

@@ -118,6 +118,20 @@ def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def fmt_local_ts(value: Any, empty: str = "—") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return empty
+    try:
+        txt = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        dt = datetime.fromisoformat(txt)
+        if dt.tzinfo is None:
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return raw.replace("T", " ")
+
+
 def _cashier_lockdown_message(action: str = "") -> str:
     base = "هذا الإجراء متوقف في وضع الكاشير. المخزن فقط هو المخوّل بتغيير المخزون أو الأسعار."
     if action:
@@ -8066,7 +8080,7 @@ class BillsHistoryWindow(tk.Toplevel):
                 "", tk.END, iid=str(b["id"]),
                 values=(
                     b["id"],
-                    b["created_at"],
+                    fmt_local_ts(b["created_at"], ""),
                     self._bill_type_ar(b.get("bill_type")),
                     b.get("customer") or "",
                     f"{float(b['total']):.2f}",

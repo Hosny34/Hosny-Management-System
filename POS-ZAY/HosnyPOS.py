@@ -120,6 +120,20 @@ def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def fmt_local_ts(value: Any, empty: str = "—") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return empty
+    try:
+        txt = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        dt = datetime.fromisoformat(txt)
+        if dt.tzinfo is None:
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return raw.replace("T", " ")
+
+
 def _cashier_lockdown_message(action: str = "") -> str:
     base = "هذا الإجراء متوقف في وضع الكاشير. المخزن فقط هو المخوّل بتغيير المخزون أو الأسعار."
     if action:
@@ -4488,7 +4502,7 @@ class DashboardFrame(ttk.Frame):
             self._recent_tbl.delete(*self._recent_tbl.get_children())
             for b in self.db.list_bills()[:10]:
                 self._recent_tbl.insert("", tk.END, values=(
-                    b["id"], b["created_at"][:16].replace("T", " "),
+                    b["id"], fmt_local_ts(b["created_at"], ""),
                     b.get("customer", ""), f"{float(b['total']):.2f}"))
             _apply_zebra_tags(self._recent_tbl)
         except Exception:
@@ -5089,6 +5103,16 @@ class POSFrame(ttk.Frame):
         # ---- RIGHT: bill management ----
         right = ttk.LabelFrame(vsplit, text="\u0627\u0644\u0641\u0648\u0627\u062A\u064A\u0631")
         vsplit.add(right, weight=4)
+        # Start close to the operator-tuned POS ratio from testing.
+        def _set_bill_sash(_e=None):
+            try:
+                w = vsplit.winfo_width()
+                if w > 100:
+                    vsplit.sashpos(0, int(w * 0.56))
+                    vsplit.unbind("<Map>")
+            except Exception:
+                pass
+        vsplit.bind("<Map>", _set_bill_sash, add="+")
 
         # Bill switcher buttons (1-6)
         switcher = ttk.Frame(right)
@@ -6928,8 +6952,8 @@ class ShiftsSummaryFrame(ttk.Frame):
         total_sales = 0.0
         total_cash = 0.0
         for s in self._shifts_data:
-            started = s["started_at"][:16].replace("T", " ")
-            ended = s["ended_at"][:16].replace("T", " ") if s["ended_at"] else "-"
+            started = fmt_local_ts(s["started_at"], "")
+            ended = fmt_local_ts(s["ended_at"], "") if s["ended_at"] else "-"
             status = "مفتوحة" if s["status"] == "OPEN" else "مغلقة"
             self._tree.insert("", tk.END, values=(
                 s["id"], started, ended, status,
@@ -7202,7 +7226,7 @@ class ReservationsFrame(ttk.Frame):
                 grp = str(r.get("reservation_group_uuid") or "").strip()
                 bill_code = grp[:8] if grp else f"legacy-{int(r['id'])}"
                 self._res_table.insert("", tk.END, values=(
-                    bill_code, r["id"], r["created_at"][:10], r.get("customer", ""),
+                    bill_code, r["id"], fmt_local_ts(r["created_at"], "")[:10], r.get("customer", ""),
                     r["item_type"], r["school"], r["color"], r["size"],
                     r["qty"], f"{float(r['total_amount']):.2f}",
                     f"{float(r['paid_amount']):.2f}", r["status"]
@@ -7293,7 +7317,12 @@ class ReservationsFrame(ttk.Frame):
 
         dlg = tk.Toplevel(self)
         dlg.title("تسليم عناصر الحجز")
-        dlg.geometry("760x420")
+        # Start larger so bottom action controls are visible immediately.
+        dlg.geometry("900x620")
+        try:
+            dlg.minsize(860, 560)
+        except Exception:
+            pass
         dlg.transient(self.winfo_toplevel())
         dlg.grab_set()
         frm = ttk.Frame(dlg, padding=12)
@@ -8337,7 +8366,7 @@ class BillsHistoryWindow(tk.Toplevel):
                 "", tk.END, iid=str(b["id"]),
                 values=(
                     b["id"],
-                    b["created_at"],
+                    fmt_local_ts(b["created_at"], ""),
                     self._bill_type_ar(b.get("bill_type")),
                     b.get("customer") or "",
                     f"{float(b['total']):.2f}",
@@ -9012,7 +9041,7 @@ class ShiftSummaryDialog(tk.Toplevel):
 
         info = ttk.LabelFrame(main, text="معلومات الوردية")
         info.pack(fill=tk.X, pady=4)
-        started = summary["started_at"][:16].replace("T", " ")
+        started = fmt_local_ts(summary["started_at"], "")
         ttk.Label(info, text=f"بداية: {started}").pack(anchor="w", padx=8, pady=2)
         ttk.Label(info, text="نهاية: الآن").pack(anchor="w", padx=8, pady=2)
 
@@ -9090,7 +9119,7 @@ class ShiftSummaryDialog(tk.Toplevel):
                 messagebox.showerror("خطأ", str(ex), parent=self)
 
     def _print_summary(self, summary):
-        started = summary["started_at"][:16].replace("T", " ")
+        started = fmt_local_ts(summary["started_at"], "")
         deliver_total = summary.get("deliver_total", 0.0)
         deliver_count = summary.get("deliver_count", 0)
         return_count = summary.get("return_count", 0)
@@ -9678,7 +9707,7 @@ class WarehouseApp:
             self._prompt_start_shift()
 
     def _update_shift_ui(self, shift):
-        started = shift["started_at"][:16].replace("T", " ")
+        started = fmt_local_ts(shift["started_at"], "")
         self._shift_status_var.set(f"الوردية مفتوحة منذ {started}")
         self._shift_btn.configure(text="إنهاء الوردية")
 

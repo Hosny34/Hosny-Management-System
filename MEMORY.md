@@ -1218,3 +1218,45 @@ Stock Monitor app (`POS-STOCK-MONITOR/StockMonitor.py`):
 Builds:
 
 - Rebuilt updated desktop executables after this visual pass using PyInstaller specs.
+
+## Update (2026-04): UI polish follow-ups (sizing, split ratios, hover)
+
+Warehouse (`ادارة المخازن/HosnyWarehouse.py`):
+
+- Billing split-pane startup ratio tuned to match the operator-adjusted warehouse layout (wider selector area on open).
+- School/product tile hover behavior fixed so color returns to the correct base style after mouse leave (no sticky hover color state).
+
+POS-ZAY (`POS-ZAY/HosnyPOS.py`):
+
+- Billing split-pane startup ratio tuned separately to match the operator-adjusted POS layout.
+- Partial reservation delivery dialog (`تسليم عناصر الحجز`) now opens larger with a minimum size so bottom action controls are visible immediately.
+
+Stock Monitor (`POS-STOCK-MONITOR/StockMonitor.py`):
+
+- Header layout adjusted so long snapshot/meta text no longer overlaps/hides the `طلب حجز` button; metadata moved to its own line.
+
+Builds:
+
+- Rebuilt affected executables after each UI polish fix (warehouse, POS-ZAY, stock monitor).
+
+## Update (2026-04): Local time display across UI
+
+Goal:
+
+- Avoid user confusion from raw wire-format UTC timestamps (`...Z`) by converting them to **local device time in UI only**.
+- Storage/sync payload timestamps remain unchanged (UTC on wire / DB where already used), preserving protocol behavior.
+
+Applied in:
+
+- `ادارة المخازن/sync_ui.py`
+- `POS-ZAY/sync_ui.py`
+- `POS-OCT/sync_ui.py`
+- `ادارة المخازن/HosnyWarehouse.py`
+- `POS-ZAY/HosnyPOS.py`
+- `POS-OCT/HosnyPOS.py`
+- `POS-STOCK-MONITOR/StockMonitor.py`
+
+Behavior:
+
+- ISO timestamps with `Z` are parsed as UTC and rendered in local time (`YYYY-mm-dd HH:MM:SS`) in visible labels/tables.
+- Naive timestamps still render in human-readable local format without changing persisted values.
