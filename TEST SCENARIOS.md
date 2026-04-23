@@ -1083,6 +1083,21 @@ Expected:
 - branch health rows update according to latest mirrored snapshot state.
 - exception list shows top apply errors when present; stays empty when no errors exist.
 
+### `BR-09` Warehouse visual consistency across windows
+
+Steps:
+
+1. Open warehouse main app and visit tabs: dashboard, billing, income, sync diagnostics, statistics.
+2. Open popup windows: bill history, movements, inventory, branch stock.
+3. Compare component visuals against POS (`POS-ZAY`) on the same machine.
+
+Expected:
+
+- Segoe UI typography is consistent and readable across all warehouse screens.
+- Primary action buttons use POS-like blue styling with consistent padding.
+- Inputs/tables/tabs keep consistent spacing and focus/selection colors across windows.
+- No major visual jump between billing and non-billing windows.
+
 ## 17. Sync Detail And Status Tests
 
 ### `SD-01` Sync settings are saved after reopening app

@@ -1199,3 +1199,22 @@ Warehouse queue window (`منتجات الفروع غير المعالجة`) in 
 - `مخزن` input changed from free text to a readonly dropdown using shared warehouse-number labels (`WAREHOUSE_NUMBER_DISPLAY_VALUES`).
 - `عبوة` now auto-fills with the next available package number for the selected warehouse via `package_numbers_summary(...)`.
 - Warehouse selection parsing in assign flow now uses `warehouse_numeric_value(...)` so labels and numeric IDs resolve consistently.
+
+## Update (2026-04): POS visual parity rollout (Warehouse + Stock Monitor)
+
+Warehouse app (`ادارة المخازن/HosnyWarehouse.py`):
+
+- Expanded from billing-only styling to app-wide parity with POS light theme.
+- `ttk` base styles now follow POS spacing and typography: button/input padding, notebook tabs, tree headers, focus borders, and selection colors.
+- Header/navigation visuals were shifted to the same light + blue POS style language for better readability consistency across screens.
+- Classic Tk defaults were unified (`Segoe UI` defaults for dialogs/listboxes/menus), so popup windows match main UI better.
+
+Stock Monitor app (`POS-STOCK-MONITOR/StockMonitor.py`):
+
+- Added a centralized POS-like UI palette and a global `ttk.Style` theme pass.
+- Unified button/input/table styling with Warehouse/POS look-and-feel (including row striping and selection colors).
+- Added global Tk font defaults for dialog/menus so reservation-request popup and supporting UI controls keep consistent readability.
+
+Builds:
+
+- Rebuilt updated desktop executables after this visual pass using PyInstaller specs.

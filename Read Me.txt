@@ -555,6 +555,8 @@ Latest fix notes from testing:
 - warehouse **حجوزات الفروع (مرآة)**: POS filter matches whether sync stored device as **name** or **UUID**; picklist includes both friendly names and raw identifiers; **مجمّع حسب المنتج** tab sums quantities per product across lines (and branches when no POS filter)
 - warehouse **التدفقات المالية للفروع (يومي)** uses the same expanded device picklist / name↔UUID resolution for **الجهاز**
 - two configured numeric size ranges (النطاق الأول + الثاني) are **merged** on warehouse and POS size pickers so overlapping sizes are not duplicated (e.g. 6→22 plus 14→28 becomes one list through 28)
+- warehouse app visual theme was aligned globally to POS style (colors, spacing, button/input/table metrics) instead of billing-only styling
+- stock monitor visual theme now follows the same POS/Warehouse style language for readability consistency
 - after material code changes, rebuild affected `.exe` files with PyInstaller (see commands above); project `.cursor/rules/pyinstaller-after-changes.mdc` reminds automation to do the same
 
 

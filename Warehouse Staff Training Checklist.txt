@@ -113,6 +113,7 @@ Mark each item after you explain it and let the trainee try it.
 ==================================================
 
 [ ] Open warehouse billing screen
+[ ] Confirm billing visual style matches POS style (blue primary buttons, Segoe UI, readable spacing)
 [ ] Explain customer field
 [ ] Explain branch shipment naming:
 [ ] فرع: POS-ZAY
@@ -132,6 +133,7 @@ Mark each item after you explain it and let the trainee try it.
 ==================================================
 
 [ ] Open bill history window
+[ ] Confirm bill history window uses same visual style and spacing as billing screen
 [ ] Show normal bill rows
 [ ] Show branch shipment rows
 [ ] Open bill details
@@ -144,6 +146,7 @@ Mark each item after you explain it and let the trainee try it.
 ==================================================
 
 [ ] Open branch stock window
+[ ] Confirm branch stock window uses same visual style and spacing as billing screen
 [ ] Explain this is mirrored POS stock, not direct live access
 [ ] Select a branch
 [ ] Show branch stock rows

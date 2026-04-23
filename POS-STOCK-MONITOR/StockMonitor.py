@@ -45,6 +45,22 @@ import sync_core  # type: ignore
 import sync_periodic  # type: ignore
 import sync_ui  # type: ignore
 
+_UI = {
+    "BG": "#f8fafc",
+    "SURFACE": "#e2e8f0",
+    "SURFACE2": "#f1f5f9",
+    "BORDER": "#cbd5e1",
+    "ACCENT": "#2563eb",
+    "ACCENT_H": "#1d4ed8",
+    "TEXT": "#0f172a",
+    "TEXT_SEC": "#475569",
+    "TEXT_DIM": "#94a3b8",
+    "SEL_BG": "#bfdbfe",
+    "SEL_FG": "#0f172a",
+    "ROW_EVEN": "#ffffff",
+    "ROW_ODD": "#f1f5f9",
+}
+
 
 def _bind_mousewheel(widget: tk.Widget) -> None:
     def _on_wheel(e: tk.Event) -> str:
@@ -62,8 +78,8 @@ def _bind_mousewheel(widget: tk.Widget) -> None:
 
 
 def _apply_zebra_tags(tree: ttk.Treeview) -> None:
-    tree.tag_configure("odd", background="#ffffff")
-    tree.tag_configure("even", background="#f8fafc")
+    tree.tag_configure("odd", background=_UI["ROW_EVEN"])
+    tree.tag_configure("even", background=_UI["ROW_ODD"])
     for i, iid in enumerate(tree.get_children()):
         tree.item(iid, tags=("even" if i % 2 else "odd",))
 
@@ -427,6 +443,11 @@ class StockMonitorApp(tk.Tk):
         self.title("Call Center Stock Finder")
         self.geometry("1020x660")
         self.minsize(920, 560)
+        self.option_add("*Font", "Segoe UI 9")
+        self.option_add("*Listbox.Font", "Segoe UI 9")
+        self.option_add("*Menu.Font", "Segoe UI 9")
+        self.option_add("*Message.font", "Segoe UI 9")
+        self._apply_pos_like_theme()
         self.db = MonitorDatabase(DB_PATH)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._all_rows: List[Tuple[str, str, str, str, str, float, int]] = []
@@ -444,7 +465,7 @@ class StockMonitorApp(tk.Tk):
         ttk.Label(
             top,
             text="Read-only lookup tool for call center availability checks.",
-            foreground="#475569",
+            foreground=_UI["TEXT_SEC"],
         ).pack(side=tk.LEFT, padx=(0, 12))
         ttk.Label(top, text="الفرع:").pack(side=tk.RIGHT, padx=(0, 4))
         self._device_var = tk.StringVar()
@@ -453,7 +474,7 @@ class StockMonitorApp(tk.Tk):
         self._device_cb.bind("<<ComboboxSelected>>", lambda _e: self._reload_stock())
 
         self._meta_var = tk.StringVar(value="—")
-        ttk.Label(top, textvariable=self._meta_var, foreground="#64748b").pack(side=tk.RIGHT, padx=(12, 0))
+        ttk.Label(top, textvariable=self._meta_var, foreground=_UI["TEXT_DIM"]).pack(side=tk.RIGHT, padx=(12, 0))
 
         ttk.Button(top, text="تحديث", command=self._reload_devices).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="مزامنة الآن", command=self._run_sync_and_reload).pack(side=tk.LEFT, padx=4)
@@ -462,7 +483,7 @@ class StockMonitorApp(tk.Tk):
         ttk.Label(
             self,
             textvariable=self._alert_var,
-            foreground="#b45309",
+            foreground="#d97706",
             anchor="w",
             justify="left",
         ).pack(
@@ -552,6 +573,46 @@ class StockMonitorApp(tk.Tk):
 
         self._status_var = tk.StringVar(value="")
         ttk.Label(self, textvariable=self._status_var, anchor="e").pack(fill=tk.X, padx=8, pady=(0, 8))
+
+    def _apply_pos_like_theme(self) -> None:
+        s = ttk.Style(self)
+        try:
+            s.theme_use("clam")
+        except Exception:
+            pass
+        try:
+            self.configure(bg=_UI["BG"])
+        except Exception:
+            pass
+
+        s.configure("TFrame", background=_UI["SURFACE"])
+        s.configure("TLabelframe", background=_UI["SURFACE"], bordercolor=_UI["BORDER"], relief="groove")
+        s.configure("TLabelframe.Label", background=_UI["SURFACE"], foreground=_UI["TEXT"], font=("Segoe UI", 10, "bold"))
+        s.configure("TLabel", background=_UI["SURFACE"], foreground=_UI["TEXT"])
+
+        s.configure("TButton", background=_UI["ACCENT"], foreground="#ffffff",
+                    bordercolor=_UI["ACCENT"], focusthickness=1, focuscolor=_UI["ACCENT_H"],
+                    padding=(12, 6), font=("Segoe UI", 9, "bold"))
+        s.map("TButton",
+              background=[("active", _UI["ACCENT_H"]), ("pressed", _UI["ACCENT_H"]), ("disabled", _UI["TEXT_DIM"])],
+              foreground=[("disabled", "#94a3b8")],
+              bordercolor=[("focus", _UI["ACCENT_H"])])
+
+        for sty in ("TEntry", "TCombobox", "TSpinbox"):
+            s.configure(sty, fieldbackground="#ffffff", background="#ffffff", foreground=_UI["TEXT"],
+                        bordercolor=_UI["BORDER"], lightcolor=_UI["BORDER"], darkcolor=_UI["BORDER"], padding=4)
+            s.map(sty, fieldbackground=[("focus", "#ffffff"), ("readonly", _UI["SURFACE2"])],
+                  bordercolor=[("focus", _UI["ACCENT"])],
+                  lightcolor=[("focus", _UI["ACCENT"])],
+                  darkcolor=[("focus", _UI["ACCENT"])])
+
+        s.configure("Treeview", background="#ffffff", fieldbackground="#ffffff", foreground=_UI["TEXT"],
+                    bordercolor=_UI["BORDER"], rowheight=26, font=("Segoe UI", 9))
+        s.configure("Treeview.Heading", background=_UI["SURFACE"], foreground=_UI["TEXT"],
+                    bordercolor=_UI["BORDER"], font=("Segoe UI", 9, "bold"), padding=4)
+        s.map("Treeview", background=[("selected", _UI["SEL_BG"])], foreground=[("selected", _UI["SEL_FG"])])
+        s.configure("TScrollbar", background=_UI["SURFACE"], troughcolor=_UI["BG"],
+                    bordercolor=_UI["BORDER"], arrowcolor=_UI["TEXT"])
 
     def _refresh_filter_values(self) -> None:
         values = {"type": set(), "school": set(), "color": set(), "size": set()}

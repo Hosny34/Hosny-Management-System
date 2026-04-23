@@ -4952,31 +4952,32 @@ def _bind_mousewheel(widget, scrollable=None):
 
 # ---- Premium UI Design System ----
 _UI = {
-    "BG":       "#F8FAFC",
-    "SURFACE":  "#FFFFFF",
-    "SURFACE2": "#F1F5F9",
-    "BORDER":   "#E2E8F0",
-    "ACCENT":   "#0F172A",
-    "ACCENT_H": "#1E293B",
-    "BRAND":    "#3B82F6",
-    "BRAND_H":  "#2563EB",
-    "BRAND_L":  "#EFF6FF",
-    "TEXT":     "#0F172A",
+    # POS-like light palette for visual parity
+    "BG":       "#f8fafc",
+    "SURFACE":  "#e2e8f0",
+    "SURFACE2": "#f1f5f9",
+    "BORDER":   "#cbd5e1",
+    "ACCENT":   "#2563eb",
+    "ACCENT_H": "#1d4ed8",
+    "BRAND":    "#2563eb",
+    "BRAND_H":  "#1d4ed8",
+    "BRAND_L":  "#bfdbfe",
+    "TEXT":     "#0f172a",
     "TEXT_SEC": "#475569",
-    "TEXT_DIM": "#94A3B8",
-    "OK":       "#059669",
-    "OK_H":     "#047857",
-    "OK_L":     "#ECFDF5",
-    "WARN":     "#D97706",
-    "WARN_H":   "#B45309",
-    "WARN_L":   "#FFFBEB",
-    "DANGER":   "#DC2626",
-    "DANGER_H": "#B91C1C",
-    "DANGER_L": "#FEF2F2",
-    "ROW_EVEN": "#FFFFFF",
-    "ROW_ODD":  "#F8FAFC",
-    "SEL_BG":   "#DBEAFE",
-    "SEL_FG":   "#1E40AF",
+    "TEXT_DIM": "#94a3b8",
+    "OK":       "#16a34a",
+    "OK_H":     "#15803d",
+    "OK_L":     "#ecfdf5",
+    "WARN":     "#f59e0b",
+    "WARN_H":   "#d97706",
+    "WARN_L":   "#fffbeb",
+    "DANGER":   "#dc2626",
+    "DANGER_H": "#b91c1c",
+    "DANGER_L": "#fef2f2",
+    "ROW_EVEN": "#ffffff",
+    "ROW_ODD":  "#f1f5f9",
+    "SEL_BG":   "#bfdbfe",
+    "SEL_FG":   "#0f172a",
 }
 
 _FONTS = {
@@ -5703,6 +5704,7 @@ class OutcomeFrame(ttk.Frame):
         self.bill_lines: List[Dict[str, Any]] = []
 
         # selection state
+        self._sel_warehouse_no: Optional[int] = None
         self._sel_school: Optional[str] = None
         self._sel_item: Optional[str] = None
         self._sel_color: Optional[str] = None
@@ -5713,16 +5715,16 @@ class OutcomeFrame(ttk.Frame):
 
     # ---- Premium button palettes ----
     _BTN_PRODUCT = {
-        "bg": "#FFFFFF", "fg": _UI["TEXT"], "font": ("Segoe UI", 9, "bold"),
+        "bg": _UI["ACCENT"], "fg": "#FFFFFF", "font": ("Segoe UI", 9, "bold"),
         "bd": 0, "relief": "flat", "padx": 12, "pady": 6, "cursor": "hand2",
-        "activebackground": _UI["BRAND_L"], "activeforeground": _UI["SEL_FG"],
+        "activebackground": _UI["ACCENT_H"], "activeforeground": "#FFFFFF",
         "highlightbackground": _UI["BORDER"], "highlightthickness": 1,
     }
     _BTN_BACK = {
-        "bg": _UI["SURFACE"], "fg": _UI["TEXT_SEC"], "font": ("Segoe UI", 8),
+        "bg": _UI["SURFACE"], "fg": _UI["TEXT"], "font": ("Segoe UI", 9),
         "bd": 0, "cursor": "hand2", "padx": 8, "pady": 4,
         "highlightbackground": _UI["BORDER"], "highlightthickness": 1,
-        "activebackground": _UI["SURFACE2"], "activeforeground": _UI["TEXT"],
+        "activebackground": _UI["BORDER"], "activeforeground": _UI["TEXT"],
     }
     _BTN_BLUE = _BTN_PRODUCT   # alias for compatibility
     _BTN_GRAY = _BTN_BACK      # alias for compatibility
@@ -5764,6 +5766,7 @@ class OutcomeFrame(ttk.Frame):
         qf_inner.pack(fill=tk.X, padx=8, pady=6)
 
         for _, (label_text, attr, width) in enumerate([
+            ("المخزن", "_filter_warehouse", 14),
             ("المدرسة", "_filter_school", 18),
             ("النوع", "_filter_type", 16),
             ("اللون", "_filter_color", 12),
@@ -5775,6 +5778,7 @@ class OutcomeFrame(ttk.Frame):
             cb = ttk.Combobox(pill, width=width, state="readonly")
             cb.pack(side=tk.RIGHT)
             setattr(self, attr, cb)
+        self._filter_warehouse["values"] = ["", *WAREHOUSE_NUMBER_DISPLAY_VALUES]
 
         clear_f = tk.Button(qf_inner, text="مسح", command=self._clear_quick_filters,
                             bg=_UI["SURFACE"], fg=_UI["TEXT_SEC"], font=_FONTS["small"],
@@ -5784,6 +5788,7 @@ class OutcomeFrame(ttk.Frame):
         clear_f.pack(side=tk.LEFT, padx=4)
         _add_hover(clear_f, _UI["SURFACE2"], _UI["SURFACE"])
 
+        self._filter_warehouse.bind("<<ComboboxSelected>>", lambda e: self._on_filter_changed("warehouse_no"))
         self._filter_school.bind("<<ComboboxSelected>>", lambda e: self._on_filter_changed("school"))
         self._filter_type.bind("<<ComboboxSelected>>", lambda e: self._on_filter_changed("item_type"))
         self._filter_color.bind("<<ComboboxSelected>>", lambda e: self._on_filter_changed("color"))
@@ -6105,14 +6110,33 @@ class OutcomeFrame(ttk.Frame):
                        _UI["SEL_FG"], _UI["TEXT"])
 
     # ---------------- Cascading Quick Filters ----------------
+    def _warehouse_no_from_filter(self) -> Optional[int]:
+        raw = warehouse_numeric_value(self._filter_warehouse.get())
+        raw = (raw or "").strip()
+        if not raw:
+            return None
+        try:
+            return int(raw)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _warehouse_display_for_no(warehouse_no: Optional[int]) -> str:
+        if warehouse_no is None:
+            return ""
+        return WAREHOUSE_NUMBER_LABELS.get(str(int(warehouse_no)), str(int(warehouse_no)))
+
     def _refresh_filter_combos(self):
         """Repopulate each filter combobox based on the other two selections."""
         try:
             constraints: Dict[str, Any] = {}
+            warehouse_no = self._warehouse_no_from_filter()
             school = self._filter_school.get().strip()
             item_type = self._filter_type.get().strip()
             color = self._filter_color.get().strip()
 
+            if warehouse_no is not None:
+                constraints["warehouse_no"] = warehouse_no
             if school:
                 constraints["school"] = school
             if item_type:
@@ -6136,6 +6160,7 @@ class OutcomeFrame(ttk.Frame):
 
     def _on_filter_changed(self, changed_field: str):
         """Called when any quick-filter combobox selection changes."""
+        warehouse_no = self._warehouse_no_from_filter()
         school = self._filter_school.get().strip() or None
         item_type = self._filter_type.get().strip() or None
         color = self._filter_color.get().strip() or None
@@ -6144,6 +6169,8 @@ class OutcomeFrame(ttk.Frame):
         # Check school against current item_type + color
         if school:
             c = {}
+            if warehouse_no is not None:
+                c["warehouse_no"] = warehouse_no
             if item_type: c["item_type"] = item_type
             if color: c["color"] = color
             if school not in self.db.get_distinct_filtered("school", c):
@@ -6153,6 +6180,8 @@ class OutcomeFrame(ttk.Frame):
         # Check item_type against current school + color
         if item_type:
             c = {}
+            if warehouse_no is not None:
+                c["warehouse_no"] = warehouse_no
             if school: c["school"] = school
             if color: c["color"] = color
             if item_type not in self.db.get_distinct_filtered("item_type", c):
@@ -6162,6 +6191,8 @@ class OutcomeFrame(ttk.Frame):
         # Check color against current school + item_type
         if color:
             c = {}
+            if warehouse_no is not None:
+                c["warehouse_no"] = warehouse_no
             if school: c["school"] = school
             if item_type: c["item_type"] = item_type
             if color not in self.db.get_distinct_filtered("color", c):
@@ -6169,6 +6200,7 @@ class OutcomeFrame(ttk.Frame):
                 color = None
 
         self._refresh_filter_combos()
+        self._sel_warehouse_no = warehouse_no
         self._sel_school = school
         self._sel_item = item_type
         self._sel_color = color
@@ -6187,9 +6219,11 @@ class OutcomeFrame(ttk.Frame):
 
     def _clear_quick_filters(self):
         """Reset all quick-filter comboboxes and return to initial view."""
+        self._filter_warehouse.set("")
         self._filter_school.set("")
         self._filter_type.set("")
         self._filter_color.set("")
+        self._sel_warehouse_no = None
         self._sel_school = None
         self._sel_item = None
         self._sel_color = None
@@ -6200,6 +6234,7 @@ class OutcomeFrame(ttk.Frame):
 
     def _sync_filters_to_combos(self):
         """Sync internal selection state to filter comboboxes."""
+        self._filter_warehouse.set(self._warehouse_display_for_no(self._sel_warehouse_no))
         self._filter_school.set(self._sel_school or "")
         self._filter_type.set(self._sel_item or "")
         self._filter_color.set(self._sel_color or "")
@@ -6218,6 +6253,8 @@ class OutcomeFrame(ttk.Frame):
         self._clear_grid()
         try:
             constraints: Dict[str, Any] = {}
+            if self._sel_warehouse_no is not None:
+                constraints["warehouse_no"] = self._sel_warehouse_no
             if self._sel_item:
                 constraints["item_type"] = self._sel_item
             if self._sel_color:
@@ -6263,11 +6300,16 @@ class OutcomeFrame(ttk.Frame):
         # Prefer item search first so a common text in a school name does not
         # unexpectedly jump to the wrong school.
         try:
+            inv_constraints: Dict[str, Any] = {}
+            if self._sel_warehouse_no is not None:
+                inv_constraints["warehouse_no"] = self._sel_warehouse_no
+            inv_rows = self.db.current_inventory(inv_constraints)
             matches: List[Tuple[str, str]] = []
-            for school in self.db.list_schools_all():
-                for item_type, _color in self.db.list_items_for_school(school):
-                    if q in (item_type or "").lower():
-                        matches.append((school, item_type))
+            for r in inv_rows:
+                school = str(r.get("school") or "").strip()
+                item_type = str(r.get("item_type") or "").strip()
+                if school and item_type and q in item_type.lower():
+                    matches.append((school, item_type))
             if matches:
                 exact_items = sorted({it for _sc, it in matches if (it or "").lower() == q})
                 start_items = sorted({it for _sc, it in matches if (it or "").lower().startswith(q)})
@@ -6291,8 +6333,11 @@ class OutcomeFrame(ttk.Frame):
             pass
         # Then try matching school name(s) by substring (all matches, not only the first).
         try:
+            school_constraints: Dict[str, Any] = {}
+            if self._sel_warehouse_no is not None:
+                school_constraints["warehouse_no"] = self._sel_warehouse_no
             schools = sorted({
-                r["school"] for r in self.db.current_inventory({}) if r.get("school")
+                r["school"] for r in self.db.current_inventory(school_constraints) if r.get("school")
             })
             matching_schools = [s for s in schools if q in (s or "").lower()]
             if not matching_schools:
@@ -6366,7 +6411,12 @@ class OutcomeFrame(ttk.Frame):
             self._crumb_var.set(f"المدرسة: {self._sel_school}  ⟶  اختر النوع")
             try:
                 items = sorted({
-                    it for (it, cl) in self.db.list_items_for_school(self._sel_school) if it
+                    str(r.get("item_type") or "").strip()
+                    for r in self.db.current_inventory({
+                        "warehouse_no": self._sel_warehouse_no,
+                        "school": self._sel_school,
+                    })
+                    if str(r.get("item_type") or "").strip()
                 })
             except Exception:
                 items = []
@@ -6380,7 +6430,9 @@ class OutcomeFrame(ttk.Frame):
             try:
                 items = sorted({
                     r["item_type"]
-                    for r in self.db.current_inventory({})
+                    for r in self.db.current_inventory(
+                        {"warehouse_no": self._sel_warehouse_no} if self._sel_warehouse_no is not None else {}
+                    )
                     if r.get("item_type")
                 })
             except Exception:
@@ -6408,8 +6460,12 @@ class OutcomeFrame(ttk.Frame):
         self._sel_size = None
         self._crumb_var.set(f"{self._sel_school}  ⟶  {self._sel_item}  ⟶  اختر اللون")
         self._clear_grid()
-        pairs = self.db.list_items_for_school(self._sel_school or "")
-        colors = sorted({cl for (it, cl) in pairs if it == self._sel_item})
+        rows = self.db.current_inventory({
+            "warehouse_no": self._sel_warehouse_no,
+            "school": self._sel_school,
+            "item_type": self._sel_item,
+        })
+        colors = sorted({str(r.get("color") or "").strip() for r in rows if str(r.get("color") or "").strip()})
         self._mk_grid_buttons(colors, self._select_color, cols=4)
         # Back to items
         tk.Button(self._grid_host, text="◀ رجوع إلى الأنواع", command=self._render_items,
@@ -6471,6 +6527,7 @@ class OutcomeFrame(ttk.Frame):
         stock_rows = {}
         try:
             for r in self.db.current_inventory({
+                "warehouse_no": self._sel_warehouse_no,
                 "school": self._sel_school,
                 "item_type": self._sel_item,
                 "color": self._sel_color,
@@ -11486,6 +11543,11 @@ class WarehouseApp(tk.Tk):
         self.geometry("1320x760")
         self.db = SqliteDatabase(DB_PATH)
         self._dark_mode = False
+        # POS-like defaults for classic Tk widgets across all windows/dialogs.
+        self.option_add("*Font", "Segoe UI 9")
+        self.option_add("*Listbox.Font", "Segoe UI 9")
+        self.option_add("*Menu.Font", "Segoe UI 9")
+        self.option_add("*Message.font", "Segoe UI 9")
 
         # Apply palette BEFORE creating widgets so ttk picks it up
         self._apply_colorful_theme(True)
@@ -11679,7 +11741,7 @@ class WarehouseApp(tk.Tk):
                 pass
             return
 
-        # -------- Slate Frost palette --------
+        # -------- POS light palette --------
         BG      = _UI["BG"]
         SURFACE = _UI["SURFACE"]
         SURFACE2= _UI["SURFACE2"]
@@ -11698,13 +11760,13 @@ class WarehouseApp(tk.Tk):
 
         # -------- base widgets --------
         s.configure("TFrame",  background=SURFACE)
-        s.configure("TLabelframe", background=SURFACE, bordercolor=BORDER, relief="solid", borderwidth=1)
+        s.configure("TLabelframe", background=SURFACE, bordercolor=BORDER, relief="groove")
         s.configure("TLabelframe.Label", background=SURFACE, foreground=TEXT_SEC,
-                    font=("Segoe UI", 9, "bold"))
+                    font=("Segoe UI", 10, "bold"))
 
         s.configure("TLabel",  background=SURFACE, foreground=TEXT)
         s.configure("TButton", background=ACCENT, foreground="white",
-                    bordercolor=ACCENT, focusthickness=0, padding=[8, 4],
+                    bordercolor=ACCENT, focusthickness=1, focuscolor=ACCENT_H, padding=[12, 6],
                     font=("Segoe UI", 9, "bold"))
         s.map("TButton",
             background=[("active", ACCENT_H), ("pressed", ACCENT_H)],
@@ -11715,7 +11777,7 @@ class WarehouseApp(tk.Tk):
             s.configure(sty, fieldbackground=SURFACE, background=SURFACE,
                         foreground=TEXT, bordercolor=BORDER,
                         lightcolor=BORDER, darkcolor=BORDER,
-                        arrowcolor=TEXT_SEC, padding=[8, 6])
+                        arrowcolor=TEXT_SEC, padding=4)
             s.map(sty,
                 fieldbackground=[("focus", SURFACE), ("readonly", SURFACE2)],
                 bordercolor=[("focus", BRAND)],
@@ -11730,11 +11792,11 @@ class WarehouseApp(tk.Tk):
 
         # notebook tabs
         s.configure("TNotebook", background=BG, bordercolor=BORDER)
-        s.configure("TNotebook.Tab", background=SURFACE2, foreground=TEXT_DIM,
-                    padding=[10, 4], font=("Segoe UI", 9))
+        s.configure("TNotebook.Tab", background=SURFACE, foreground=TEXT_DIM,
+                    padding=[14, 6], font=("Segoe UI", 9, "bold"))
         s.map("TNotebook.Tab",
-            background=[("selected", SURFACE)],
-            foreground=[("selected", TEXT)])
+            background=[("selected", BG)],
+            foreground=[("selected", ACCENT)])
 
         # -------- Treeview (tables) --------
         s.configure("Treeview",
@@ -11743,10 +11805,13 @@ class WarehouseApp(tk.Tk):
                     font=("Segoe UI", 9))
         s.configure("Treeview.Heading",
                     background=SURFACE2, foreground=TEXT_SEC, bordercolor=BORDER,
-                    font=("Segoe UI", 8, "bold"), padding=[6, 4])
+                    font=("Segoe UI", 9, "bold"), padding=4)
         s.map("Treeview",
             background=[("selected", SEL_BG)],
             foreground=[("selected", SEL_FG)])
+
+        s.configure("TScrollbar", background=SURFACE, troughcolor=BG,
+                    bordercolor=BORDER, arrowcolor=TEXT)
 
         # -------- PanedWindow --------
         s.configure("TPanedwindow", background=BG)
@@ -11815,9 +11880,9 @@ class WarehouseApp(tk.Tk):
         sync_menu.add_command(label="تشخيص المزامنة (F11)", command=lambda: self._switch_tab("sync_diagnostics"))
         menubar.add_cascade(label="المزامنة", menu=sync_menu)
 
-        # ======== HEADER BAR (Premium dark slate) ========
-        _HBG = _UI["ACCENT"]       # #0F172A
-        _HBG2 = _UI["ACCENT_H"]    # #1E293B
+        # ======== HEADER BAR (POS-like light + blue accents) ========
+        _HBG = _UI["SURFACE"]
+        _HBG2 = _UI["SURFACE2"]
 
         header = tk.Frame(self, bg=_HBG, height=56)
         header.pack(fill=tk.X, side=tk.TOP)
@@ -11826,7 +11891,7 @@ class WarehouseApp(tk.Tk):
         # Brand area (right for RTL)
         brand = tk.Frame(header, bg=_HBG)
         brand.pack(side=tk.RIGHT, padx=16)
-        tk.Label(brand, text="إدارة المخازن", bg=_HBG, fg="#FFFFFF",
+        tk.Label(brand, text="إدارة المخازن", bg=_HBG, fg=_UI["TEXT"],
                  font=("Segoe UI", 12, "bold")).pack(side=tk.RIGHT)
         tk.Label(brand, text=" PRO ", bg=_UI["BRAND"], fg="#FFFFFF",
                  font=("Segoe UI", 7, "bold"), padx=4, pady=1).pack(side=tk.RIGHT, padx=(0, 8))
@@ -11846,13 +11911,13 @@ class WarehouseApp(tk.Tk):
             ("الإحصائيات", 4),
         ]
         for text, idx in nav_items:
-            b = tk.Button(nav, text=f"  {text}  ", bg=_HBG2, fg=_UI["TEXT_DIM"],
-                          font=("Segoe UI", 10), bd=0, padx=12, pady=6,
-                          cursor="hand2", activebackground="#334155",
+            b = tk.Button(nav, text=f"  {text}  ", bg=_HBG2, fg=_UI["TEXT_SEC"],
+                          font=("Segoe UI", 9, "bold"), bd=0, padx=12, pady=6,
+                          cursor="hand2", activebackground=_UI["BRAND_H"],
                           activeforeground="#FFFFFF",
                           command=lambda i=idx: self._select_nav(i))
             b.pack(side=tk.RIGHT, padx=3)
-            _add_hover(b, "#334155", _HBG2, "#F1F5F9", _UI["TEXT_DIM"])
+            _add_hover(b, _UI["BRAND_H"], _HBG2, "#FFFFFF", _UI["TEXT_SEC"])
             self._nav_btns.append(b)
 
         # Utility buttons (left side for RTL)
@@ -11860,12 +11925,12 @@ class WarehouseApp(tk.Tk):
         util.pack(side=tk.LEFT, padx=12)
 
         self._header_clock_var = tk.StringVar(value="")
-        tk.Label(util, textvariable=self._header_clock_var, bg=_HBG, fg="#64748B",
+        tk.Label(util, textvariable=self._header_clock_var, bg=_HBG, fg=_UI["TEXT_DIM"],
                  font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=8)
 
-        _ghost_hdr = {"bg": _HBG, "fg": "#CBD5E1", "bd": 0, "font": ("Segoe UI", 9),
+        _ghost_hdr = {"bg": _HBG, "fg": _UI["TEXT_SEC"], "bd": 0, "font": ("Segoe UI", 9, "bold"),
                       "padx": 8, "pady": 3, "cursor": "hand2",
-                      "activebackground": _HBG2, "activeforeground": "#FFFFFF"}
+                      "activebackground": _UI["BRAND_L"], "activeforeground": _UI["SEL_FG"]}
         for txt, cmd, tip in [
             ("المخزون", self._open_inventory, "F3 / Ctrl+I"),
             ("الفواتير", self._open_bills_history, "F4 / Ctrl+P"),
@@ -11876,7 +11941,7 @@ class WarehouseApp(tk.Tk):
         ]:
             b = tk.Button(util, text=txt, command=cmd, **_ghost_hdr)
             b.pack(side=tk.LEFT, padx=2)
-            _add_hover(b, _HBG2, _HBG, "#FFFFFF", "#CBD5E1")
+            _add_hover(b, _UI["BRAND_L"], _HBG, _UI["SEL_FG"], _UI["TEXT_SEC"])
             ToolTip(b, tip)
 
         # ======== TABBED NOTEBOOK ========
@@ -11957,8 +12022,8 @@ class WarehouseApp(tk.Tk):
                 btn.unbind("<Enter>")
                 btn.unbind("<Leave>")
             else:
-                btn.config(bg=_UI["ACCENT_H"], fg=_UI["TEXT_DIM"])
-                _add_hover(btn, "#334155", _UI["ACCENT_H"], "#F1F5F9", _UI["TEXT_DIM"])
+                btn.config(bg=_UI["SURFACE2"], fg=_UI["TEXT_SEC"])
+                _add_hover(btn, _UI["BRAND_H"], _UI["SURFACE2"], "#FFFFFF", _UI["TEXT_SEC"])
 
     def _open_admin(self):
         AdminWindow(self, self.db)
