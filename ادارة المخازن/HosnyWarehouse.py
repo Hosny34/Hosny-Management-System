@@ -11544,10 +11544,10 @@ class WarehouseApp(tk.Tk):
         self.db = SqliteDatabase(DB_PATH)
         self._dark_mode = False
         # POS-like defaults for classic Tk widgets across all windows/dialogs.
-        self.option_add("*Font", "Segoe UI 9")
-        self.option_add("*Listbox.Font", "Segoe UI 9")
-        self.option_add("*Menu.Font", "Segoe UI 9")
-        self.option_add("*Message.font", "Segoe UI 9")
+        self.option_add("*Font", "{Segoe UI} 9")
+        self.option_add("*Listbox.Font", "{Segoe UI} 9")
+        self.option_add("*Menu.Font", "{Segoe UI} 9")
+        self.option_add("*Message.font", "{Segoe UI} 9")
 
         # Apply palette BEFORE creating widgets so ttk picks it up
         self._apply_colorful_theme(True)
