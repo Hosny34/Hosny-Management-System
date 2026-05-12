@@ -1,0 +1,543 @@
+﻿event_id,created_at,order_id,order_number,order_stage_id,event_type,actor,reason,product_type,product_name,school_name,size,color,payload_json
+13,2026-04-26 12:17:16,25,WO-2604-0025,390,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto_plan"": true}"
+14,2026-04-26 12:17:16,25,WO-2604-0025,391,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+15,2026-04-26 12:17:16,25,WO-2604-0025,392,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+16,2026-04-26 12:17:16,25,WO-2604-0025,393,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+17,2026-04-26 12:17:16,25,WO-2604-0025,394,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+18,2026-04-26 12:17:16,25,WO-2604-0025,395,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto_plan"": true}"
+19,2026-04-26 12:17:16,25,WO-2604-0025,396,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 7, ""worker_name"": ""اسلام مكوجي"", ""auto_plan"": true}"
+20,2026-04-26 12:17:16,25,WO-2604-0025,397,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto_plan"": true}"
+21,2026-04-26 12:17:16,25,WO-2604-0025,381,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 4, ""worker_name"": ""اسلام مقص"", ""auto"": true}"
+22,2026-04-26 12:17:16,25,WO-2604-0025,381,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+23,2026-04-26 12:26:17,24,WO-2604-0024,365,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,4,أخضر,
+24,2026-04-26 12:26:17,24,WO-2604-0024,366,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto"": true}"
+25,2026-04-26 12:26:17,24,WO-2604-0024,366,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,
+26,2026-04-26 12:28:10,26,WO-2604-0026,,ORDER_CREATED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""order_number"": ""WO-2604-0026"", ""started_immediately"": true, ""qty"": 50, ""school"": ""بهتيم"", ""size"": ""S"", ""color"": ""أخضر""}"
+27,2026-04-26 12:28:10,26,WO-2604-0026,398,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 3, ""worker_name"": ""ميمي مقص"", ""auto_plan"": true}"
+28,2026-04-26 12:28:10,26,WO-2604-0026,399,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+29,2026-04-26 12:28:10,26,WO-2604-0026,400,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+30,2026-04-26 12:28:10,26,WO-2604-0026,401,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+31,2026-04-26 12:28:10,26,WO-2604-0026,402,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+32,2026-04-26 12:28:10,26,WO-2604-0026,403,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+33,2026-04-26 12:28:11,26,WO-2604-0026,404,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+34,2026-04-26 12:28:11,26,WO-2604-0026,405,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+35,2026-04-26 12:28:11,26,WO-2604-0026,406,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+36,2026-04-26 12:28:11,26,WO-2604-0026,407,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto_plan"": true}"
+37,2026-04-26 12:28:11,26,WO-2604-0026,408,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+38,2026-04-26 12:28:11,26,WO-2604-0026,409,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+39,2026-04-26 12:28:11,26,WO-2604-0026,410,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+40,2026-04-26 12:28:11,26,WO-2604-0026,411,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+41,2026-04-26 12:28:11,26,WO-2604-0026,412,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto_plan"": true}"
+42,2026-04-26 12:28:11,26,WO-2604-0026,413,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 7, ""worker_name"": ""اسلام مكوجي"", ""auto_plan"": true}"
+43,2026-04-26 12:28:11,26,WO-2604-0026,414,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto_plan"": true}"
+44,2026-04-26 12:28:11,26,WO-2604-0026,398,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 3, ""worker_name"": ""ميمي مقص"", ""ensure_start"": true}"
+45,2026-04-26 12:28:11,26,WO-2604-0026,398,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+46,2026-04-26 12:28:11,26,WO-2604-0026,,ORDER_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+47,2026-04-27 07:33:35,24,WO-2604-0024,366,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,4,أخضر,
+48,2026-04-27 07:33:35,24,WO-2604-0024,367,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto"": true}"
+49,2026-04-27 07:33:35,24,WO-2604-0024,367,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,
+50,2026-04-27 07:34:13,24,WO-2604-0024,367,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,4,أخضر,
+51,2026-04-27 07:34:13,24,WO-2604-0024,368,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+52,2026-04-27 07:34:13,24,WO-2604-0024,368,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,
+53,2026-04-27 07:34:43,24,WO-2604-0024,368,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,4,أخضر,
+54,2026-04-27 07:34:43,24,WO-2604-0024,369,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto"": true}"
+55,2026-04-27 07:34:43,24,WO-2604-0024,369,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,
+56,2026-04-27 07:34:50,26,WO-2604-0026,398,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+57,2026-04-27 07:34:50,26,WO-2604-0026,399,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto"": true}"
+58,2026-04-27 07:34:50,26,WO-2604-0026,399,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+59,2026-04-27 07:34:54,26,WO-2604-0026,399,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+60,2026-04-27 07:34:54,26,WO-2604-0026,400,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto"": true}"
+61,2026-04-27 07:34:54,26,WO-2604-0026,400,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+62,2026-04-27 07:37:04,25,WO-2604-0025,381,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+63,2026-04-27 07:37:04,25,WO-2604-0025,382,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+64,2026-04-27 07:37:04,25,WO-2604-0025,382,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+65,2026-04-27 07:37:13,25,WO-2604-0025,382,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+66,2026-04-27 07:37:13,25,WO-2604-0025,382,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+67,2026-04-27 07:37:43,25,WO-2604-0025,382,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+68,2026-04-27 07:37:43,25,WO-2604-0025,382,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+69,2026-04-27 07:38:13,25,WO-2604-0025,382,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto"": true}"
+70,2026-04-27 07:38:13,25,WO-2604-0025,382,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+71,2026-04-27 07:42:57,24,WO-2604-0024,369,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,4,أخضر,
+72,2026-04-27 07:42:57,24,WO-2604-0024,370,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+73,2026-04-27 07:42:57,24,WO-2604-0024,370,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,
+74,2026-04-27 07:44:03,24,WO-2604-0024,370,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,4,أخضر,
+75,2026-04-27 07:44:03,24,WO-2604-0024,371,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto"": true}"
+76,2026-04-27 07:44:03,24,WO-2604-0024,371,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,
+77,2026-04-27 07:44:07,26,WO-2604-0026,400,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+78,2026-04-27 07:44:08,26,WO-2604-0026,401,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto"": true}"
+79,2026-04-27 07:44:08,26,WO-2604-0026,401,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+80,2026-04-27 07:44:13,25,WO-2604-0025,382,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+81,2026-04-27 07:44:13,25,WO-2604-0025,383,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto"": true}"
+82,2026-04-27 07:44:13,25,WO-2604-0025,383,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+83,2026-04-27 07:44:23,25,WO-2604-0025,383,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+84,2026-04-27 07:44:23,25,WO-2604-0025,384,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto"": true}"
+85,2026-04-27 07:44:23,25,WO-2604-0025,384,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+86,2026-04-27 07:44:25,26,WO-2604-0026,401,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+87,2026-04-27 07:44:25,26,WO-2604-0026,402,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+88,2026-04-27 07:44:25,26,WO-2604-0026,402,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+89,2026-04-27 07:44:37,26,WO-2604-0026,402,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+90,2026-04-27 07:44:37,26,WO-2604-0026,403,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto"": true}"
+91,2026-04-27 07:44:37,26,WO-2604-0026,403,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+92,2026-04-27 07:44:44,26,WO-2604-0026,403,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+93,2026-04-27 07:44:44,26,WO-2604-0026,404,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+94,2026-04-27 07:44:44,26,WO-2604-0026,404,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+95,2026-04-27 07:44:46,26,WO-2604-0026,404,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+96,2026-04-27 07:44:46,26,WO-2604-0026,405,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto"": true}"
+97,2026-04-27 07:44:46,26,WO-2604-0026,405,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+98,2026-04-27 07:44:48,26,WO-2604-0026,405,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+99,2026-04-27 07:44:48,26,WO-2604-0026,406,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+100,2026-04-27 07:44:48,26,WO-2604-0026,406,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+101,2026-04-27 07:44:49,26,WO-2604-0026,406,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+102,2026-04-27 07:44:49,26,WO-2604-0026,407,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto"": true}"
+103,2026-04-27 07:44:49,26,WO-2604-0026,407,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+104,2026-04-27 07:44:54,26,WO-2604-0026,407,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+105,2026-04-27 07:44:54,26,WO-2604-0026,408,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,S,أخضر,
+106,2026-04-27 07:44:54,26,WO-2604-0026,408,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,S,أخضر,
+107,2026-04-27 07:45:06,25,WO-2604-0025,384,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+108,2026-04-27 07:45:06,25,WO-2604-0025,385,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+109,2026-04-27 07:45:06,25,WO-2604-0025,385,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+110,2026-04-27 07:45:09,24,WO-2604-0024,371,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,4,أخضر,
+111,2026-04-27 07:45:09,24,WO-2604-0024,372,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,4,أخضر,
+112,2026-04-27 07:45:09,24,WO-2604-0024,372,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,4,أخضر,
+113,2026-04-27 07:45:14,24,WO-2604-0024,372,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,4,أخضر,
+114,2026-04-27 07:45:14,24,WO-2604-0024,372,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,4,أخضر,
+115,2026-04-27 07:45:14,26,WO-2604-0026,408,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto"": true}"
+116,2026-04-27 07:45:14,26,WO-2604-0026,408,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+117,2026-04-27 07:45:17,26,WO-2604-0026,408,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+118,2026-04-27 07:45:17,26,WO-2604-0026,409,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto"": true}"
+119,2026-04-27 07:45:17,26,WO-2604-0026,409,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+120,2026-04-27 07:45:20,26,WO-2604-0026,409,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+121,2026-04-27 07:45:20,26,WO-2604-0026,410,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,S,أخضر,
+122,2026-04-27 07:45:20,26,WO-2604-0026,410,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,S,أخضر,
+123,2026-04-27 07:45:29,25,WO-2604-0025,385,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+124,2026-04-27 07:45:29,25,WO-2604-0025,386,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto"": true}"
+125,2026-04-27 07:45:29,25,WO-2604-0025,386,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+126,2026-04-27 07:45:44,24,WO-2604-0024,372,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+127,2026-04-27 07:45:44,24,WO-2604-0024,372,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,
+128,2026-04-27 07:45:44,26,WO-2604-0026,410,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,S,أخضر,
+129,2026-04-27 07:45:44,26,WO-2604-0026,410,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,S,أخضر,
+130,2026-04-27 07:46:14,26,WO-2604-0026,410,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,S,أخضر,
+131,2026-04-27 07:46:14,26,WO-2604-0026,410,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,S,أخضر,
+132,2026-04-27 07:46:18,24,WO-2604-0024,372,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,4,أخضر,
+133,2026-04-27 07:46:18,24,WO-2604-0024,373,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto"": true}"
+134,2026-04-27 07:46:18,24,WO-2604-0024,373,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,
+135,2026-04-27 07:46:20,24,WO-2604-0024,373,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,4,أخضر,
+136,2026-04-27 07:46:20,24,WO-2604-0024,374,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto"": true}"
+137,2026-04-27 07:46:20,24,WO-2604-0024,374,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,
+138,2026-04-27 07:46:44,26,WO-2604-0026,410,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+139,2026-04-27 07:46:44,26,WO-2604-0026,410,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+140,2026-04-27 07:47:43,24,WO-2604-0024,374,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,4,أخضر,
+141,2026-04-27 07:47:43,24,WO-2604-0024,375,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto"": true}"
+142,2026-04-27 07:47:43,24,WO-2604-0024,375,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,
+143,2026-04-27 07:47:50,24,WO-2604-0024,375,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,4,أخضر,
+144,2026-04-27 07:47:50,24,WO-2604-0024,376,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,4,أخضر,
+145,2026-04-27 07:47:50,24,WO-2604-0024,376,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,4,أخضر,
+146,2026-04-27 07:47:53,25,WO-2604-0025,386,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+147,2026-04-27 07:47:53,25,WO-2604-0025,387,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+148,2026-04-27 07:47:53,25,WO-2604-0025,387,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+149,2026-04-27 07:47:55,26,WO-2604-0026,410,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+150,2026-04-27 07:47:55,26,WO-2604-0026,411,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+151,2026-04-27 07:47:55,26,WO-2604-0026,411,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+152,2026-04-27 07:48:00,26,WO-2604-0026,411,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+153,2026-04-27 07:48:00,26,WO-2604-0026,412,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto"": true}"
+154,2026-04-27 07:48:00,26,WO-2604-0026,412,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+155,2026-04-27 07:48:11,26,WO-2604-0026,412,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+156,2026-04-27 07:48:11,26,WO-2604-0026,413,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 7, ""worker_name"": ""اسلام مكوجي"", ""auto"": true}"
+157,2026-04-27 07:48:11,26,WO-2604-0026,413,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+158,2026-04-27 07:48:14,24,WO-2604-0024,376,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+159,2026-04-27 07:48:14,24,WO-2604-0024,376,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,
+160,2026-04-27 07:48:15,25,WO-2604-0025,387,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+161,2026-04-27 07:48:15,25,WO-2604-0025,387,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+162,2026-04-27 07:48:22,24,WO-2604-0024,376,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,4,أخضر,
+163,2026-04-27 07:48:22,24,WO-2604-0024,377,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+164,2026-04-27 07:48:22,24,WO-2604-0024,377,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,
+165,2026-04-27 07:48:34,24,WO-2604-0024,377,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,4,أخضر,
+166,2026-04-27 07:48:34,24,WO-2604-0024,378,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,"{""worker_id"": 4, ""worker_name"": ""اسلام مقص"", ""auto"": true}"
+167,2026-04-27 07:48:34,24,WO-2604-0024,378,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,
+168,2026-04-27 07:48:36,26,WO-2604-0026,413,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+169,2026-04-27 07:48:36,26,WO-2604-0026,414,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto"": true}"
+170,2026-04-27 07:48:36,26,WO-2604-0026,414,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+171,2026-04-27 07:48:38,24,WO-2604-0024,378,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,4,أخضر,
+172,2026-04-27 07:48:38,24,WO-2604-0024,379,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,"{""worker_id"": 4, ""worker_name"": ""اسلام مقص"", ""auto"": true}"
+173,2026-04-27 07:48:38,24,WO-2604-0024,379,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,
+174,2026-04-27 07:48:39,26,WO-2604-0026,414,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,S,أخضر,
+175,2026-04-27 07:48:39,26,WO-2604-0026,,ORDER_COMPLETED,system,,جاكيت,جاكيت,بهتيم,S,أخضر,
+176,2026-04-27 07:48:41,24,WO-2604-0024,379,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,4,أخضر,
+177,2026-04-27 07:48:41,24,WO-2604-0024,380,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,"{""worker_id"": 4, ""worker_name"": ""اسلام مقص"", ""auto"": true}"
+178,2026-04-27 07:48:41,24,WO-2604-0024,380,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,
+179,2026-04-27 07:48:45,25,WO-2604-0025,387,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+180,2026-04-27 07:48:45,25,WO-2604-0025,387,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+181,2026-04-27 07:48:52,24,WO-2604-0024,380,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,4,أخضر,
+182,2026-04-27 07:48:52,24,WO-2604-0024,,ORDER_COMPLETED,system,,جاكيت,جاكيت,بهتيم,4,أخضر,
+183,2026-04-27 07:48:53,25,WO-2604-0025,387,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+184,2026-04-27 07:48:53,25,WO-2604-0025,388,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto"": true}"
+185,2026-04-27 07:48:53,25,WO-2604-0025,388,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+186,2026-04-27 07:48:55,25,WO-2604-0025,388,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+187,2026-04-27 07:48:55,25,WO-2604-0025,389,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+188,2026-04-27 07:48:55,25,WO-2604-0025,389,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+189,2026-04-27 07:48:56,25,WO-2604-0025,389,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+190,2026-04-27 07:48:56,25,WO-2604-0025,390,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto"": true}"
+191,2026-04-27 07:48:56,25,WO-2604-0025,390,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+192,2026-04-27 07:48:58,25,WO-2604-0025,390,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+193,2026-04-27 07:48:58,25,WO-2604-0025,391,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto"": true}"
+194,2026-04-27 07:48:58,25,WO-2604-0025,391,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+195,2026-04-27 07:48:59,25,WO-2604-0025,391,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+196,2026-04-27 07:48:59,25,WO-2604-0025,392,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto"": true}"
+197,2026-04-27 07:48:59,25,WO-2604-0025,392,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+198,2026-04-27 07:49:01,25,WO-2604-0025,392,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+199,2026-04-27 07:49:01,25,WO-2604-0025,393,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+200,2026-04-27 07:49:01,25,WO-2604-0025,393,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+201,2026-04-27 07:49:03,25,WO-2604-0025,393,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+202,2026-04-27 07:49:03,25,WO-2604-0025,394,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+203,2026-04-27 07:49:03,25,WO-2604-0025,394,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+204,2026-04-27 07:49:05,25,WO-2604-0025,394,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+205,2026-04-27 07:49:05,25,WO-2604-0025,395,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto"": true}"
+206,2026-04-27 07:49:05,25,WO-2604-0025,395,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+207,2026-04-27 07:49:07,25,WO-2604-0025,395,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+208,2026-04-27 07:49:07,25,WO-2604-0025,396,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 7, ""worker_name"": ""اسلام مكوجي"", ""auto"": true}"
+209,2026-04-27 07:49:07,25,WO-2604-0025,396,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+210,2026-04-27 07:49:09,25,WO-2604-0025,396,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+211,2026-04-27 07:49:09,25,WO-2604-0025,397,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto"": true}"
+212,2026-04-27 07:49:09,25,WO-2604-0025,397,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+213,2026-04-27 07:49:11,25,WO-2604-0025,397,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+214,2026-04-27 07:49:11,25,WO-2604-0025,,ORDER_COMPLETED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+215,2026-04-27 07:50:37,27,WO-2604-0027,,ORDER_CREATED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""order_number"": ""WO-2604-0027"", ""qty"": 50, ""school"": ""بهتيم"", ""size"": ""12"", ""color"": ""أخضر"", ""batch_lines"": 3}"
+216,2026-04-27 07:50:37,27,WO-2604-0027,415,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 4, ""worker_name"": ""اسلام مقص"", ""auto_plan"": true}"
+217,2026-04-27 07:50:37,27,WO-2604-0027,416,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+218,2026-04-27 07:50:37,27,WO-2604-0027,417,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+219,2026-04-27 07:50:37,27,WO-2604-0027,418,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+220,2026-04-27 07:50:37,27,WO-2604-0027,419,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+221,2026-04-27 07:50:37,27,WO-2604-0027,420,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+222,2026-04-27 07:50:37,27,WO-2604-0027,421,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+223,2026-04-27 07:50:37,27,WO-2604-0027,422,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+224,2026-04-27 07:50:37,27,WO-2604-0027,423,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+225,2026-04-27 07:50:37,27,WO-2604-0027,424,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+226,2026-04-27 07:50:37,27,WO-2604-0027,425,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+227,2026-04-27 07:50:37,27,WO-2604-0027,426,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+228,2026-04-27 07:50:37,27,WO-2604-0027,427,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+229,2026-04-27 07:50:37,27,WO-2604-0027,428,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+230,2026-04-27 07:50:37,27,WO-2604-0027,429,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto_plan"": true}"
+231,2026-04-27 07:50:37,27,WO-2604-0027,430,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 7, ""worker_name"": ""اسلام مكوجي"", ""auto_plan"": true}"
+232,2026-04-27 07:50:37,27,WO-2604-0027,431,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto_plan"": true}"
+233,2026-04-27 07:50:37,27,WO-2604-0027,415,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 4, ""worker_name"": ""اسلام مقص"", ""ensure_start"": true}"
+234,2026-04-27 07:50:37,27,WO-2604-0027,415,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+235,2026-04-27 07:50:37,27,WO-2604-0027,,ORDER_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+236,2026-04-27 07:50:37,28,WO-2604-0028,,ORDER_CREATED,user,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""order_number"": ""WO-2604-0028"", ""qty"": 100, ""school"": ""بهتيم"", ""size"": ""6"", ""color"": ""أخضر"", ""batch_lines"": 3}"
+237,2026-04-27 07:50:37,28,WO-2604-0028,432,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 3, ""worker_name"": ""ميمي مقص"", ""auto_plan"": true}"
+238,2026-04-27 07:50:37,28,WO-2604-0028,433,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto_plan"": true}"
+239,2026-04-27 07:50:37,28,WO-2604-0028,434,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto_plan"": true}"
+240,2026-04-27 07:50:37,28,WO-2604-0028,435,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto_plan"": true}"
+241,2026-04-27 07:50:37,28,WO-2604-0028,436,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+242,2026-04-27 07:50:37,28,WO-2604-0028,437,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto_plan"": true}"
+243,2026-04-27 07:50:37,28,WO-2604-0028,438,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+244,2026-04-27 07:50:37,28,WO-2604-0028,439,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+245,2026-04-27 07:50:37,28,WO-2604-0028,440,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+246,2026-04-27 07:50:37,28,WO-2604-0028,441,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+247,2026-04-27 07:50:37,28,WO-2604-0028,442,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+248,2026-04-27 07:50:37,28,WO-2604-0028,443,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+249,2026-04-27 07:50:37,28,WO-2604-0028,444,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+250,2026-04-27 07:50:37,28,WO-2604-0028,445,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+251,2026-04-27 07:50:37,28,WO-2604-0028,446,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto_plan"": true}"
+252,2026-04-27 07:50:37,28,WO-2604-0028,447,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 7, ""worker_name"": ""اسلام مكوجي"", ""auto_plan"": true}"
+253,2026-04-27 07:50:37,28,WO-2604-0028,448,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto_plan"": true}"
+254,2026-04-27 07:50:37,28,WO-2604-0028,432,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 3, ""worker_name"": ""ميمي مقص"", ""ensure_start"": true}"
+255,2026-04-27 07:50:37,28,WO-2604-0028,432,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,
+256,2026-04-27 07:50:37,28,WO-2604-0028,,ORDER_STARTED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,
+257,2026-04-27 07:50:37,29,WO-2604-0029,,ORDER_CREATED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""order_number"": ""WO-2604-0029"", ""qty"": 10, ""school"": ""بهتيم"", ""size"": ""10"", ""color"": ""أخضر"", ""batch_lines"": 3}"
+258,2026-04-27 07:50:37,29,WO-2604-0029,449,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 4, ""worker_name"": ""اسلام مقص"", ""auto_plan"": true}"
+259,2026-04-27 07:50:37,29,WO-2604-0029,450,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto_plan"": true}"
+260,2026-04-27 07:50:37,29,WO-2604-0029,451,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto_plan"": true}"
+261,2026-04-27 07:50:37,29,WO-2604-0029,452,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto_plan"": true}"
+262,2026-04-27 07:50:37,29,WO-2604-0029,453,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+263,2026-04-27 07:50:37,29,WO-2604-0029,454,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto_plan"": true}"
+264,2026-04-27 07:50:37,29,WO-2604-0029,455,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+265,2026-04-27 07:50:37,29,WO-2604-0029,456,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto_plan"": true}"
+266,2026-04-27 07:50:37,29,WO-2604-0029,457,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+267,2026-04-27 07:50:37,29,WO-2604-0029,458,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto_plan"": true}"
+268,2026-04-27 07:50:37,29,WO-2604-0029,459,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+269,2026-04-27 07:50:37,29,WO-2604-0029,460,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto_plan"": true}"
+270,2026-04-27 07:50:37,29,WO-2604-0029,461,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+271,2026-04-27 07:50:37,29,WO-2604-0029,462,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true}"
+272,2026-04-27 07:50:37,29,WO-2604-0029,463,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto_plan"": true}"
+273,2026-04-27 07:50:37,29,WO-2604-0029,464,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 7, ""worker_name"": ""اسلام مكوجي"", ""auto_plan"": true}"
+274,2026-04-27 07:50:37,29,WO-2604-0029,465,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto_plan"": true}"
+275,2026-04-27 07:50:37,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+276,2026-04-27 07:50:45,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+277,2026-04-27 07:50:45,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+278,2026-04-27 07:51:15,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+279,2026-04-27 07:51:15,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+280,2026-04-27 07:51:45,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+281,2026-04-27 07:51:45,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+282,2026-04-27 08:04:20,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+283,2026-04-27 08:04:20,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+284,2026-04-27 08:04:50,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+285,2026-04-27 08:04:50,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+286,2026-04-27 08:05:20,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+287,2026-04-27 08:05:20,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+288,2026-04-27 08:05:50,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+289,2026-04-27 08:05:50,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+290,2026-04-27 08:06:20,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+291,2026-04-27 08:06:20,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+292,2026-04-27 08:06:50,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+293,2026-04-27 08:06:50,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+294,2026-04-27 08:07:20,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+295,2026-04-27 08:07:20,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+296,2026-04-27 08:07:50,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+297,2026-04-27 08:07:50,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+298,2026-04-27 08:08:21,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+299,2026-04-27 08:08:21,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+300,2026-04-27 08:08:51,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+301,2026-04-27 08:08:51,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+302,2026-04-27 08:09:21,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+303,2026-04-27 08:09:21,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+304,2026-04-27 08:09:50,27,WO-2604-0027,416,STAGE_EARLY_RELEASE,manager,test,جاكيت,جاكيت,بهتيم,12,أخضر,
+305,2026-04-27 08:09:51,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+306,2026-04-27 08:09:51,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+307,2026-04-27 08:10:21,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+308,2026-04-27 08:10:21,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+309,2026-04-27 08:10:51,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+310,2026-04-27 08:10:51,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+311,2026-04-27 08:11:21,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+312,2026-04-27 08:11:21,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+313,2026-04-27 08:11:51,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+314,2026-04-27 08:11:51,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+315,2026-04-27 08:12:21,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+316,2026-04-27 08:12:21,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+317,2026-04-27 08:12:52,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+318,2026-04-27 08:12:52,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+319,2026-04-27 08:13:22,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+320,2026-04-27 08:13:22,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+321,2026-04-27 08:13:52,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+322,2026-04-27 08:13:52,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+323,2026-04-27 08:14:22,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+324,2026-04-27 08:14:22,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+325,2026-04-27 08:14:52,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+326,2026-04-27 08:14:52,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+327,2026-04-27 08:15:22,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+328,2026-04-27 08:15:22,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+329,2026-04-27 08:15:52,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+330,2026-04-27 08:15:52,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+331,2026-04-27 08:16:22,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+332,2026-04-27 08:16:22,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+333,2026-04-27 08:16:52,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+334,2026-04-27 08:16:52,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+335,2026-04-27 08:17:23,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+336,2026-04-27 08:17:23,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+337,2026-04-27 08:17:53,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+338,2026-04-27 08:17:53,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+339,2026-04-27 08:18:23,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+340,2026-04-27 08:18:23,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+341,2026-04-27 08:18:53,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+342,2026-04-27 08:18:53,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+343,2026-04-27 08:19:23,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+344,2026-04-27 08:19:23,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+345,2026-04-27 08:19:53,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+346,2026-04-27 08:19:53,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+347,2026-04-27 08:20:23,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+348,2026-04-27 08:20:23,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+349,2026-04-27 08:20:53,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+350,2026-04-27 08:20:53,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+351,2026-04-27 08:21:23,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+352,2026-04-27 08:21:23,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+353,2026-04-27 08:21:53,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+354,2026-04-27 08:21:53,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+355,2026-04-27 08:22:24,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+356,2026-04-27 08:22:24,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+357,2026-04-27 08:23:06,27,WO-2604-0027,417,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto"": true}"
+358,2026-04-27 08:23:06,27,WO-2604-0027,417,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+359,2026-04-27 08:23:06,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+360,2026-04-27 08:23:06,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+361,2026-04-27 08:23:36,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+362,2026-04-27 08:23:36,29,WO-2604-0029,449,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+363,2026-04-27 08:23:46,27,WO-2604-0027,415,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+364,2026-04-27 08:23:46,27,WO-2604-0027,416,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto"": true}"
+365,2026-04-27 08:23:46,27,WO-2604-0027,416,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+366,2026-04-27 08:24:06,29,WO-2604-0029,449,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 4, ""worker_name"": ""اسلام مقص"", ""auto"": true}"
+367,2026-04-27 08:24:06,29,WO-2604-0029,449,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,
+368,2026-04-27 08:28:17,27,WO-2604-0027,416,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+369,2026-04-27 08:28:28,27,WO-2604-0027,417,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+370,2026-04-27 08:28:28,27,WO-2604-0027,418,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto"": true}"
+371,2026-04-27 08:28:28,27,WO-2604-0027,418,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+372,2026-04-27 08:28:36,27,WO-2604-0027,418,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+373,2026-04-27 08:28:36,27,WO-2604-0027,419,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+374,2026-04-27 08:28:36,27,WO-2604-0027,419,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+375,2026-04-27 09:18:30,27,WO-2604-0027,419,STAGE_EARLY_RELEASE,manager,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""parallel_start"": true}"
+376,2026-04-27 09:18:30,27,WO-2604-0027,420,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto"": true}"
+377,2026-04-27 09:18:30,27,WO-2604-0027,420,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+378,2026-04-27 09:18:38,27,WO-2604-0027,420,STAGE_EARLY_RELEASE,manager,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""parallel_start"": true}"
+379,2026-04-27 09:18:38,27,WO-2604-0027,421,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+380,2026-04-27 09:18:48,27,WO-2604-0027,421,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+381,2026-04-27 09:19:19,27,WO-2604-0027,421,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+382,2026-04-27 09:19:49,27,WO-2604-0027,421,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+383,2026-04-27 09:20:19,27,WO-2604-0027,421,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+384,2026-04-27 09:20:44,27,WO-2604-0027,421,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+385,2026-04-27 09:21:23,27,WO-2604-0027,421,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+386,2026-04-27 09:21:38,27,WO-2604-0027,419,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+387,2026-04-27 09:21:38,27,WO-2604-0027,421,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+388,2026-04-27 09:21:38,27,WO-2604-0027,421,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+389,2026-04-27 09:21:42,27,WO-2604-0027,420,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+390,2026-04-27 09:22:02,27,WO-2604-0027,421,LOT_SPLIT,user,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""child_order_id"": 30, ""child_order_number"": ""WO-2604-0027-R1"", ""split_quantity"": 1, ""remaining_quantity"": 49, ""return_stage_id"": 419, ""return_stage_name"": ""تركيب جيب"", ""return_sequence"": 5}"
+391,2026-04-27 09:22:02,30,WO-2604-0027-R1,470,LOT_CREATED_FROM_SPLIT,user,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""parent_order_id"": 27, ""parent_order_number"": ""WO-2604-0027"", ""root_order_id"": 27, ""root_order_number"": ""WO-2604-0027"", ""split_from_stage_id"": 421, ""split_from_stage_name"": ""بنط عرض رجل ع كتف"", ""return_stage_name"": ""تركيب جيب""}"
+392,2026-04-27 09:22:02,30,WO-2604-0027-R1,470,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true, ""global_plan"": true}"
+393,2026-04-27 09:22:02,30,WO-2604-0027-R1,471,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto_plan"": true, ""global_plan"": true}"
+394,2026-04-27 09:22:02,30,WO-2604-0027-R1,472,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true, ""global_plan"": true}"
+395,2026-04-27 09:22:02,30,WO-2604-0027-R1,473,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto_plan"": true, ""global_plan"": true}"
+396,2026-04-27 09:22:02,30,WO-2604-0027-R1,474,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true, ""global_plan"": true}"
+397,2026-04-27 09:22:02,30,WO-2604-0027-R1,475,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto_plan"": true, ""global_plan"": true}"
+398,2026-04-27 09:22:02,30,WO-2604-0027-R1,476,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto_plan"": true, ""global_plan"": true}"
+399,2026-04-27 09:22:02,30,WO-2604-0027-R1,477,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto_plan"": true, ""global_plan"": true}"
+400,2026-04-27 09:22:02,30,WO-2604-0027-R1,478,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true, ""global_plan"": true}"
+401,2026-04-27 09:22:02,30,WO-2604-0027-R1,479,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true, ""global_plan"": true}"
+402,2026-04-27 09:22:02,30,WO-2604-0027-R1,480,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto_plan"": true, ""global_plan"": true}"
+403,2026-04-27 09:22:02,30,WO-2604-0027-R1,481,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 7, ""worker_name"": ""اسلام مكوجي"", ""auto_plan"": true, ""global_plan"": true}"
+404,2026-04-27 09:22:02,30,WO-2604-0027-R1,482,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto_plan"": true, ""global_plan"": true}"
+405,2026-04-27 09:22:02,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+406,2026-04-27 09:22:02,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+407,2026-04-27 09:22:24,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+408,2026-04-27 09:22:24,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+409,2026-04-27 09:22:54,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+410,2026-04-27 09:22:54,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+411,2026-04-27 09:23:37,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+412,2026-04-27 09:23:37,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+413,2026-04-27 09:24:07,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+414,2026-04-27 09:24:07,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+415,2026-04-27 09:24:38,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+416,2026-04-27 09:24:38,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+417,2026-04-27 09:25:08,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+418,2026-04-27 09:25:08,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+419,2026-04-27 09:25:17,29,WO-2604-0029,449,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,
+420,2026-04-27 09:25:17,29,WO-2604-0029,450,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto"": true}"
+421,2026-04-27 09:25:17,29,WO-2604-0029,450,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,
+422,2026-04-27 09:25:38,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+423,2026-04-27 09:25:38,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+424,2026-04-27 09:28:52,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+425,2026-04-27 09:28:52,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+426,2026-04-27 09:29:22,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+427,2026-04-27 09:29:22,30,WO-2604-0027-R1,470,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+428,2026-04-27 09:29:31,27,WO-2604-0027,421,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+429,2026-04-27 09:29:31,27,WO-2604-0027,422,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto"": true}"
+430,2026-04-27 09:29:31,27,WO-2604-0027,422,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+431,2026-04-27 09:29:41,28,WO-2604-0028,432,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,6,أخضر,
+432,2026-04-27 09:29:41,28,WO-2604-0028,433,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto"": true}"
+433,2026-04-27 09:29:41,28,WO-2604-0028,433,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,
+434,2026-04-27 09:29:44,29,WO-2604-0029,450,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,
+435,2026-04-27 09:29:44,29,WO-2604-0029,451,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto"": true}"
+436,2026-04-27 09:29:44,29,WO-2604-0029,451,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,
+437,2026-04-27 09:29:46,29,WO-2604-0029,451,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,
+438,2026-04-27 09:29:46,29,WO-2604-0029,452,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto"": true}"
+439,2026-04-27 09:29:46,29,WO-2604-0029,452,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,
+440,2026-04-27 09:29:47,29,WO-2604-0029,452,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,
+441,2026-04-27 09:29:47,29,WO-2604-0029,453,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+442,2026-04-27 09:29:47,29,WO-2604-0029,453,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,
+443,2026-04-27 09:29:49,29,WO-2604-0029,453,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,
+444,2026-04-27 09:29:49,29,WO-2604-0029,454,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto"": true}"
+445,2026-04-27 09:29:49,29,WO-2604-0029,454,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,
+446,2026-04-27 09:29:53,30,WO-2604-0027-R1,470,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+447,2026-04-27 09:29:53,30,WO-2604-0027-R1,470,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+448,2026-04-27 09:30:30,29,WO-2604-0029,454,LOT_SPLIT,user,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""child_order_id"": 31, ""child_order_number"": ""WO-2604-0029-R1"", ""split_quantity"": 1, ""remaining_quantity"": 9, ""return_stage_id"": 453, ""return_stage_name"": ""تركيب جيب"", ""return_sequence"": 5}"
+449,2026-04-27 09:30:30,31,WO-2604-0029-R1,487,LOT_CREATED_FROM_SPLIT,user,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""parent_order_id"": 29, ""parent_order_number"": ""WO-2604-0029"", ""root_order_id"": 29, ""root_order_number"": ""WO-2604-0029"", ""split_from_stage_id"": 454, ""split_from_stage_name"": ""تكتيف"", ""return_stage_name"": ""تركيب جيب""}"
+450,2026-04-27 09:30:30,31,WO-2604-0029-R1,487,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true, ""global_plan"": true}"
+451,2026-04-27 09:30:30,31,WO-2604-0029-R1,488,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto_plan"": true, ""global_plan"": true}"
+452,2026-04-27 09:30:30,31,WO-2604-0029-R1,489,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true, ""global_plan"": true}"
+453,2026-04-27 09:30:30,31,WO-2604-0029-R1,490,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto_plan"": true, ""global_plan"": true}"
+454,2026-04-27 09:30:30,31,WO-2604-0029-R1,491,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true, ""global_plan"": true}"
+455,2026-04-27 09:30:30,31,WO-2604-0029-R1,492,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto_plan"": true, ""global_plan"": true}"
+456,2026-04-27 09:30:30,31,WO-2604-0029-R1,493,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto_plan"": true, ""global_plan"": true}"
+457,2026-04-27 09:30:30,31,WO-2604-0029-R1,494,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto_plan"": true, ""global_plan"": true}"
+458,2026-04-27 09:30:30,31,WO-2604-0029-R1,495,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true, ""global_plan"": true}"
+459,2026-04-27 09:30:30,31,WO-2604-0029-R1,496,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto_plan"": true, ""global_plan"": true}"
+460,2026-04-27 09:30:30,31,WO-2604-0029-R1,497,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto_plan"": true, ""global_plan"": true}"
+461,2026-04-27 09:30:30,31,WO-2604-0029-R1,498,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 7, ""worker_name"": ""اسلام مكوجي"", ""auto_plan"": true, ""global_plan"": true}"
+462,2026-04-27 09:30:30,31,WO-2604-0029-R1,499,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 6, ""worker_name"": ""ام حبيبة"", ""auto_plan"": true, ""global_plan"": true}"
+463,2026-04-27 09:30:30,31,WO-2604-0029-R1,487,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+464,2026-04-27 09:30:30,31,WO-2604-0029-R1,487,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+465,2026-04-27 09:30:53,31,WO-2604-0029-R1,487,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+466,2026-04-27 09:30:53,31,WO-2604-0029-R1,487,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+467,2026-04-27 09:30:55,30,WO-2604-0027-R1,470,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+468,2026-04-27 09:30:55,30,WO-2604-0027-R1,471,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+469,2026-04-27 09:30:55,30,WO-2604-0027-R1,471,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+470,2026-04-27 09:31:08,29,WO-2604-0029,454,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,
+471,2026-04-27 09:31:08,29,WO-2604-0029,455,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+472,2026-04-27 09:31:08,29,WO-2604-0029,455,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,
+473,2026-04-27 09:31:11,29,WO-2604-0029,455,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,
+474,2026-04-27 09:31:11,29,WO-2604-0029,456,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto"": true}"
+475,2026-04-27 09:31:11,29,WO-2604-0029,456,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,
+476,2026-04-27 09:31:15,29,WO-2604-0029,456,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,
+477,2026-04-27 09:31:15,29,WO-2604-0029,457,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+478,2026-04-27 09:31:15,29,WO-2604-0029,457,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,
+479,2026-04-27 09:31:17,29,WO-2604-0029,457,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,
+480,2026-04-27 09:31:17,29,WO-2604-0029,458,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto"": true}"
+481,2026-04-27 09:31:17,29,WO-2604-0029,458,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,
+482,2026-04-27 09:31:22,29,WO-2604-0029,458,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,
+483,2026-04-27 09:31:22,29,WO-2604-0029,459,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto"": true}"
+484,2026-04-27 09:31:22,29,WO-2604-0029,459,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,
+485,2026-04-27 09:31:23,30,WO-2604-0027-R1,471,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+486,2026-04-27 09:31:23,30,WO-2604-0027-R1,471,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+487,2026-04-27 09:31:23,31,WO-2604-0029-R1,487,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+488,2026-04-27 09:31:23,31,WO-2604-0029-R1,487,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,
+489,2026-04-27 09:31:24,29,WO-2604-0029,459,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,
+490,2026-04-27 09:31:24,29,WO-2604-0029,460,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto"": true}"
+491,2026-04-27 09:31:24,29,WO-2604-0029,460,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,
+492,2026-04-27 09:31:54,30,WO-2604-0027-R1,471,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+493,2026-04-27 09:31:54,30,WO-2604-0027-R1,471,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+494,2026-04-27 09:32:24,30,WO-2604-0027-R1,471,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+495,2026-04-27 09:32:24,30,WO-2604-0027-R1,471,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+496,2026-04-27 09:32:55,30,WO-2604-0027-R1,471,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+497,2026-04-27 09:32:55,30,WO-2604-0027-R1,471,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+498,2026-04-27 09:33:26,30,WO-2604-0027-R1,471,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+499,2026-04-27 09:33:26,30,WO-2604-0027-R1,471,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+500,2026-04-27 11:17:29,27,WO-2604-0027,422,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+501,2026-04-27 11:17:34,31,WO-2604-0029-R1,487,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,
+502,2026-04-27 11:18:18,29,WO-2604-0029,460,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,
+503,2026-04-27 11:18:32,28,WO-2604-0028,433,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,6,أخضر,
+504,2026-04-27 11:31:26,27,WO-2604-0027,423,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+505,2026-04-27 11:31:26,27,WO-2604-0027,423,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+506,2026-04-27 11:31:26,28,WO-2604-0028,434,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,"{""worker_id"": 2, ""worker_name"": ""ام محمد"", ""auto"": true}"
+507,2026-04-27 11:31:26,28,WO-2604-0028,434,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,6,أخضر,
+508,2026-04-27 11:31:26,29,WO-2604-0029,461,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+509,2026-04-27 11:31:26,29,WO-2604-0029,461,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+510,2026-04-27 11:31:26,30,WO-2604-0027-R1,471,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 1, ""worker_name"": ""ام ابراهيم"", ""auto"": true}"
+511,2026-04-27 11:31:26,30,WO-2604-0027-R1,471,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+512,2026-04-27 11:31:26,31,WO-2604-0029-R1,488,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto"": true}"
+513,2026-04-27 11:31:26,31,WO-2604-0029-R1,488,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,
+514,2026-04-27 11:31:39,27,WO-2604-0027,423,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+515,2026-04-27 11:31:57,27,WO-2604-0027,424,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+516,2026-04-27 11:31:57,27,WO-2604-0027,424,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+517,2026-04-27 11:31:57,29,WO-2604-0029,461,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+518,2026-04-27 11:31:57,29,WO-2604-0029,461,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,
+519,2026-04-27 11:31:57,31,WO-2604-0029-R1,488,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,
+520,2026-04-27 11:32:27,27,WO-2604-0027,424,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,"{""worker_id"": 8, ""worker_name"": ""مروة"", ""auto"": true}"
+521,2026-04-27 11:32:27,27,WO-2604-0027,424,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,12,أخضر,
+522,2026-04-27 11:32:27,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+523,2026-04-27 11:32:27,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+524,2026-04-27 11:32:57,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+525,2026-04-27 11:32:57,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+526,2026-04-27 11:37:27,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+527,2026-04-27 11:37:27,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+528,2026-04-27 11:37:37,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+529,2026-04-27 11:37:37,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+530,2026-04-27 11:37:39,30,WO-2604-0027-R1,471,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,12,أخضر,
+531,2026-04-27 11:37:47,30,WO-2604-0027-R1,472,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+532,2026-04-27 11:37:47,30,WO-2604-0027-R1,472,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+533,2026-04-27 11:37:47,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+534,2026-04-27 11:37:47,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+535,2026-04-27 11:37:57,30,WO-2604-0027-R1,472,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+536,2026-04-27 11:37:57,30,WO-2604-0027-R1,472,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+537,2026-04-27 11:37:57,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+538,2026-04-27 11:37:57,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+539,2026-04-27 11:38:07,30,WO-2604-0027-R1,472,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+540,2026-04-27 11:38:07,30,WO-2604-0027-R1,472,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+541,2026-04-27 11:38:07,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+542,2026-04-27 11:38:07,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+543,2026-04-27 11:38:18,30,WO-2604-0027-R1,472,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+544,2026-04-27 11:38:18,30,WO-2604-0027-R1,472,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+545,2026-04-27 11:38:18,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+546,2026-04-27 11:38:18,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+547,2026-04-27 11:38:19,29,WO-2604-0029,461,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,
+548,2026-04-27 11:38:28,29,WO-2604-0029,462,WORKER_ASSIGNED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,"{""worker_id"": 5, ""worker_name"": ""كشري سنجر"", ""auto"": true}"
+549,2026-04-27 11:38:28,29,WO-2604-0029,462,STAGE_STARTED,system,,جاكيت,جاكيت,بهتيم,10,أخضر,
+550,2026-04-27 11:38:28,30,WO-2604-0027-R1,472,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+551,2026-04-27 11:38:28,30,WO-2604-0027-R1,472,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,12,أخضر,
+552,2026-04-27 11:38:28,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+553,2026-04-27 11:38:28,31,WO-2604-0029-R1,489,AUTO_START_DEFERRED,system,No qualified worker available now; kept queued in pipeline,جاكيت,جاكيت,بهتيم,10,أخضر,
+554,2026-04-27 11:38:35,29,WO-2604-0029,462,STAGE_COMPLETED,user,,جاكيت,جاكيت,بهتيم,10,أخضر,

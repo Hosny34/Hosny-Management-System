@@ -1,0 +1,14 @@
+{
+  "format": "hosny_factory_ai_archive_v2",
+  "month": "2026-04",
+  "exported_at": "2026-04-27T14:38:35",
+  "files": [
+    "orders.csv",
+    "stages.csv",
+    "events.csv",
+    "summary.json",
+    "ai_snapshot.json",
+    "ai_order_bundles.jsonl"
+  ],
+  "purpose": "AI-only monthly production telemetry for bottleneck and improvement analysis."
+}

@@ -16,7 +16,7 @@ import time
 import tempfile
 import webbrowser
 from dataclasses import dataclass
-from datetime import datetime, date   # +date for calendar
+from datetime import datetime, date, timedelta   # +date for calendar
 import calendar                       # ADD
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -2526,21 +2526,47 @@ class SqliteDatabase:
         )
 
     def get_next_incoming_shipment_alert(self) -> Optional[Dict[str, Any]]:
+        retry_before = (datetime.now() - timedelta(minutes=10)).isoformat(timespec="seconds")
         row = self.conn.execute(
             """
             SELECT id, sync_event_uuid, shipment_uuid, from_device, note, total_qty, created_at
-            FROM incoming_shipment_alerts
-            WHERE shown_at IS NULL
-            ORDER BY id ASC
+            FROM incoming_shipment_alerts AS a
+            WHERE EXISTS (
+                SELECT 1
+                FROM incoming_shipment_items_pending AS p
+                WHERE p.shipment_uuid = a.shipment_uuid
+                  AND p.status = 'PENDING'
+            )
+              AND (a.shown_at IS NULL OR a.shown_at <= ?)
+            ORDER BY
+                CASE WHEN a.shown_at IS NULL THEN 0 ELSE 1 END,
+                a.id ASC
             LIMIT 1
-            """
+            """,
+            (retry_before,),
         ).fetchone()
         return dict(row) if row else None
+
+    def reset_incoming_shipment_alert_shown(self, alert_id: int) -> None:
+        self.conn.execute(
+            "UPDATE incoming_shipment_alerts SET shown_at=NULL WHERE id=?",
+            (int(alert_id),),
+        )
 
     def mark_incoming_shipment_alert_shown(self, alert_id: int) -> None:
         self.conn.execute(
             "UPDATE incoming_shipment_alerts SET shown_at=? WHERE id=?",
             (now_iso(), int(alert_id)),
+        )
+
+    def mark_incoming_shipment_confirmed(self, shipment_uuid: str) -> None:
+        self.conn.execute(
+            """
+            UPDATE incoming_shipment_alerts
+            SET shown_at=COALESCE(shown_at, ?)
+            WHERE shipment_uuid=?
+            """,
+            (now_iso(), str(shipment_uuid or "").strip()),
         )
 
     def list_pending_shipment_items(self, shipment_uuid: str) -> List[Dict[str, Any]]:
@@ -2657,6 +2683,7 @@ class SqliteDatabase:
                     "shift_id": self.active_shift_id,
                 },
             )
+            self.mark_incoming_shipment_confirmed(ship)
         return {"shipment_uuid": ship, "has_diff": bool(diffs), "lines": len(rows)}
 
     def list_reservations(self, status=None, date_from=None, date_to=None, school=None, item_type=None, color=None):
@@ -9267,6 +9294,7 @@ class WarehouseApp:
         self.root = root
         self.db = db
         self._current_shift_id: Optional[int] = None
+        self._open_incoming_shipments: set[str] = set()
         self.root._app_controller = self
         root.title("\u0625\u062F\u0627\u0631\u0629 \u0627\u0644\u0645\u062E\u0627\u0632\u0646 \u0648\u0627\u0644\u0645\u0628\u064A\u0639\u0627\u062A")
         root.geometry("1280x760")
@@ -9439,23 +9467,45 @@ class WarehouseApp:
         try:
             alert = self.db.get_next_incoming_shipment_alert()
             if alert:
-                self._open_incoming_shipment_checklist(alert)
-                self.db.mark_incoming_shipment_alert_shown(int(alert["id"]))
+                shipment_uuid = str(alert.get("shipment_uuid") or "").strip()
+                if shipment_uuid not in self._open_incoming_shipments:
+                    self.db.mark_incoming_shipment_alert_shown(int(alert["id"]))
+                    opened = self._open_incoming_shipment_checklist(alert)
+                    if opened is False:
+                        self.db.reset_incoming_shipment_alert_shown(int(alert["id"]))
         except Exception:
             pass
         self.root.after(4500, self._poll_incoming_shipment_alerts)
 
-    def _open_incoming_shipment_checklist(self, alert: Dict[str, Any]) -> None:
+    def _open_incoming_shipment_checklist(self, alert: Dict[str, Any]) -> bool:
         shipment_uuid = str(alert.get("shipment_uuid") or "").strip()
         rows = self.db.list_pending_shipment_items(shipment_uuid)
         if not shipment_uuid or not rows:
-            return
+            return False
+        self._open_incoming_shipments.add(shipment_uuid)
 
         dlg = tk.Toplevel(self.root)
         dlg.title("تأكيد استلام شحنة فرع")
         dlg.geometry("920x500")
         dlg.transient(self.root)
         dlg.grab_set()
+        confirmed = False
+
+        def _dismiss_receipt():
+            self._open_incoming_shipments.discard(shipment_uuid)
+            if not confirmed:
+                try:
+                    self.db.reset_incoming_shipment_alert_shown(int(alert["id"]))
+                except Exception:
+                    pass
+                ToastNotification.show(
+                    self.root,
+                    "لم يتم تأكيد الشحنة بعد. ستظهر مرة أخرى حتى يتم استلامها.",
+                    toast_type="warning",
+                )
+            dlg.destroy()
+
+        dlg.protocol("WM_DELETE_WINDOW", _dismiss_receipt)
 
         frm = ttk.Frame(dlg, padding=12)
         frm.pack(fill=tk.BOTH, expand=True)
@@ -9516,9 +9566,12 @@ class WarehouseApp:
         ttk.Entry(note_row, textvariable=note_var).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(8, 0))
 
         def _confirm_receipt():
+            nonlocal confirmed
             payload = [{"line_index": int(r["line_index"]), "received_qty": int(received_map.get(int(r["line_index"]), 0))} for r in rows]
             try:
                 out = self.db.confirm_incoming_shipment(shipment_uuid, payload, note_var.get())
+                confirmed = True
+                self._open_incoming_shipments.discard(shipment_uuid)
                 dlg.destroy()
                 msg = "تم استلام الشحنة وتأكيد البنود."
                 if out.get("has_diff"):
@@ -9528,6 +9581,8 @@ class WarehouseApp:
                 messagebox.showerror("خطأ", str(ex), parent=dlg)
 
         ttk.Button(frm, text="تأكيد الاستلام", command=_confirm_receipt).pack(anchor="e", pady=(8, 0))
+
+        return True
 
     def _bind_shortcuts(self):
         self.root.bind("<F5>", lambda e: self._shortcut_refresh())

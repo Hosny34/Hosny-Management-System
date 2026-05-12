@@ -1,0 +1,13 @@
+{
+  "month": "2026-04",
+  "exported_at": "2026-04-27T14:38:35",
+  "orders_count": 8,
+  "events_count": 542,
+  "stages_count": 136,
+  "total_quantity": 410,
+  "completed_orders": 3,
+  "running_orders": 2,
+  "blocked_orders": 0,
+  "paused_orders": 0,
+  "avg_actual_stage_minutes": 49.89
+}

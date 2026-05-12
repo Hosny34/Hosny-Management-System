@@ -2,3 +2,38 @@
 2026-04-21 16:05:45 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=25268, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن)
 2026-04-22 12:36:51 INFO hosny: ============================================================
 2026-04-22 12:36:51 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=41636, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن)
+2026-04-22 16:39:00 INFO hosny: ============================================================
+2026-04-22 16:39:00 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=33620, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن)
+2026-04-22 17:06:12 INFO hosny: ============================================================
+2026-04-22 17:06:12 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=10260, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن)
+2026-04-23 10:57:01 INFO hosny: ============================================================
+2026-04-23 10:57:01 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=21868, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن)
+2026-04-23 11:38:51 INFO hosny: ============================================================
+2026-04-23 11:38:51 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=23432, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن)
+2026-04-23 11:38:52 ERROR hosny: UNCAUGHT EXCEPTION
+Traceback (most recent call last):
+  File "HosnyWarehouse.py", line 12109, in <module>
+    main()
+  File "HosnyWarehouse.py", line 12104, in main
+    app = WarehouseApp()
+          ^^^^^^^^^^^^^^
+  File "HosnyWarehouse.py", line 11555, in __init__
+    self._build()
+  File "HosnyWarehouse.py", line 11822, in _build
+    menubar = tk.Menu(self)
+              ^^^^^^^^^^^^^
+  File "tkinter\__init__.py", line 3379, in __init__
+  File "tkinter\__init__.py", line 2661, in __init__
+_tkinter.TclError: expected integer but got "UI"
+2026-04-23 11:44:19 INFO hosny: ============================================================
+2026-04-23 11:44:19 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=3060, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن)
+2026-04-23 11:53:09 INFO hosny: ============================================================
+2026-04-23 11:53:09 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=18916, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن)
+2026-04-23 12:07:48 INFO hosny: ============================================================
+2026-04-23 12:07:48 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=12224, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن)
+2026-04-23 16:07:00 INFO hosny: ============================================================
+2026-04-23 16:07:00 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=27012, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن)
+2026-04-27 14:05:02 INFO hosny: ============================================================
+2026-04-27 14:05:02 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=35816, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن)
+2026-04-27 14:33:40 INFO hosny: ============================================================
+2026-04-27 14:33:40 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=12040, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن)

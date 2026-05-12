@@ -94,19 +94,35 @@ def _show_crash_popup(exc_type, exc_value) -> None:
     global _CRASH_POPUP_SHOWN
     if _CRASH_POPUP_SHOWN:
         return
+    summary = f"{getattr(exc_type, '__name__', 'Error')}: {exc_value}"
+    path = _LOG_PATH or "logs"
+    title = "خطأ غير متوقع"
+    body = f"حدث خطأ غير متوقع:\n{summary}\n\nتم حفظ التفاصيل في:\n{path}"
     try:
-        import tkinter as tk  # noqa: F401
+        import tkinter as tk
         from tkinter import messagebox
 
-        summary = f"{getattr(exc_type, '__name__', 'Error')}: {exc_value}"
-        path = _LOG_PATH or "logs"
+        # Avoid Tk popups after teardown (prevents: application has been destroyed).
+        root = tk._default_root  # type: ignore[attr-defined]
+        if root is None:
+            raise RuntimeError("Tk root is unavailable")
+        if not bool(root.winfo_exists()):
+            raise RuntimeError("Tk root is already destroyed")
         messagebox.showerror(
-            "خطأ غير متوقع",
-            f"حدث خطأ غير متوقع:\n{summary}\n\nتم حفظ التفاصيل في:\n{path}",
+            title,
+            body,
+            parent=root,
         )
         _CRASH_POPUP_SHOWN = True
     except Exception:
-        pass
+        # Fall back to a native Windows popup when Tk cannot show dialogs.
+        try:
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(0, body, title, 0x10)
+            _CRASH_POPUP_SHOWN = True
+        except Exception:
+            pass
 
 
 def install_crash_logging(app_name: str) -> str:

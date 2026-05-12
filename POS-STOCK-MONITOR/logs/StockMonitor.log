@@ -20,3 +20,7 @@ Traceback (most recent call last):
 TypeError: '>' not supported between instances of 'NoneType' and 'datetime.datetime'
 2026-04-21 16:04:00 INFO hosny: ============================================================
 2026-04-21 16:04:00 INFO hosny: StockMonitor starting up (frozen=True, pid=17524, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-STOCK-MONITOR)
+2026-04-23 11:46:59 INFO hosny: ============================================================
+2026-04-23 11:46:59 INFO hosny: StockMonitor starting up (frozen=True, pid=9696, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-STOCK-MONITOR)
+2026-04-23 11:47:56 INFO hosny: ============================================================
+2026-04-23 11:47:56 INFO hosny: StockMonitor starting up (frozen=True, pid=14200, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-STOCK-MONITOR)

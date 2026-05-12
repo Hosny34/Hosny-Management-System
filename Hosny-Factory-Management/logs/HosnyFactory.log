@@ -1,0 +1,457 @@
+2026-04-23 15:04:42,901 [ERROR] خطأ: لا يمكن الحذف — القالب مستخدم في منتج
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 1092, in _delete
+    self.db.execute("DELETE FROM stage_templates WHERE id=?", (sid,))
+  File "HosnyFactory.py", line 346, in execute
+    return self._conn.execute(sql, tuple(params))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+sqlite3.IntegrityError: FOREIGN KEY constraint failed
+
+2026-04-23 15:05:51,077 [ERROR] خطأ: لا يمكن الحذف — القالب مستخدم في منتج
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 1092, in _delete
+    self.db.execute("DELETE FROM stage_templates WHERE id=?", (sid,))
+  File "HosnyFactory.py", line 346, in execute
+    return self._conn.execute(sql, tuple(params))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+sqlite3.IntegrityError: FOREIGN KEY constraint failed
+
+2026-04-23 15:07:07,485 [ERROR] خطأ: لا يمكن الحذف — القالب مستخدم في منتج
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 1092, in _delete
+    self.db.execute("DELETE FROM stage_templates WHERE id=?", (sid,))
+  File "HosnyFactory.py", line 346, in execute
+    return self._conn.execute(sql, tuple(params))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+sqlite3.IntegrityError: FOREIGN KEY constraint failed
+
+2026-04-23 15:08:06,883 [ERROR] خطأ: لا يمكن الحذف — القالب مستخدم في منتج
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 1092, in _delete
+    self.db.execute("DELETE FROM stage_templates WHERE id=?", (sid,))
+  File "HosnyFactory.py", line 346, in execute
+    return self._conn.execute(sql, tuple(params))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+sqlite3.IntegrityError: FOREIGN KEY constraint failed
+
+2026-04-23 16:16:15,570 [ERROR] خطأ: لا يمكن الحذف — القالب مستخدم في منتج
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 1213, in _delete
+    self.db.execute("DELETE FROM stage_templates WHERE id=?", (sid,))
+  File "HosnyFactory.py", line 350, in execute
+    return self._conn.execute(sql, tuple(params))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+sqlite3.IntegrityError: FOREIGN KEY constraint failed
+
+2026-04-23 16:16:41,003 [ERROR] خطأ: لا يمكن الحذف — القالب مستخدم في منتج
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 1213, in _delete
+    self.db.execute("DELETE FROM stage_templates WHERE id=?", (sid,))
+  File "HosnyFactory.py", line 350, in execute
+    return self._conn.execute(sql, tuple(params))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+sqlite3.IntegrityError: FOREIGN KEY constraint failed
+
+2026-04-23 16:19:40,409 [ERROR] خطأ: لا يمكن الحذف — القالب مستخدم في منتج
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 1213, in _delete
+    self.db.execute("DELETE FROM stage_templates WHERE id=?", (sid,))
+  File "HosnyFactory.py", line 350, in execute
+    return self._conn.execute(sql, tuple(params))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+sqlite3.IntegrityError: FOREIGN KEY constraint failed
+
+2026-04-23 16:26:35,525 [ERROR] خطأ: كود المرحلة موجود مسبقًا
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 1161, in _add
+    self.db.execute(
+  File "HosnyFactory.py", line 350, in execute
+    return self._conn.execute(sql, tuple(params))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+sqlite3.IntegrityError: UNIQUE constraint failed: stage_templates.code
+
+2026-04-26 14:32:40,911 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4517, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 832, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:33:10,945 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4517, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 832, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:33:40,952 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4517, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 832, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:34:10,993 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4517, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 832, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:34:41,002 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4517, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 832, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:40:24,693 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4604, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 837, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:41:24,750 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4604, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 837, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:41:54,761 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4604, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 837, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:42:24,801 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4604, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 837, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:42:54,819 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4604, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 837, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:43:24,862 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4604, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 837, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:43:54,887 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4604, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 837, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:44:24,923 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4604, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 837, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:44:54,931 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4604, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 837, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:45:24,942 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4604, in _tick_auto_refresh
+  File "HosnyFactory.py", line 837, in auto_allocate_workers_by_timeline
+    AND os.status NOT IN ('done','skipped')""",
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:45:54,975 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4604, in _tick_auto_refresh
+    def _bind_shortcuts(self) -> None:
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyFactory.py", line 837, in auto_allocate_workers_by_timeline
+    AND os.status NOT IN ('done','skipped')""",
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:46:25,013 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4604, in _tick_auto_refresh
+    def _bind_shortcuts(self) -> None:
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyFactory.py", line 837, in auto_allocate_workers_by_timeline
+    AND os.status NOT IN ('done','skipped')""",
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:46:55,058 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4604, in _tick_auto_refresh
+    def _bind_shortcuts(self) -> None:
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyFactory.py", line 837, in auto_allocate_workers_by_timeline
+    AND os.status NOT IN ('done','skipped')""",
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:47:25,095 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4604, in _tick_auto_refresh
+    def _bind_shortcuts(self) -> None:
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyFactory.py", line 837, in auto_allocate_workers_by_timeline
+    AND os.status NOT IN ('done','skipped')""",
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:47:55,104 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4604, in _tick_auto_refresh
+  File "HosnyFactory.py", line 837, in auto_allocate_workers_by_timeline
+    candidates = candidate_workers_for_order_stage(
+        ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:48:50,434 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:49:20,477 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:49:50,488 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:50:20,538 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:50:50,550 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:51:20,604 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:51:50,613 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:52:20,655 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:52:50,666 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:53:20,705 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:53:50,713 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:54:20,769 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:54:50,785 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    auto_allocate_workers_by_timeline(self.db, oid)
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:55:20,836 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    order_id,
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:55:50,867 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    self.notify_reference_data_changed()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    order_id,
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:56:20,929 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    self.notify_reference_data_changed()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    order_id,
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:56:50,944 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    self.notify_reference_data_changed()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    order_id,
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:57:21,004 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4819, in _tick_auto_refresh
+    self.notify_reference_data_changed()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyFactory.py", line 974, in auto_allocate_workers_by_timeline
+    order_id,
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 14:57:51,054 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4820, in _tick_auto_refresh
+  File "HosnyFactory.py", line 1129, in auto_dispatch_order
+    db, int(order["product_id"]), int(next_stage["stage_template_id"])
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 15:12:37,741 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4940, in _tick_auto_refresh
+    sync_order_state(self.db, oid, dispatch=True, ensure_started=True)
+  File "HosnyFactory.py", line 1001, in sync_order_state
+    auto_allocate_workers_by_timeline(db, order_id)
+  File "HosnyFactory.py", line 977, in auto_allocate_workers_by_timeline
+    db.log_event(
+    ^^^^^^^^^^^^
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 15:13:07,751 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4940, in _tick_auto_refresh
+  File "HosnyFactory.py", line 1001, in sync_order_state
+  File "HosnyFactory.py", line 977, in auto_allocate_workers_by_timeline
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 15:13:37,773 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4940, in _tick_auto_refresh
+  File "HosnyFactory.py", line 1001, in sync_order_state
+  File "HosnyFactory.py", line 977, in auto_allocate_workers_by_timeline
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 15:14:07,833 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4940, in _tick_auto_refresh
+  File "HosnyFactory.py", line 1001, in sync_order_state
+  File "HosnyFactory.py", line 977, in auto_allocate_workers_by_timeline
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 15:14:37,843 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4940, in _tick_auto_refresh
+  File "HosnyFactory.py", line 1001, in sync_order_state
+  File "HosnyFactory.py", line 977, in auto_allocate_workers_by_timeline
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 15:15:07,879 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4940, in _tick_auto_refresh
+  File "HosnyFactory.py", line 1001, in sync_order_state
+  File "HosnyFactory.py", line 977, in auto_allocate_workers_by_timeline
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 15:15:37,902 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4940, in _tick_auto_refresh
+  File "HosnyFactory.py", line 1001, in sync_order_state
+  File "HosnyFactory.py", line 977, in auto_allocate_workers_by_timeline
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 15:16:07,960 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4940, in _tick_auto_refresh
+  File "HosnyFactory.py", line 1001, in sync_order_state
+  File "HosnyFactory.py", line 977, in auto_allocate_workers_by_timeline
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-26 15:16:37,985 [ERROR] auto refresh failed
+Traceback (most recent call last):
+  File "HosnyFactory.py", line 4940, in _tick_auto_refresh
+  File "HosnyFactory.py", line 1001, in sync_order_state
+  File "HosnyFactory.py", line 977, in auto_allocate_workers_by_timeline
+AttributeError: 'DB' object has no attribute 'log_event'
+2026-04-27 10:50:37,512 [INFO] order 29 created and queued; no worker available immediately
+2026-04-27 12:16:35,869 [ERROR] startup failed
+Traceback (most recent call last):
+  File "factory_ui.py", line 4541, in main
+    app = FactoryApp()
+          ^^^^^^^^^^^^
+  File "factory_ui.py", line 4302, in __init__
+    self.db = DB()
+              ^^^^
+  File "factory_core.py", line 369, in __init__
+    self._init_schema()
+  File "factory_core.py", line 392, in _init_schema
+    self.executescript(SCHEMA_SQL)
+  File "factory_core.py", line 380, in executescript
+    self._conn.executescript(sql)
+sqlite3.OperationalError: no such column: root_order_id
