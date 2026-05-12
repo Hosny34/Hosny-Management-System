@@ -4067,6 +4067,7 @@ class SqliteDatabase:
         branch_filter = ""
         if branch_filter_raw and branch_filter_raw not in ("*", "all", "ALL"):
             branch_filter = canonical_branch_device_name(branch_filter_raw, DEFAULT_BRANCH_POS_NAMES) or ""
+        has_date_filter = bool((filters.get("date_from") or "").strip() or (filters.get("date_to") or "").strip())
         def _date_clause(col: str) -> Tuple[str, List[Any]]:
             parts: List[str] = []
             args: List[Any] = []
@@ -4306,6 +4307,14 @@ class SqliteDatabase:
             branch_sold = max(0, int(m["branch_shipped_qty"]) - int(m["branch_qty"]))
             sold_total = int(m["sold_warehouse_qty"]) + branch_sold
             remaining_total = int(m["warehouse_qty"]) + int(m["branch_qty"])
+            if has_date_filter and not (
+                int(m["incoming_qty"])
+                or int(m["sold_warehouse_qty"])
+                or int(m["branch_shipped_qty"])
+            ):
+                # Date filters should narrow the visible product rows to items
+                # that actually moved in the selected period.
+                continue
             out.append(
                 {
                     "item_type": key[0],
@@ -4715,22 +4724,19 @@ class DateField(ttk.Frame):
         self._popup: Optional[tk.Toplevel] = None
         self.entry.bind("<Return>", lambda e: self._validate())
         self.entry.bind("<Escape>", lambda e: self._close())
-        self.entry.bind("<FocusOut>", lambda e: self._close())
+        self.winfo_toplevel().bind_all("<Button-1>", self._handle_global_click, add="+")
 
     def _open(self):
-        self._close()
+        if self._popup and self._popup.winfo_exists():
+            self._close()
+            return
         tp = tk.Toplevel(self)
         self._popup = tp
         tp.wm_overrideredirect(True)
         tp.attributes("-topmost", True)
         x = self.entry.winfo_rootx(); y = self.entry.winfo_rooty() + self.entry.winfo_height()
         tp.geometry(f"+{x}+{y}")
-        tp.bind("<FocusOut>", lambda e: self._close())
         tp.bind("<Escape>", lambda e: self._close())
-        try:
-            tp.focus_force()   # ensure focus so FocusOut reliably fires
-        except Exception:
-            pass
 
 
         frm = ttk.Frame(tp, padding=6, borderwidth=1, relief="solid"); frm.pack()
@@ -4787,6 +4793,32 @@ class DateField(ttk.Frame):
         except Exception:
             messagebox.showerror("صيغة التاريخ", "الرجاء إدخال التاريخ بصيغة YYYY-MM-DD أو استخدم التقويم.", parent=self)
             self.entry.focus_set()
+
+    def _handle_global_click(self, event):
+        popup = self._popup
+        if not popup or not popup.winfo_exists():
+            return
+        widget = getattr(event, "widget", None)
+        if widget is None:
+            self._close()
+            return
+        if self._is_descendant(widget, self) or self._is_descendant(widget, popup):
+            return
+        self._close()
+
+    def _is_descendant(self, widget, ancestor) -> bool:
+        current = widget
+        while current is not None:
+            if current == ancestor:
+                return True
+            parent_name = current.winfo_parent()
+            if not parent_name:
+                break
+            try:
+                current = current.nametowidget(parent_name)
+            except Exception:
+                break
+        return False
 
     def _close(self):
         if self._popup and self._popup.winfo_exists():
@@ -9052,6 +9084,10 @@ class MovementsWindow(tk.Toplevel):
 
         ttk.Label(top, text="بحث").grid(row=1, column=2, sticky="e", padx=4, pady=4)
         self.txt = ttk.Entry(top); self.txt.grid(row=1, column=3, sticky="ew", padx=6, pady=4)
+        for w in (self.df.entry, self.dt.entry):
+            w.bind("<Return>", lambda _e: self._refresh(), add="+")
+            w.bind("<FocusOut>", lambda _e: self.after_idle(self._refresh), add="+")
+        self.txt.bind("<Return>", lambda _e: self._refresh(), add="+")
         top.columnconfigure(3, weight=1)
 
         btns = ttk.Frame(top)
