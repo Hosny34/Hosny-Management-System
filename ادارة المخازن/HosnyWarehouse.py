@@ -1129,6 +1129,52 @@ class SqliteDatabase:
         finally:
             cur.close()
 
+    def get_school_accounts_report(
+        self,
+        schools: Sequence[str],
+        *,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        cleaned = [str(s or "").strip() for s in schools if str(s or "").strip()]
+        if not cleaned:
+            return []
+        placeholders = ",".join("?" for _ in cleaned)
+        where = [
+            "COALESCE(b.status,'CONFIRMED')='CONFIRMED'",
+            "(b.bill_type='SALE' OR b.bill_type IS NULL)",
+            f"LOWER(TRIM(bi.school)) IN ({placeholders})",
+        ]
+        args: List[Any] = [s.lower() for s in cleaned]
+        if date_from:
+            where.append("date(b.created_at) >= date(?)")
+            args.append(date_from)
+        if date_to:
+            where.append("date(b.created_at) <= date(?)")
+            args.append(date_to)
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                f"""
+                SELECT
+                    TRIM(bi.school) AS school,
+                    TRIM(bi.item_type) AS item_type,
+                    TRIM(bi.color) AS color,
+                    TRIM(bi.size) AS size,
+                    COALESCE(SUM(bi.qty), 0) AS total_qty,
+                    COALESCE(SUM(bi.line_total), 0) AS total_sales
+                FROM bill_items bi
+                JOIN bills b ON b.id = bi.bill_id
+                WHERE {' AND '.join(where)}
+                GROUP BY TRIM(bi.school), TRIM(bi.item_type), TRIM(bi.color), TRIM(bi.size)
+                ORDER BY LOWER(TRIM(bi.school)), LOWER(TRIM(bi.item_type)), LOWER(TRIM(bi.color)), LOWER(TRIM(bi.size))
+                """,
+                args,
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            cur.close()
+
     # AFTER (NEW) — items for a school: distinct (item_type, color) seen anywhere
     def list_items_for_school(self, school: str) -> List[Tuple[str, str]]:
         sc = (school or "").strip()
@@ -9007,16 +9053,16 @@ def _summarize_movement_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             up = 0.0
         if d == "IN":
             qty_in += q
-        elif d in ("OUT", "OUT_FACTORY"):
+        elif d == "OUT":
             qty_out += q
             val_out += float(q) * up
         elif d == "ADJUST_OUT":
             qty_adj_out += q
-            val_out += float(q) * up
         elif d == "RETURN_IN":
             qty_return_in += q
         elif d == "RESERVE":
             qty_reserve += q
+            qty_out += q
         elif d == "DELIVER_PAY":
             deliver_cash += up
     income_moves = val_out + deliver_cash
@@ -10961,7 +11007,7 @@ class StatisticsFrame(ttk.Frame):
             cur.execute(f"SELECT COALESCE(SUM(qty), 0) FROM movements WHERE direction='IN' AND {' AND '.join(mwhere)}", margs)
             self._stats["items_in"].config(text=f"{cur.fetchone()[0] or 0:,}")
 
-            cur.execute(f"SELECT COALESCE(SUM(qty), 0) FROM movements WHERE direction IN ('OUT','OUT_FACTORY') AND {' AND '.join(mwhere)}", margs)
+            cur.execute(f"SELECT COALESCE(SUM(qty), 0) FROM movements WHERE direction IN ('OUT','RESERVE') AND {' AND '.join(mwhere)}", margs)
             self._stats["items_out"].config(text=f"{cur.fetchone()[0] or 0:,}")
 
             # Top items
@@ -11076,6 +11122,120 @@ class StatisticsFrame(ttk.Frame):
             cur.close()
         except Exception:
             pass
+
+
+class SchoolAccountsFrame(ttk.Frame):
+    """School sales report without automatic percentage calculations."""
+    def __init__(self, master, db: SqliteDatabase):
+        super().__init__(master, padding=10)
+        self.db = db
+        self._selected_schools: List[str] = []
+        self._build()
+        self._refresh()
+
+    def _build(self):
+        ttk.Label(self, text="حسابات المدارس", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 12))
+
+        filters = ttk.Frame(self)
+        filters.pack(fill=tk.X, pady=(0, 8))
+
+        self.df = DateField(filters, "من")
+        self.df.pack(side=tk.LEFT, padx=(0, 8))
+        self.dt = DateField(filters, "إلى")
+        self.dt.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(filters, text="اختيار المدارس", command=self._pick_schools).pack(side=tk.LEFT, padx=8)
+        ttk.Button(filters, text="تحديث", command=self._refresh).pack(side=tk.LEFT, padx=8)
+        ttk.Button(filters, text="مسح الاختيار", command=self._clear_schools).pack(side=tk.LEFT, padx=8)
+
+        self._schools_var = tk.StringVar(value="كل المدارس")
+        ttk.Label(self, textvariable=self._schools_var, foreground=_UI["TEXT_DIM"]).pack(anchor="w", pady=(0, 8))
+
+        summary = ttk.LabelFrame(self, text="ملخص")
+        summary.pack(fill=tk.X, pady=(0, 8))
+        self._sum_school_count = tk.StringVar(value="0")
+        self._sum_qty = tk.StringVar(value="0")
+        self._sum_sales = tk.StringVar(value="0.00")
+        for i, (label, var) in enumerate([
+            ("عدد المدارس:", self._sum_school_count),
+            ("إجمالي الكمية:", self._sum_qty),
+            ("إجمالي المبيعات:", self._sum_sales),
+        ]):
+            ttk.Label(summary, text=label).grid(row=0, column=i * 2, padx=6, pady=8, sticky="e")
+            ttk.Label(summary, textvariable=var, font=("Segoe UI", 12, "bold")).grid(
+                row=0, column=i * 2 + 1, padx=(0, 16), pady=8, sticky="w"
+            )
+
+        table_wrap = ttk.LabelFrame(self, text="تفاصيل المبيعات")
+        table_wrap.pack(fill=tk.BOTH, expand=True)
+        cols = ("school", "item_type", "color", "size", "qty", "sales_total")
+        self._tree = ttk.Treeview(table_wrap, columns=cols, show="headings", height=16)
+        for col, txt, w in [
+            ("school", "المدرسة", 170),
+            ("item_type", "النوع", 170),
+            ("color", "اللون", 110),
+            ("size", "المقاس", 90),
+            ("qty", "الكمية", 90),
+            ("sales_total", "إجمالي المبيعات", 130),
+        ]:
+            self._tree.heading(col, text=txt)
+            self._tree.column(col, width=w, anchor="center")
+        ysb = ttk.Scrollbar(table_wrap, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=ysb.set)
+        self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        ysb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 4), pady=4)
+        add_context_menu(self._tree)
+        _bind_mousewheel(self._tree)
+
+    def _pick_schools(self):
+        values = self.db.list_schools_all()
+        dlg = MultiSelectDialog(self, title="اختيار المدارس", values=values, preselected=self._selected_schools)
+        result = dlg.show()
+        if result is None:
+            return
+        self._selected_schools = list(result)
+        self._refresh()
+
+    def _clear_schools(self):
+        self._selected_schools = []
+        self._refresh()
+
+    def _refresh(self):
+        rows = self.db.get_school_accounts_report(
+            self._selected_schools or self.db.list_schools_all(),
+            date_from=self.df.get() or None,
+            date_to=self.dt.get() or None,
+        )
+        self._tree.delete(*self._tree.get_children())
+        total_qty = 0
+        total_sales = 0.0
+        schools_seen = set()
+        for row in rows:
+            qty = int(row.get("total_qty") or 0)
+            sales_total = float(row.get("total_sales") or 0.0)
+            school = str(row.get("school") or "").strip()
+            schools_seen.add(school)
+            total_qty += qty
+            total_sales += sales_total
+            self._tree.insert(
+                "",
+                tk.END,
+                values=(
+                    school,
+                    row.get("item_type") or "",
+                    row.get("color") or "",
+                    row.get("size") or "",
+                    qty,
+                    f"{sales_total:.2f}",
+                ),
+            )
+        apply_zebra_tags(self._tree)
+        if self._selected_schools:
+            self._schools_var.set("المدارس المختارة: " + " - ".join(self._selected_schools))
+        else:
+            self._schools_var.set("كل المدارس")
+        self._sum_school_count.set(str(len(schools_seen)))
+        self._sum_qty.set(str(total_qty))
+        self._sum_sales.set(f"{total_sales:.2f}")
 
 
 # ------------------- Branch / POS reporting (warehouse) -------------------
@@ -11761,6 +11921,7 @@ class WarehouseApp(tk.Tk):
             "income": 2,
             "sync_diagnostics": 3,
             "statistics": 4,
+            "school_accounts": 5,
         }
         idx = tab_map.get(name)
         if idx is not None and hasattr(self, "notebook"):
@@ -11779,6 +11940,8 @@ class WarehouseApp(tk.Tk):
                 self._sync_diagnostics._refresh()
             elif idx == 4 and hasattr(self, "_statistics"):
                 self._statistics._refresh()
+            elif idx == 5 and hasattr(self, "_school_accounts"):
+                self._school_accounts._refresh()
         except Exception:
             pass
 
@@ -11926,6 +12089,7 @@ class WarehouseApp(tk.Tk):
         shortcuts_menu.add_command(label="F9  - لوحة التحكم", state="disabled")
         shortcuts_menu.add_command(label="F11 - تشخيص المزامنة", state="disabled")
         shortcuts_menu.add_command(label="F10 - الإحصائيات", state="disabled")
+        shortcuts_menu.add_command(label="حسابات المدارس", state="disabled")
         menubar.add_cascade(label="اختصارات", menu=shortcuts_menu)
 
         sync_menu = tk.Menu(menubar, tearoff=False)
@@ -11971,6 +12135,7 @@ class WarehouseApp(tk.Tk):
             ("الوارد", 2),
             ("تشخيص المزامنة", 3),
             ("الإحصائيات", 4),
+            ("حسابات المدارس", 5),
         ]
         for text, idx in nav_items:
             b = tk.Button(nav, text=f"  {text}  ", bg=_HBG2, fg=_UI["TEXT_SEC"],
@@ -12031,6 +12196,9 @@ class WarehouseApp(tk.Tk):
         self._statistics = StatisticsFrame(self.notebook, self.db)
         self.notebook.add(self._statistics, text="  الإحصائيات  (F10)  ")
 
+        self._school_accounts = SchoolAccountsFrame(self.notebook, self.db)
+        self.notebook.add(self._school_accounts, text="  حسابات المدارس  ")
+
         self.notebook.select(1)
         self._highlight_nav(1)
 
@@ -12044,6 +12212,8 @@ class WarehouseApp(tk.Tk):
                     self._sync_diagnostics._refresh()
                 elif idx == 4:
                     self._statistics._refresh()
+                elif idx == 5:
+                    self._school_accounts._refresh()
             except Exception:
                 pass
         self.notebook.bind("<<NotebookTabChanged>>", _on_tab_change)

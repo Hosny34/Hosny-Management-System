@@ -32,6 +32,8 @@ WAREHOUSE_RETURN_LABEL = "الى المصنع"
 # Bill rows for stock sent to warehouse review — not retail sales (no POS income / dashboard sales).
 WAREHOUSE_RETURN_BILL_TYPE = "WAREHOUSE_RETURN"
 BRANCH_TRANSFER_BILL_TYPE = "BRANCH_TRANSFER_REQUEST"
+PAYMENT_METHOD_CASH = "CASH"
+PAYMENT_METHOD_VISA = "VISA"
 BRANCH_TARGET_PREFIX = "فرع: "
 POS_CASHIER_LOCKDOWN = True
 POS_DISCOUNT_PRESETS = (5, 10, 15)
@@ -139,6 +141,13 @@ def _cashier_lockdown_message(action: str = "") -> str:
     if action:
         return f"{action}\n\n{base}"
     return base
+
+
+def _payment_method_label(method: Optional[str]) -> str:
+    code = str(method or PAYMENT_METHOD_CASH).strip().upper()
+    if code == PAYMENT_METHOD_VISA:
+        return "فيزا"
+    return "كاش"
 
 
 def _feature_restricted_message(action: str = "") -> str:
@@ -725,6 +734,13 @@ class SqliteDatabase:
                 PRIMARY KEY(field, value)
             );
 
+            CREATE TABLE IF NOT EXISTS hidden_definitions(
+                field TEXT NOT NULL,
+                value TEXT NOT NULL,
+                hidden_at TEXT NOT NULL,
+                PRIMARY KEY(field, value)
+            );
+
             CREATE TABLE IF NOT EXISTS reservations(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at TEXT NOT NULL,
@@ -848,6 +864,8 @@ class SqliteDatabase:
             cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(bills)")}
             if "bill_type" not in cols:
                 self.conn.execute("ALTER TABLE bills ADD COLUMN bill_type TEXT NOT NULL DEFAULT 'SALE'")
+            if "payment_method" not in cols:
+                self.conn.execute("ALTER TABLE bills ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'CASH'")
         except Exception:
             pass
 
@@ -1249,10 +1267,14 @@ class SqliteDatabase:
         try:
             cur.execute("""
                 SELECT DISTINCT TRIM(school) AS s FROM stocks
+                WHERE """ + self._hidden_definition_sql("school", "school") + """
                 UNION
                 SELECT DISTINCT TRIM(school) AS s FROM bill_items
+                WHERE """ + self._hidden_definition_sql("school", "school") + """
                 UNION
-                SELECT DISTINCT TRIM(value) AS s FROM spec_history WHERE field='school'
+                SELECT DISTINCT TRIM(value) AS s FROM spec_history
+                WHERE field='school'
+                  AND """ + self._hidden_definition_sql("school", "value") + """
             """)
             vals = [r["s"] for r in cur.fetchall() if r["s"]]
             vals.sort(key=lambda v: v.lower())
@@ -1533,6 +1555,7 @@ class SqliteDatabase:
         try:
             cur.execute(
                 f"SELECT DISTINCT TRIM({target}) AS v FROM stocks WHERE {' AND '.join(where)}"
+                + f" AND {self._hidden_definition_sql(target, target)}"
                 f" ORDER BY LOWER(TRIM({target})) ASC",
                 args,
             )
@@ -1726,6 +1749,7 @@ class SqliteDatabase:
                 SELECT DISTINCT TRIM({field}) AS v
                 FROM stocks
                 WHERE count > 0
+                  AND {self._hidden_definition_sql(field, field)}
                 ORDER BY LOWER(v)
             """)
             return [r["v"] for r in cur.fetchall() if r["v"]]
@@ -1954,10 +1978,13 @@ class SqliteDatabase:
         return rows
 
     # -------- Billing --------
-    def create_bill(self, customer: str, bill_lines: List[Dict[str, Any]]) -> int:
+    def create_bill(self, customer: str, bill_lines: List[Dict[str, Any]], payment_method: str = PAYMENT_METHOD_CASH) -> int:
         self._require_shift()
         if not bill_lines:
             raise ValueError("Bill has no items")
+        payment_method = str(payment_method or PAYMENT_METHOD_CASH).strip().upper()
+        if payment_method not in (PAYMENT_METHOD_CASH, PAYMENT_METHOD_VISA):
+            raise ValueError("طريقة الدفع غير مدعومة.")
 
         def _candidates_for_line(line: Dict[str, Any]) -> List[sqlite3.Row]:
             cur = self.conn.cursor()
@@ -1982,8 +2009,8 @@ class SqliteDatabase:
 
         with self.conn:
             bill_cur = self.conn.execute(
-                "INSERT INTO bills(created_at,customer,total,bill_type,status) VALUES(?,?,?,?,?)",
-                (now_iso(), (customer or "").strip() or None, 0.0, "SALE", "CONFIRMED"),
+                "INSERT INTO bills(created_at,customer,total,bill_type,status,payment_method) VALUES(?,?,?,?,?,?)",
+                (now_iso(), (customer or "").strip() or None, 0.0, "SALE", "CONFIRMED", payment_method),
             )
             bill_id = int(bill_cur.lastrowid)
             total = 0.0
@@ -2169,6 +2196,7 @@ class SqliteDatabase:
                     "bill_id": bill_id,
                     "customer": (customer or "").strip() or None,
                     "total": float(total),
+                    "payment_method": payment_method,
                     "items": items_payload,
                     "shift_id": self.active_shift_id,
                 })
@@ -2580,6 +2608,32 @@ class SqliteDatabase:
         )
         return [dict(r) for r in cur.fetchall()]
 
+    def list_pending_incoming_shipments(self) -> List[Dict[str, Any]]:
+        cur = self.conn.execute(
+            """
+            SELECT
+                a.id,
+                a.sync_event_uuid,
+                a.shipment_uuid,
+                a.from_device,
+                a.note,
+                a.total_qty,
+                a.created_at,
+                a.shown_at,
+                COUNT(p.id) AS pending_lines,
+                COALESCE(SUM(p.expected_qty), 0) AS pending_qty
+            FROM incoming_shipment_alerts AS a
+            JOIN incoming_shipment_items_pending AS p
+              ON p.shipment_uuid = a.shipment_uuid
+             AND p.status = 'PENDING'
+            GROUP BY
+                a.id, a.sync_event_uuid, a.shipment_uuid, a.from_device,
+                a.note, a.total_qty, a.created_at, a.shown_at
+            ORDER BY a.created_at ASC, a.id ASC
+            """
+        )
+        return [dict(r) for r in cur.fetchall()]
+
     def confirm_incoming_shipment(
         self,
         shipment_uuid: str,
@@ -2979,6 +3033,19 @@ class SqliteDatabase:
             (started, ended),
         )
         sales = dict(cur.fetchone())
+        cur = self.conn.execute(
+            f"""
+            SELECT
+                COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_CASH}' THEN total ELSE 0 END),0) as cash_total,
+                COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_VISA}' THEN total ELSE 0 END),0) as visa_total
+            FROM bills
+             WHERE created_at >= ? AND created_at <= ?
+               AND (bill_type='SALE' OR bill_type IS NULL)
+               AND UPPER(COALESCE(status,'CONFIRMED')) != 'VOID'
+            """,
+            (started, ended),
+        )
+        sales_by_method = dict(cur.fetchone())
 
         cur = self.conn.execute(
             "SELECT COUNT(*) as cnt, COALESCE(SUM(total_amount),0) as total, COALESCE(SUM(paid_amount),0) as paid FROM reservations WHERE created_at >= ? AND created_at <= ?",
@@ -3006,16 +3073,19 @@ class SqliteDatabase:
             "SELECT COUNT(*) as cnt, COALESCE(SUM(total),0) as total FROM bills WHERE created_at >= ? AND created_at <= ? AND bill_type='EXCHANGE'",
             (started, ended))
         exchanges = dict(cur.fetchone())
-
         return {
             "shift_id": shift["id"], "started_at": started, "ended_at": ended,
             "inflow_count": inflow["cnt"], "inflow_total_qty": inflow["total_qty"],
             "inflow_items": inflow_items,
             "sales_count": sales["cnt"], "sales_total": float(sales["total"]),
+            "sales_cash_total": float(sales_by_method["cash_total"]),
+            "sales_visa_total": float(sales_by_method["visa_total"]),
             "res_count": res["cnt"], "res_total": float(res["total"]), "res_paid": float(res_paid_row["total"]),
             "deliver_count": deliver["cnt"], "deliver_total": float(deliver["total"]),
             "return_count": returns["cnt"], "return_total": float(returns["total"]),
             "exchange_count": exchanges["cnt"], "exchange_total": float(exchanges["total"]),
+            "cash_collected": float(sales_by_method["cash_total"]) + float(res_paid_row["total"]) + float(deliver["total"]) - float(returns["total"]) + float(exchanges["total"]),
+            "visa_collected": float(sales_by_method["visa_total"]),
         }
 
     def get_all_shifts(self, date_from: Optional[str] = None, date_to: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -3048,6 +3118,19 @@ class SqliteDatabase:
                 (started, ended),
             )
             sales = dict(cur.fetchone())
+            cur = self.conn.execute(
+                f"""
+                SELECT
+                    COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_CASH}' THEN total ELSE 0 END),0) as cash_total,
+                    COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_VISA}' THEN total ELSE 0 END),0) as visa_total
+                FROM bills
+                 WHERE created_at >= ? AND created_at <= ?
+                   AND (bill_type='SALE' OR bill_type IS NULL)
+                   AND UPPER(COALESCE(status,'CONFIRMED')) != 'VOID'
+                """,
+                (started, ended),
+            )
+            sales_by_method = dict(cur.fetchone())
             # reservations
             cur = self.conn.execute(
                 "SELECT COUNT(*) as cnt, COALESCE(SUM(total_amount),0) as total, COALESCE(SUM(paid_amount),0) as paid FROM reservations WHERE created_at >= ? AND created_at <= ?",
@@ -3079,6 +3162,8 @@ class SqliteDatabase:
             exchanges = dict(cur.fetchone())
             r["sales_count"] = sales["cnt"]
             r["sales_total"] = float(sales["total"])
+            r["sales_cash_total"] = float(sales_by_method["cash_total"])
+            r["sales_visa_total"] = float(sales_by_method["visa_total"])
             r["res_count"] = res["cnt"]
             r["res_total"] = float(res["total"])
             r["res_paid"] = float(res_paid["total"])
@@ -3091,8 +3176,9 @@ class SqliteDatabase:
             r["exchange_count"] = exchanges["cnt"]
             r["exchange_total"] = float(exchanges["total"])
             # Cash = sales + reservation payments + deliveries - returns + exchange net
-            r["cash_collected"] = (r["sales_total"] + r["res_paid"] + r["deliver_total"]
+            r["cash_collected"] = (r["sales_cash_total"] + r["res_paid"] + r["deliver_total"]
                                    - r["return_total"] + r["exchange_total"])
+            r["visa_collected"] = r["sales_visa_total"]
             results.append(r)
         return results
 
@@ -3465,6 +3551,7 @@ class SqliteDatabase:
             "SELECT id,created_at,customer,total,"
             " COALESCE(status,'CONFIRMED') AS status,"
             " COALESCE(bill_type,'SALE') AS bill_type,"
+            f" COALESCE(payment_method,'{PAYMENT_METHOD_CASH}') AS payment_method,"
             " void_reason, voided_at"
             " FROM bills ORDER BY id DESC"
         )
@@ -3610,6 +3697,72 @@ class SqliteDatabase:
     def set_admin_password(self, plain: str) -> None:
         digest = hashlib.sha256(str(plain).encode("utf-8")).hexdigest()
         self.set_app_setting("admin_password", f"{ADMIN_PASSWORD_HASH_PREFIX}{digest}")
+
+    def _hidden_definition_sql(self, field: str, column_sql: str) -> str:
+        if field not in ("item_type", "school", "color", "size"):
+            raise ValueError("Unsupported hidden-definition field")
+        return (
+            "NOT EXISTS ("
+            "SELECT 1 FROM hidden_definitions hd "
+            f"WHERE hd.field = '{field}' "
+            f"AND LOWER(TRIM(hd.value)) = LOWER(TRIM({column_sql}))"
+            ")"
+        )
+
+    def hide_definition(self, field: str, value: str) -> None:
+        if field not in ("item_type", "school", "color", "size"):
+            raise ValueError("Unsupported hidden-definition field")
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("Value is required")
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO hidden_definitions(field, value, hidden_at) VALUES(?, ?, ?)",
+                (field, value, now_iso()),
+            )
+
+    def delete_school_from_ui(self, school: str) -> int:
+        if not self.is_manager_feature_enabled("allow_inventory_delete"):
+            raise PermissionError(_feature_restricted_message("حذف المدارس من واجهة نقطة البيع غير مسموح به حالياً."))
+
+        school = (school or "").strip()
+        if not school:
+            raise ValueError("اسم المدرسة مطلوب.")
+
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS row_count, COALESCE(SUM(count), 0) AS total_qty
+                FROM stocks
+                WHERE LOWER(TRIM(school)) = LOWER(TRIM(?))
+                """,
+                (school,),
+            )
+            row = cur.fetchone()
+            row_count = int(row["row_count"] or 0)
+            total_qty = int(row["total_qty"] or 0)
+        finally:
+            cur.close()
+
+        if total_qty > 0:
+            raise ValueError("لا يمكن حذف المدرسة من الواجهة بينما ما زال لها رصيد في المخزون.")
+
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM stocks WHERE LOWER(TRIM(school)) = LOWER(TRIM(?))",
+                (school,),
+            )
+            self.conn.execute(
+                "DELETE FROM size_profiles WHERE LOWER(TRIM(school)) = LOWER(TRIM(?))",
+                (school,),
+            )
+            self.conn.execute(
+                "DELETE FROM spec_history WHERE field = 'school' AND LOWER(TRIM(value)) = LOWER(TRIM(?))",
+                (school,),
+            )
+            self.hide_definition("school", school)
+        return row_count
 
     def remove_from_stock(self, stock_id: int, qty: Optional[int], note: str = "Admin remove") -> int:
         if not self.is_manager_feature_enabled("allow_inventory_delete"):
@@ -4043,22 +4196,19 @@ class DateField(ttk.Frame):
         self._popup: Optional[tk.Toplevel] = None
         self.entry.bind("<Return>", lambda e: self._validate())
         self.entry.bind("<Escape>", lambda e: self._close())
-        self.entry.bind("<FocusOut>", lambda e: self._close())
+        self.winfo_toplevel().bind_all("<Button-1>", self._handle_global_click, add="+")
 
     def _open(self):
-        self._close()
+        if self._popup and self._popup.winfo_exists():
+            self._close()
+            return
         tp = tk.Toplevel(self)
         self._popup = tp
         tp.wm_overrideredirect(True)
         tp.attributes("-topmost", True)
         x = self.entry.winfo_rootx(); y = self.entry.winfo_rooty() + self.entry.winfo_height()
         tp.geometry(f"+{x}+{y}")
-        tp.bind("<FocusOut>", lambda e: self._close())
         tp.bind("<Escape>", lambda e: self._close())
-        try:
-            tp.focus_force()
-        except Exception:
-            pass
 
         frm = ttk.Frame(tp, padding=6, borderwidth=1, relief="solid"); frm.pack()
         today = date.today()
@@ -4114,6 +4264,32 @@ class DateField(ttk.Frame):
         except Exception:
             messagebox.showerror("صيغة التاريخ", "الرجاء إدخال التاريخ بصيغة YYYY-MM-DD أو استخدم التقويم.", parent=self)
             self.entry.focus_set()
+
+    def _handle_global_click(self, event):
+        popup = self._popup
+        if not popup or not popup.winfo_exists():
+            return
+        widget = getattr(event, "widget", None)
+        if widget is None:
+            self._close()
+            return
+        if self._is_descendant(widget, self) or self._is_descendant(widget, popup):
+            return
+        self._close()
+
+    def _is_descendant(self, widget, ancestor) -> bool:
+        current = widget
+        while current is not None:
+            if current == ancestor:
+                return True
+            parent_name = current.winfo_parent()
+            if not parent_name:
+                break
+            try:
+                current = current.nametowidget(parent_name)
+            except Exception:
+                break
+        return False
 
     def _close(self):
         if self._popup and self._popup.winfo_exists():
@@ -6224,8 +6400,11 @@ class POSFrame(ttk.Frame):
             except Exception as ex:
                 messagebox.showerror("فشل الحجز", str(ex), parent=self)
         else:
+            payment_method = self._choose_sale_payment_method(total)
+            if not payment_method:
+                return
             try:
-                bill_id = self.db.create_bill(customer, lines)
+                bill_id = self.db.create_bill(customer, lines, payment_method=payment_method)
             except Exception as ex:
                 messagebox.showerror("فشل الحفظ", str(ex), parent=self)
                 return
@@ -6273,6 +6452,38 @@ class POSFrame(ttk.Frame):
 
             if messagebox.askyesno(print_title, print_body):
                 self._direct_print_bill(bill_id)
+
+    def _choose_sale_payment_method(self, total: float) -> Optional[str]:
+        dlg = tk.Toplevel(self)
+        dlg.title("طريقة الدفع")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frm, text="اختر طريقة الدفع قبل إتمام الفاتورة:", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        ttk.Label(frm, text=f"إجمالي الفاتورة: {float(total):.2f}").pack(anchor="w", pady=(4, 10))
+
+        method_var = tk.StringVar(value=PAYMENT_METHOD_CASH)
+        ttk.Radiobutton(frm, text="كاش", variable=method_var, value=PAYMENT_METHOD_CASH).pack(anchor="w", pady=2)
+        ttk.Radiobutton(frm, text="فيزا", variable=method_var, value=PAYMENT_METHOD_VISA).pack(anchor="w", pady=2)
+
+        result = {"value": None}
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill=tk.X, pady=(12, 0))
+
+        def on_ok():
+            result["value"] = method_var.get().strip().upper() or PAYMENT_METHOD_CASH
+            dlg.destroy()
+
+        ttk.Button(btns, text="إلغاء", command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="إتمام", command=on_ok).pack(side=tk.RIGHT, padx=6)
+
+        dlg.wait_window()
+        return result["value"]
 
     def _direct_print_bill(self, bill_id: int, copies: int = 2):
         try:
@@ -6870,14 +7081,14 @@ class ShiftsSummaryFrame(ttk.Frame):
         table_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
 
         cols = ("id", "started", "ended", "status", "sales_count", "sales_total",
-                "res_count", "res_paid", "deliver_total", "inflow_qty", "cash")
+                "res_count", "res_paid", "deliver_total", "inflow_qty", "cash", "visa")
         self._tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=10)
         for col, txt, w in [
             ("id", "#", 40), ("started", "البداية", 130), ("ended", "النهاية", 130),
             ("status", "الحالة", 70), ("sales_count", "فواتير", 60),
             ("sales_total", "مبيعات", 90), ("res_count", "حجوزات", 60),
             ("res_paid", "مدفوع حجز", 90), ("deliver_total", "تسليمات", 90),
-            ("inflow_qty", "وارد (قطع)", 80), ("cash", "إجمالي نقدية", 100),
+            ("inflow_qty", "وارد (قطع)", 80), ("cash", "إجمالي كاش", 100), ("visa", "إجمالي فيزا", 100),
         ]:
             self._tree.heading(col, text=txt)
             self._tree.column(col, width=w, anchor="center")
@@ -6918,6 +7129,7 @@ class ShiftsSummaryFrame(ttk.Frame):
         self._det_return_var = tk.StringVar(value="-")
         self._det_exchange_var = tk.StringVar(value="-")
         self._det_cash_var = tk.StringVar(value="-")
+        self._det_visa_var = tk.StringVar(value="-")
 
         for lbl, var in [
             ("المبيعات:", self._det_sales_var),
@@ -6939,8 +7151,10 @@ class ShiftsSummaryFrame(ttk.Frame):
 
         cash_row = ttk.Frame(self._detail_frame)
         cash_row.pack(fill=tk.X, padx=8, pady=(0, 4))
-        ttk.Label(cash_row, text="إجمالي النقدية المحصلة:", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+        ttk.Label(cash_row, text="إجمالي الكاش:", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
         ttk.Label(cash_row, textvariable=self._det_cash_var, font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(cash_row, text=" | إجمالي الفيزا:", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Label(cash_row, textvariable=self._det_visa_var, font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT, padx=(4, 0))
 
         detail_btns = ttk.Frame(self._detail_frame)
         detail_btns.pack(fill=tk.X, padx=8, pady=(0, 6))
@@ -6956,13 +7170,16 @@ class ShiftsSummaryFrame(ttk.Frame):
         self._tot_shifts_var = tk.StringVar(value="0")
         self._tot_sales_var = tk.StringVar(value="0.00")
         self._tot_cash_var = tk.StringVar(value="0.00")
+        self._tot_visa_var = tk.StringVar(value="0.00")
 
         ttk.Label(totals_row, text="عدد الورديات:").pack(side=tk.LEFT)
         ttk.Label(totals_row, textvariable=self._tot_shifts_var, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(4, 20))
         ttk.Label(totals_row, text="إجمالي المبيعات:").pack(side=tk.LEFT)
         ttk.Label(totals_row, textvariable=self._tot_sales_var, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(4, 20))
-        ttk.Label(totals_row, text="إجمالي النقدية:").pack(side=tk.LEFT)
+        ttk.Label(totals_row, text="إجمالي الكاش:").pack(side=tk.LEFT)
         ttk.Label(totals_row, textvariable=self._tot_cash_var, font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(totals_row, text=" | إجمالي الفيزا:").pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Label(totals_row, textvariable=self._tot_visa_var, font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT, padx=(4, 0))
 
         self._shifts_data: List[Dict[str, Any]] = []
         self._refresh_all()
@@ -6978,6 +7195,7 @@ class ShiftsSummaryFrame(ttk.Frame):
         self._tree.delete(*self._tree.get_children())
         total_sales = 0.0
         total_cash = 0.0
+        total_visa = 0.0
         for s in self._shifts_data:
             started = fmt_local_ts(s["started_at"], "")
             ended = fmt_local_ts(s["ended_at"], "") if s["ended_at"] else "-"
@@ -6989,14 +7207,17 @@ class ShiftsSummaryFrame(ttk.Frame):
                 f"{s['deliver_total']:.2f}",
                 s["inflow_total_qty"],
                 f"{s['cash_collected']:.2f}",
+                f"{s.get('visa_collected', 0.0):.2f}",
             ))
             total_sales += s["sales_total"]
             total_cash += s["cash_collected"]
+            total_visa += float(s.get("visa_collected", 0.0))
         _apply_zebra_tags(self._tree)
 
         self._tot_shifts_var.set(str(len(self._shifts_data)))
         self._tot_sales_var.set(f"{total_sales:.2f}")
         self._tot_cash_var.set(f"{total_cash:.2f}")
+        self._tot_visa_var.set(f"{total_visa:.2f}")
 
         # Clear detail
         self._det_id_var.set("-")
@@ -7009,6 +7230,7 @@ class ShiftsSummaryFrame(ttk.Frame):
         self._det_return_var.set("-")
         self._det_exchange_var.set("-")
         self._det_cash_var.set("-")
+        self._det_visa_var.set("-")
 
     def _on_shift_selected(self, _event=None):
         sel = self._tree.selection()
@@ -7034,6 +7256,7 @@ class ShiftsSummaryFrame(ttk.Frame):
         self._det_return_var.set(f"{s.get('return_count', 0)} فاتورة - {s.get('return_total', 0.0):.2f}")
         self._det_exchange_var.set(f"{s.get('exchange_count', 0)} فاتورة - صافي {s.get('exchange_total', 0.0):.2f}")
         self._det_cash_var.set(f"{s['cash_collected']:.2f}")
+        self._det_visa_var.set(f"{float(s.get('visa_collected', 0.0)):.2f}")
 
     def _clear_filters(self):
         self._df.set("")
@@ -7078,7 +7301,7 @@ h2 {{ font-size: 14px; text-align: center; margin: 4px 0; }}
 <hr class="sep">
 <div><b>الوارد:</b> {s['inflow_count']} عملية - {s['inflow_total_qty']} قطعة</div>
 <hr class="sep">
-<div class="total">النقدية المحصلة: {s['cash_collected']:.2f}</div>
+<div class="total">الكاش: {s['cash_collected']:.2f} | الفيزا: {float(s.get('visa_collected', 0.0)):.2f}</div>
 </body></html>"""
         tmp = os.path.join(tempfile.gettempdir(), f"shift_summary_{s['id']}.html")
         with open(tmp, "w", encoding="utf-8") as f:
@@ -7092,6 +7315,7 @@ h2 {{ font-size: 14px; text-align: center; margin: 4px 0; }}
         rows_html = ""
         total_sales = 0.0
         total_cash = 0.0
+        total_visa = 0.0
         for s in self._shifts_data:
             started = s["started_at"][:16].replace("T", " ")
             ended = s["ended_at"][:16].replace("T", " ") if s["ended_at"] else "-"
@@ -7099,9 +7323,10 @@ h2 {{ font-size: 14px; text-align: center; margin: 4px 0; }}
             rows_html += f"<tr><td>{s['id']}</td><td>{started}</td><td>{ended}</td><td>{status}</td>"
             rows_html += f"<td>{s['sales_count']}</td><td>{s['sales_total']:.2f}</td>"
             rows_html += f"<td>{s['res_paid']:.2f}</td><td>{s['deliver_total']:.2f}</td>"
-            rows_html += f"<td>{s['inflow_total_qty']}</td><td>{s['cash_collected']:.2f}</td></tr>\n"
+            rows_html += f"<td>{s['inflow_total_qty']}</td><td>{s['cash_collected']:.2f}</td><td>{float(s.get('visa_collected', 0.0)):.2f}</td></tr>\n"
             total_sales += s["sales_total"]
             total_cash += s["cash_collected"]
+            total_visa += float(s.get("visa_collected", 0.0))
         html = f"""<!DOCTYPE html>
 <html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>ملخص الورديات</title>
 <style>
@@ -7116,11 +7341,11 @@ td {{ padding: 5px; border-bottom: 1px solid #ccc; text-align: center; }}
 <table><thead><tr>
 <th>#</th><th>البداية</th><th>النهاية</th><th>الحالة</th>
 <th>فواتير</th><th>مبيعات</th><th>مدفوع حجز</th><th>تسليمات</th>
-<th>وارد</th><th>نقدية</th>
+<th>وارد</th><th>كاش</th><th>فيزا</th>
 </tr></thead><tbody>
 {rows_html}
 </tbody></table>
-<div class="totals">إجمالي المبيعات: {total_sales:.2f} | إجمالي النقدية: {total_cash:.2f}</div>
+<div class="totals">إجمالي المبيعات: {total_sales:.2f} | إجمالي الكاش: {total_cash:.2f} | إجمالي الفيزا: {total_visa:.2f}</div>
 </body></html>"""
         tmp = os.path.join(tempfile.gettempdir(), "all_shifts_summary.html")
         with open(tmp, "w", encoding="utf-8") as f:
@@ -7596,12 +7821,15 @@ class InventoryWindow(tk.Toplevel):
         edit_specs_btn.pack(side=tk.RIGHT, padx=(8, 0))
         remove_btn = ttk.Button(bar, text="حذف المحدد...", command=self._remove_selected_dialog)
         remove_btn.pack(side=tk.RIGHT, padx=(8, 0))
+        delete_school_btn = ttk.Button(bar, text="حذف مدرسة...", command=self._delete_school_dialog)
+        delete_school_btn.pack(side=tk.RIGHT, padx=(8, 0))
         if not self.db.is_manager_feature_enabled("allow_inventory_price_edit"):
             edit_price_btn.configure(state="disabled")
         if not self.db.is_manager_feature_enabled("allow_inventory_specs_edit"):
             edit_specs_btn.configure(state="disabled")
         if not self.db.is_manager_feature_enabled("allow_inventory_delete"):
             remove_btn.configure(state="disabled")
+            delete_school_btn.configure(state="disabled")
 
         self._refresh()
 
@@ -7989,6 +8217,90 @@ class InventoryWindow(tk.Toplevel):
                 self._refresh()
             except Exception as ex:
                 messagebox.showerror("خطأ", str(ex), parent=dlg)
+
+        ttk.Button(btns, text="إلغاء", command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="حذف", command=on_ok).pack(side=tk.RIGHT, padx=6)
+
+    def _delete_school_dialog(self):
+        if not self.db.is_manager_feature_enabled("allow_inventory_delete"):
+            messagebox.showwarning("مقيد", _feature_restricted_message("حذف المدارس من نقطة البيع غير مسموح به حالياً."), parent=self)
+            return
+
+        selected_schools = {
+            str(self.table.item(iid, "values")[2]).strip()
+            for iid in self.table.selection()
+            if self.table.item(iid, "values")
+        }
+        initial_school = ""
+        if len(selected_schools) == 1:
+            initial_school = next(iter(selected_schools))
+        elif (self.f_school.get() or "").strip():
+            initial_school = (self.f_school.get() or "").strip()
+
+        schools = self.db.list_schools_all()
+        if initial_school and initial_school not in schools:
+            schools = [initial_school] + schools
+
+        dlg = tk.Toplevel(self)
+        dlg.title("حذف مدرسة من الواجهة")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            frm,
+            text="احذف المدرسة من واجهة نقطة البيع بعد التأكد أن رصيدها أصبح صفراً.",
+            justify="right",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ttk.Label(frm, text="المدرسة:").grid(row=1, column=0, sticky="e", padx=6, pady=4)
+        school_var = tk.StringVar(value=initial_school)
+        ttk.Combobox(frm, textvariable=school_var, values=schools, width=28).grid(
+            row=1, column=1, sticky="ew", padx=6, pady=4
+        )
+        ttk.Label(frm, text="كلمة مرور المدير:").grid(row=2, column=0, sticky="e", padx=6, pady=4)
+        pw_var = tk.StringVar()
+        ttk.Entry(frm, textvariable=pw_var, show="*").grid(row=2, column=1, sticky="ew", padx=6, pady=4)
+        frm.columnconfigure(1, weight=1)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(10, 0))
+
+        def on_ok():
+            school = (school_var.get() or "").strip()
+            if not school:
+                messagebox.showerror("بيانات ناقصة", "اختر المدرسة المطلوب حذفها من الواجهة.", parent=dlg)
+                return
+            if not self.db.verify_admin_password(pw_var.get()):
+                messagebox.showerror("مرفوض", "كلمة مرور المدير غير صحيحة.", parent=dlg)
+                return
+            if not messagebox.askyesno(
+                "تأكيد الحذف",
+                f"سيتم حذف المدرسة '{school}' من واجهة نقطة البيع.\nلن يتم ذلك إذا كان لها رصيد متبقٍ.\n\nهل تريد المتابعة؟",
+                parent=dlg,
+            ):
+                return
+            try:
+                removed_rows = self.db.delete_school_from_ui(school)
+                dlg.destroy()
+                if school in self.multi.get("school", []):
+                    self.multi["school"] = [s for s in self.multi["school"] if str(s).strip().lower() != school.lower()]
+                    self._multi_btns["school"].configure(
+                        text=f"اختيار متعدد... ({len(self.multi['school'])})" if self.multi["school"] else "اختيار متعدد..."
+                    )
+                if (self.f_school.get() or "").strip().lower() == school.lower():
+                    self.f_school.set("")
+                self.f_school.refresh_values()
+                self._enforce_single_active_field()
+                self._refresh()
+                ToastNotification.show(
+                    self.winfo_toplevel(),
+                    f"تم حذف المدرسة من الواجهة وتنظيف {removed_rows} صف مخزون",
+                    toast_type="success",
+                )
+            except Exception as ex:
+                messagebox.showerror("فشل الحذف", str(ex), parent=dlg)
 
         ttk.Button(btns, text="إلغاء", command=dlg.destroy).pack(side=tk.RIGHT)
         ttk.Button(btns, text="حذف", command=on_ok).pack(side=tk.RIGHT, padx=6)
@@ -9125,7 +9437,8 @@ class ShiftSummaryDialog(tk.Toplevel):
                 ttk.Label(exc, text=f"صافي الاستبدال (مسترد): {abs(exchange_total):.2f}").pack(anchor="w", padx=8, pady=2)
 
         grand = summary["sales_total"] + summary["res_paid"] + deliver_total - return_total + exchange_total
-        ttk.Label(main, text=f"إجمالي النقدية المحصلة: {grand:.2f}", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=8)
+        visa_total = float(summary.get("visa_collected", 0.0))
+        ttk.Label(main, text=f"إجمالي الكاش: {grand:.2f} | إجمالي الفيزا: {visa_total:.2f}", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=8)
 
         btns = ttk.Frame(main)
         btns.pack(fill=tk.X, pady=(4, 0))
@@ -9154,6 +9467,7 @@ class ShiftSummaryDialog(tk.Toplevel):
         exchange_count = summary.get("exchange_count", 0)
         exchange_total = summary.get("exchange_total", 0.0)
         grand = summary["sales_total"] + summary["res_paid"] + deliver_total - return_total + exchange_total
+        visa_total = float(summary.get("visa_collected", 0.0))
         inflow_rows = ""
         for it in summary.get("inflow_items", []):
             inflow_rows += f"<tr><td>{it['item_type']}</td><td>{it['school']}</td><td>{it['color']}</td><td>{it['size']}</td><td>{it['qty']}</td></tr>\n"
@@ -9185,13 +9499,123 @@ td {{ padding: 2px; border-bottom: 1px dotted #ccc; }}
 <hr class="sep">
 <div><b>الحجوزات:</b> {summary['res_count']} - إجمالي {summary['res_total']:.2f} - مدفوع {summary['res_paid']:.2f}</div>
 <hr class="sep">
-{deliver_html}{return_html}{exchange_html}<div class="total">النقدية المحصلة: {grand:.2f}</div>
+{deliver_html}{return_html}{exchange_html}<div class="total">الكاش: {grand:.2f} | الفيزا: {visa_total:.2f}</div>
 </body></html>"""
 
         tmp = os.path.join(tempfile.gettempdir(), f"shift_{summary['shift_id']}.html")
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(html)
         _print_html_auto(tmp, copies=1, parent=self)
+
+
+class IncomingShipmentsFrame(ttk.Frame):
+    """Manual queue for incoming warehouse shipments waiting for cashier confirmation."""
+    def __init__(self, master, db: SqliteDatabase, app):
+        super().__init__(master, padding=10)
+        self.db = db
+        self.app = app
+        self._rows: List[Dict[str, Any]] = []
+        self._build()
+        self._refresh()
+
+    def _build(self):
+        ttk.Label(self, text="شحنات الفواتير غير المؤكدة", font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0, 8))
+        ttk.Label(
+            self,
+            text="افتح الشحنة عندما تصل المنتجات فعلياً ثم راجع الكميات بنداً بنداً قبل التأكيد.",
+            foreground="#6b7280",
+        ).pack(anchor="w", pady=(0, 8))
+
+        top = ttk.Frame(self)
+        top.pack(fill=tk.X, pady=(0, 8))
+        ttk.Button(top, text="تحديث", command=self._refresh).pack(side=tk.LEFT)
+        ttk.Button(top, text="فتح الشحنة المحددة", command=self._open_selected).pack(side=tk.LEFT, padx=8)
+
+        self._summary_var = tk.StringVar(value="")
+        ttk.Label(top, textvariable=self._summary_var).pack(side=tk.RIGHT)
+
+        wrap = ttk.Frame(self)
+        wrap.pack(fill=tk.BOTH, expand=True)
+        cols = ("shipment", "source", "lines", "qty", "created", "note")
+        self._tree = ttk.Treeview(wrap, columns=cols, show="headings", height=14)
+        for col, txt, w in [
+            ("shipment", "مرجع الشحنة", 130),
+            ("source", "المرسل", 120),
+            ("lines", "عدد البنود", 90),
+            ("qty", "إجمالي الكمية", 100),
+            ("created", "تاريخ الإنشاء", 160),
+            ("note", "ملاحظة", 260),
+        ]:
+            self._tree.heading(col, text=txt)
+            self._tree.column(col, width=w, anchor="center" if col != "note" else "w")
+        ysb = ttk.Scrollbar(wrap, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=ysb.set)
+        self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ysb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._tree.bind("<Double-1>", lambda _e: self._open_selected(), add="+")
+
+    def _selected_row(self) -> Optional[Dict[str, Any]]:
+        sel = self._tree.selection()
+        if not sel:
+            return None
+        iid = sel[0]
+        try:
+            idx = int(iid)
+        except Exception:
+            return None
+        if 0 <= idx < len(self._rows):
+            return self._rows[idx]
+        return None
+
+    def _open_selected(self):
+        row = self._selected_row()
+        if not row:
+            messagebox.showwarning("اختر شحنة", "اختر شحنة غير مؤكدة أولاً.", parent=self.winfo_toplevel())
+            return
+        alert_id = row.get("id")
+        shipment_uuid = str(row.get("shipment_uuid") or "").strip()
+        if shipment_uuid in getattr(self.app, "_open_incoming_shipments", set()):
+            messagebox.showinfo("مفتوحة بالفعل", "هذه الشحنة مفتوحة حالياً في نافذة مراجعة أخرى.", parent=self.winfo_toplevel())
+            return
+        try:
+            if alert_id is not None:
+                self.db.mark_incoming_shipment_alert_shown(int(alert_id))
+        except Exception:
+            pass
+        opened = self.app._open_incoming_shipment_checklist(row)
+        if opened is False and alert_id is not None:
+            try:
+                self.db.reset_incoming_shipment_alert_shown(int(alert_id))
+            except Exception:
+                pass
+        self.after(300, self._refresh)
+
+    def _refresh(self):
+        self._rows = self.db.list_pending_incoming_shipments()
+        self._tree.delete(*self._tree.get_children())
+        total_qty = 0
+        for idx, row in enumerate(self._rows):
+            qty = int(row.get("pending_qty") or 0)
+            total_qty += qty
+            ship = str(row.get("shipment_uuid") or "").strip()
+            self._tree.insert(
+                "",
+                tk.END,
+                iid=str(idx),
+                values=(
+                    ship[:8] if ship else "-",
+                    row.get("from_device") or "WAREHOUSE",
+                    int(row.get("pending_lines") or 0),
+                    qty,
+                    str(row.get("created_at") or "").replace("T", " "),
+                    row.get("note") or "",
+                ),
+            )
+        try:
+            _apply_zebra_tags(self._tree)
+        except Exception:
+            pass
+        self._summary_var.set(f"عدد الشحنات المعلقة: {len(self._rows)} | إجمالي القطع: {total_qty}")
 
 
 # ------------------- Bulk Price Dialog -------------------
@@ -9396,7 +9820,13 @@ class WarehouseApp:
         self._stats_frame = StatisticsFrame(stats_tab, self.db)
         self._stats_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Tab 5: Shifts Summary
+        # Tab 5: Incoming shipments waiting for manual receipt confirmation
+        incoming_ship_tab = ttk.Frame(self._nb)
+        self._nb.add(incoming_ship_tab, text="شحنات غير مؤكدة")
+        self._incoming_shipments_frame = IncomingShipmentsFrame(incoming_ship_tab, self.db, self)
+        self._incoming_shipments_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Tab 6: Shifts Summary
         shifts_tab = ttk.Frame(self._nb)
         self._nb.add(shifts_tab, text="ملخص الورديات")
         self._shifts_frame = ShiftsSummaryFrame(shifts_tab, self.db)
@@ -9503,6 +9933,11 @@ class WarehouseApp:
                     "لم يتم تأكيد الشحنة بعد. ستظهر مرة أخرى حتى يتم استلامها.",
                     toast_type="warning",
                 )
+            try:
+                if hasattr(self, "_incoming_shipments_frame"):
+                    self._incoming_shipments_frame._refresh()
+            except Exception:
+                pass
             dlg.destroy()
 
         dlg.protocol("WM_DELETE_WINDOW", _dismiss_receipt)
@@ -9577,6 +10012,11 @@ class WarehouseApp:
                 if out.get("has_diff"):
                     msg += " تم إرسال فروقات للـ Warehouse للمراجعة."
                 ToastNotification.show(self.root, msg, toast_type="success")
+                try:
+                    if hasattr(self, "_incoming_shipments_frame"):
+                        self._incoming_shipments_frame._refresh()
+                except Exception:
+                    pass
             except Exception as ex:
                 messagebox.showerror("خطأ", str(ex), parent=dlg)
 
@@ -9671,6 +10111,8 @@ class WarehouseApp:
                 self._dashboard.refresh()
             elif "\u0627\u0644\u062D\u062C\u0648\u0632\u0627\u062A" in tab_text:
                 self._res_frame._refresh()
+            elif "شحنات غير مؤكدة" in tab_text:
+                self._incoming_shipments_frame._refresh()
             elif "ملخص الورديات" in tab_text:
                 self._shifts_frame._refresh_all()
         except Exception:
