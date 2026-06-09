@@ -147,6 +147,7 @@ def warehouse_numeric_value(value: Any) -> str:
     return raw
 
 ALLOWED_NUMERIC_RANGES = {
+    (0, 24): [str(i) for i in range(0, 26, 2)],
     (0, 16): [str(i) for i in range(0, 18, 2)],
     (6, 22): [str(i) for i in range(6, 24, 2)],
     (14, 28): [str(i) for i in range(14, 30, 2)],
@@ -158,8 +159,53 @@ ALLOWED_NUMERIC_RANGES = {
 NUMERIC_RANGE_LABELS = [
     f"{a} → {b}" for (a, b) in ALLOWED_NUMERIC_RANGES.keys()
 ]
+DEFAULT_NUMERIC_SIZE_RANGE = (0, 24)
+DEFAULT_NUMERIC_SIZE_RANGE_LABEL = f"{DEFAULT_NUMERIC_SIZE_RANGE[0]} → {DEFAULT_NUMERIC_SIZE_RANGE[1]}"
+DEFAULT_SIZE_PROFILE = (
+    DEFAULT_NUMERIC_SIZE_RANGE[0],
+    DEFAULT_NUMERIC_SIZE_RANGE[1],
+    None,
+    None,
+    0,
+)
 
 ALPHA_SIZES = ["S", "M", "L", "XL", "2XL", "3XL", "4XL", "5XL"]
+PREFERRED_WAREHOUSE_ITEM_ORDER = {
+    "تيشيرت صيفي": 0,
+    "تيشيرت خريفي": 1,
+    "شروال": 2,
+    "جاكيت": 3,
+}
+
+
+def warehouse_item_priority(item_type: Any) -> int:
+    item_clean = str(item_type or "").strip()
+    return PREFERRED_WAREHOUSE_ITEM_ORDER.get(
+        item_clean,
+        len(PREFERRED_WAREHOUSE_ITEM_ORDER),
+    )
+
+
+def warehouse_item_sort_key(item_type: Any, color: Any = "") -> Tuple[Any, ...]:
+    item_clean = str(item_type or "").strip()
+    color_clean = str(color or "").strip()
+    return (
+        warehouse_item_priority(item_clean),
+        item_clean.lower(),
+        color_clean.lower(),
+    )
+
+
+def format_weight_kg(grams: Any) -> str:
+    try:
+        grams_val = float(grams or 0.0)
+    except (TypeError, ValueError):
+        grams_val = 0.0
+    kg_val = grams_val / 1000.0
+    text = f"{kg_val:.3f}".rstrip("0").rstrip(".")
+    if not text:
+        text = "0"
+    return f"{text} كجم"
 
 
 def merged_numeric_size_labels_from_profile(
@@ -629,6 +675,18 @@ class SqliteDatabase:
                 UNIQUE(item_type, school, color)
             );
 
+            CREATE TABLE IF NOT EXISTS fabric_weights (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_type TEXT NOT NULL,
+                size TEXT NOT NULL,
+                weight_grams REAL NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(item_type, size)
+            );
+            CREATE INDEX IF NOT EXISTS idx_fabric_weights_specs
+            ON fabric_weights(item_type, size);
+
             CREATE TABLE IF NOT EXISTS stocks(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 item_type TEXT NOT NULL,
@@ -774,6 +832,10 @@ class SqliteDatabase:
             if "status" not in cols:
                 self.conn.execute(
                     "ALTER TABLE bills ADD COLUMN status TEXT NOT NULL DEFAULT 'CONFIRMED'"
+                )
+            if "bill_type" not in cols:
+                self.conn.execute(
+                    "ALTER TABLE bills ADD COLUMN bill_type TEXT NOT NULL DEFAULT 'SALE'"
                 )
         except Exception:
             pass
@@ -932,7 +994,7 @@ class SqliteDatabase:
         )
         row = cur.fetchone()
         if row is None:
-            return None
+            return DEFAULT_SIZE_PROFILE
         return (
             row["num_start_1"],
             row["num_end_1"],
@@ -1013,6 +1075,198 @@ class SqliteDatabase:
         )
 
         self.conn.commit()
+
+    # ------------------- Fabric weights -------------------
+    def list_fabric_weights(self, item_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        where = ["1=1"]
+        args: List[Any] = []
+        item = str(item_type or "").strip()
+        if item:
+            where.append("LOWER(TRIM(item_type)) = LOWER(TRIM(?))")
+            args.append(item)
+        cur = self.conn.execute(
+            f"""
+            SELECT id, item_type, size, weight_grams, created_at, updated_at
+            FROM fabric_weights
+            WHERE {' AND '.join(where)}
+            ORDER BY LOWER(TRIM(item_type)), LOWER(TRIM(size))
+            """,
+            tuple(args),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_fabric_weight(self, item_type: str, size: str) -> Optional[float]:
+        row = self.conn.execute(
+            """
+            SELECT weight_grams
+            FROM fabric_weights
+            WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+              AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+            """,
+            (item_type, size),
+        ).fetchone()
+        if row is None or row["weight_grams"] is None:
+            return None
+        try:
+            return float(row["weight_grams"])
+        except (TypeError, ValueError):
+            return None
+
+    def upsert_fabric_weight(self, item_type: str, size: str, weight_grams: float) -> None:
+        item = str(item_type or "").strip()
+        size_txt = str(size or "").strip()
+        if not item:
+            raise ValueError("نوع الصنف مطلوب.")
+        if not size_txt:
+            raise ValueError("المقاس مطلوب.")
+        try:
+            weight_val = float(weight_grams)
+        except (TypeError, ValueError):
+            raise ValueError("وزن القماش يجب أن يكون رقماً صالحاً.")
+        if weight_val <= 0:
+            raise ValueError("وزن القماش يجب أن يكون أكبر من صفر.")
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO fabric_weights(
+                    item_type, size, weight_grams, created_at, updated_at
+                )
+                VALUES (?, ?, ?, datetime('now'), datetime('now'))
+                ON CONFLICT(item_type, size)
+                DO UPDATE SET
+                    weight_grams = excluded.weight_grams,
+                    updated_at = datetime('now')
+                """,
+                (item, size_txt, weight_val),
+            )
+
+    def delete_fabric_weight(self, item_type: str, size: str) -> int:
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                DELETE FROM fabric_weights
+                WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                  AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+                """,
+                (item_type, size),
+            )
+            return int(cur.rowcount or 0)
+
+    def calculate_fabric_requirements(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        movement_rows = self.list_movement_item_totals(filters)
+        use_branch_only = bool(str(filters.get("branch_device") or "").strip())
+        weight_rows = self.list_fabric_weights()
+        weight_map = {
+            (
+                _normalize_spec_label(r.get("item_type") or "").lower(),
+                _normalize_size_label(r.get("size") or "").lower(),
+            ): float(r.get("weight_grams") or 0.0)
+            for r in weight_rows
+        }
+
+        grouped: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        missing: List[Dict[str, Any]] = []
+        detail_rows: List[Dict[str, Any]] = []
+        total_requested_qty = 0
+        total_weight_grams = 0.0
+
+        for row in movement_rows:
+            requested_qty = max(
+                0,
+                int((row.get("sold_branch_qty") if use_branch_only else row.get("sold_total_qty")) or 0)
+                - int((row.get("remaining_branch_qty") if use_branch_only else row.get("remaining_total_qty")) or 0)
+            )
+            if requested_qty <= 0:
+                continue
+
+            item_type = str(row.get("item_type") or "").strip()
+            school = str(row.get("school") or "").strip()
+            color = str(row.get("color") or "").strip()
+            size = str(row.get("size") or "").strip()
+            lookup_key = (
+                _normalize_spec_label(item_type).lower(),
+                _normalize_size_label(size).lower(),
+            )
+            weight_grams = weight_map.get(lookup_key)
+            if weight_grams is None or weight_grams <= 0:
+                missing.append(
+                    {
+                        "school": school,
+                        "item_type": item_type,
+                        "color": color,
+                        "size": size,
+                        "requested_qty": requested_qty,
+                    }
+                )
+                continue
+
+            line_grams = float(requested_qty) * float(weight_grams)
+            detail_rows.append(
+                {
+                    "school": school,
+                    "item_type": item_type,
+                    "color": color,
+                    "size": size,
+                    "requested_qty": requested_qty,
+                    "weight_grams": float(weight_grams),
+                    "line_weight_grams": float(line_grams),
+                }
+            )
+
+            group_key = (school, item_type, color)
+            bucket = grouped.setdefault(
+                group_key,
+                {
+                    "school": school,
+                    "item_type": item_type,
+                    "color": color,
+                    "requested_qty": 0,
+                    "total_weight_grams": 0.0,
+                },
+            )
+            bucket["requested_qty"] += int(requested_qty)
+            bucket["total_weight_grams"] += float(line_grams)
+            total_requested_qty += int(requested_qty)
+            total_weight_grams += float(line_grams)
+
+        summary_rows = list(grouped.values())
+        summary_rows.sort(
+            key=lambda r: (
+                (r.get("school") or "").lower(),
+                warehouse_item_priority(r.get("item_type")),
+                (r.get("item_type") or "").lower(),
+                (r.get("color") or "").lower(),
+            )
+        )
+        detail_rows.sort(
+            key=lambda r: (
+                (r.get("school") or "").lower(),
+                warehouse_item_priority(r.get("item_type")),
+                (r.get("item_type") or "").lower(),
+                (r.get("color") or "").lower(),
+                _normalize_size_label(r.get("size") or "").lower(),
+            )
+        )
+        missing.sort(
+            key=lambda r: (
+                (r.get("school") or "").lower(),
+                warehouse_item_priority(r.get("item_type")),
+                (r.get("item_type") or "").lower(),
+                (r.get("color") or "").lower(),
+                _normalize_size_label(r.get("size") or "").lower(),
+            )
+        )
+        return {
+            "rows": summary_rows,
+            "details": detail_rows,
+            "missing": missing,
+            "summary": {
+                "row_count": len(summary_rows),
+                "requested_qty": int(total_requested_qty),
+                "total_weight_grams": float(total_weight_grams),
+                "missing_count": len(missing),
+            },
+        }
 
     # -------- Packages helpers --------
     def auto_reopen_package_if_empty(self, warehouse_no: int, package_no: int) -> None:
@@ -2380,6 +2634,7 @@ class SqliteDatabase:
             )
 
         cur.close()
+        rows.sort(key=lambda r: warehouse_item_priority(r.get("item_type")))
         return rows
 
     # -------- Billing --------
@@ -4353,6 +4608,7 @@ class SqliteDatabase:
             branch_sold = max(0, int(m["branch_shipped_qty"]) - int(m["branch_qty"]))
             sold_total = int(m["sold_warehouse_qty"]) + branch_sold
             remaining_total = int(m["warehouse_qty"]) + int(m["branch_qty"])
+            requested_qty = max(0, sold_total - remaining_total)
             if has_date_filter and not (
                 int(m["incoming_qty"])
                 or int(m["sold_warehouse_qty"])
@@ -4375,11 +4631,13 @@ class SqliteDatabase:
                     "remaining_branch_qty": int(m["branch_qty"]),
                     "remaining_warehouse_qty": int(m["warehouse_qty"]),
                     "remaining_total_qty": int(remaining_total),
+                    "requested_qty": int(requested_qty),
                 }
             )
 
         out.sort(
             key=lambda r: (
+                warehouse_item_priority(r.get("item_type")),
                 (r.get("item_type") or "").lower(),
                 (r.get("school") or "").lower(),
                 (r.get("color") or "").lower(),
@@ -5251,7 +5509,7 @@ class IncomeFrame(ttk.Frame):
         super().__init__(master, padding=10)
         self.db = db
         # income-only size range state (NOT saved)
-        self._income_r1 = tk.StringVar()
+        self._income_r1 = tk.StringVar(value=DEFAULT_NUMERIC_SIZE_RANGE_LABEL)
         self._income_r2 = tk.StringVar()
         self._income_has_alpha = tk.BooleanVar(value=False)
 
@@ -5471,6 +5729,23 @@ class IncomeFrame(ttk.Frame):
         self.school.refresh_values()
         self.color.refresh_values()
 
+    def _set_default_income_profile(self) -> None:
+        self._income_r1.set(DEFAULT_NUMERIC_SIZE_RANGE_LABEL)
+        self._income_r2.set("")
+        self._income_has_alpha.set(False)
+
+    def _current_income_profile_values(self) -> Tuple[Optional[int], Optional[int], Optional[int], Optional[int], bool]:
+        def _parse_range_label(v: str) -> Tuple[Optional[int], Optional[int]]:
+            v = (v or "").strip()
+            if not v:
+                return None, None
+            a, b = v.split("→")
+            return int(a.strip()), int(b.strip())
+
+        r1s, r1e = _parse_range_label(self._income_r1.get())
+        r2s, r2e = _parse_range_label(self._income_r2.get())
+        return r1s, r1e, r2s, r2e, bool(self._income_has_alpha.get())
+
     def _auto_load_size_profile(self):
         """Auto-set range dropdowns from saved size_profile when item+school+color are all set."""
         it = (self.item_type.get() or "").strip()
@@ -5480,27 +5755,29 @@ class IncomeFrame(ttk.Frame):
             return
         try:
             profile = self.db.get_size_profile(it, sc, cl)
-            if not profile:
-                return
             r1s, r1e, r2s, r2e, has_alpha = profile
             # Set range 1
             if r1s is not None and r1e is not None:
                 label1 = f"{r1s} → {r1e}"
                 if label1 in NUMERIC_RANGE_LABELS:
                     self._income_r1.set(label1)
+                else:
+                    self._income_r1.set(DEFAULT_NUMERIC_SIZE_RANGE_LABEL)
             else:
-                self._income_r1.set("")
+                self._income_r1.set(DEFAULT_NUMERIC_SIZE_RANGE_LABEL)
             # Set range 2
             if r2s is not None and r2e is not None:
                 label2 = f"{r2s} → {r2e}"
                 if label2 in NUMERIC_RANGE_LABELS:
                     self._income_r2.set(label2)
+                else:
+                    self._income_r2.set("")
             else:
                 self._income_r2.set("")
             # Set alpha
             self._income_has_alpha.set(bool(has_alpha))
         except Exception:
-            pass
+            self._set_default_income_profile()
 
     def _rebuild_sizes_grid(self):
         try:
@@ -5657,9 +5934,7 @@ class IncomeFrame(ttk.Frame):
     def _on_reset_keep_pkg(self):
         for w in (self.item_type, self.school, self.color):
             w.set("")
-        self._income_r1.set("")
-        self._income_r2.set("")
-        self._income_has_alpha.set(False)
+        self._set_default_income_profile()
 
         # clear sizes grid entries and badge
         if self.sizes_grid:
@@ -5691,6 +5966,22 @@ class IncomeFrame(ttk.Frame):
         rows = [r for r in rows if int(r.get("qty") or 0) > 0]
         if not rows:
             messagebox.showwarning("فارغ", "لم تُدخل أي كميات في شبكة المقاسات.", parent=self)
+            return
+
+        try:
+            r1s, r1e, r2s, r2e, has_alpha = self._current_income_profile_values()
+            self.db.upsert_size_profile(
+                item_type,
+                school,
+                color,
+                r1_start=r1s,
+                r1_end=r1e,
+                r2_start=r2s,
+                r2_end=r2e,
+                has_alpha=has_alpha,
+            )
+        except Exception as ex:
+            messagebox.showerror("فشل حفظ المقاسات", str(ex), parent=self)
             return
 
         # ensure package open
@@ -5751,9 +6042,7 @@ class IncomeFrame(ttk.Frame):
             self.color.set("")
 
             # clear income-only ranges
-            self._income_r1.set("")
-            self._income_r2.set("")
-            self._income_has_alpha.set(False)
+            self._set_default_income_profile()
 
             # remove sizes grid completely
             if self.sizes_grid:
@@ -7855,6 +8144,9 @@ class InventoryWindow(tk.Toplevel):
             return
         from collections import defaultdict, OrderedDict
 
+        def _item_print_sort_key(item_type: str, color: str):
+            return warehouse_item_sort_key(item_type, color)
+
         # school -> (item_type, color) -> rows
         school_groups = OrderedDict()
 
@@ -7899,9 +8191,12 @@ class InventoryWindow(tk.Toplevel):
         tables_html = []
 
         for sch, item_groups in school_groups.items():
+            ordered_item_groups = sorted(
+                item_groups.items(),
+                key=lambda kv: _item_print_sort_key(kv[0][0], kv[0][1]),
+            )
 
-
-            for (t, clr), items in item_groups.items():
+            for (t, clr), items in ordered_item_groups:
 
 
                 size_counts = defaultdict(int)
@@ -8683,6 +8978,10 @@ class MultiSelectDialog(tk.Toplevel):
         self.wait_window()
         return self._result
 
+    def show(self) -> Optional[List[str]]:
+        """Backward-compatible alias for callers that still use show()."""
+        return self.run()
+
 
 # ------------------- Bills History Window -------------------
 
@@ -9152,13 +9451,13 @@ class MovementsWindow(tk.Toplevel):
         # NEW: add badge column
         self.table = ttk.Treeview(
             table_wrap,
-            columns=("type","school","color","size","incoming","sold","remaining","reserved"),
+            columns=("type","school","color","size","incoming","sold","remaining","requested","reserved"),
             show="headings",
             height=14,
         )
         for col, txt, w in [
             ("type","النوع",160), ("school","المدرسة",170), ("color","اللون",120), ("size","المقاس",90),
-            ("incoming","وارد",95), ("sold","مباع",95), ("remaining","متبقي",95), ("reserved","حجوزات",90),
+            ("incoming","وارد",95), ("sold","مباع",95), ("remaining","متبقي",95), ("requested","المطلوب",95), ("reserved","حجوزات",90),
         ]:
             self.table.heading(col, text=txt)
             self.table.column(col, width=w, anchor="center")
@@ -9206,13 +9505,17 @@ class MovementsWindow(tk.Toplevel):
         branch_selected = str(self.fbranch.get() or "").strip()
         use_branch_only = bool(branch_selected)
         for r in rows:
+            sold_qty = int((r.get("sold_branch_qty") if use_branch_only else r.get("sold_total_qty")) or 0)
+            remaining_qty = int((r.get("remaining_branch_qty") if use_branch_only else r.get("remaining_total_qty")) or 0)
+            requested_qty = max(0, sold_qty - remaining_qty)
             self.table.insert(
                 "", tk.END,
                 values=(
                     r.get("item_type",""), r.get("school",""), r.get("color",""), r.get("size",""),
                     int(r.get("incoming_qty") or 0),
-                    int((r.get("sold_branch_qty") if use_branch_only else r.get("sold_total_qty")) or 0),
-                    int((r.get("remaining_branch_qty") if use_branch_only else r.get("remaining_total_qty")) or 0),
+                    sold_qty,
+                    remaining_qty,
+                    requested_qty,
                     int(r.get("reserved_qty") or 0),
                 )
             )
@@ -9223,9 +9526,15 @@ class MovementsWindow(tk.Toplevel):
             "sold_total_qty": sum(int((r.get("sold_branch_qty") if use_branch_only else r.get("sold_total_qty")) or 0) for r in rows),
             "reserved_qty": sum(int(r.get("reserved_qty") or 0) for r in rows),
             "remaining_total_qty": sum(int((r.get("remaining_branch_qty") if use_branch_only else r.get("remaining_total_qty")) or 0) for r in rows),
+            "requested_qty": sum(max(
+                0,
+                int((r.get("sold_branch_qty") if use_branch_only else r.get("sold_total_qty")) or 0)
+                - int((r.get("remaining_branch_qty") if use_branch_only else r.get("remaining_total_qty")) or 0)
+            ) for r in rows),
         }
         sold_label = "إجمالي مباع الفرع" if use_branch_only else "إجمالي المباع"
         rem_label = "إجمالي متبقي الفرع" if use_branch_only else "إجمالي المتبقي (المخزن + الفروع)"
+        req_label = "إجمالي المطلوب للفرع" if use_branch_only else "إجمالي المطلوب"
         branch_prefix = ""
         if use_branch_only:
             branch_prefix = f"الفرع المحدد: {branch_display_name(branch_selected)}  |  "
@@ -9235,6 +9544,7 @@ class MovementsWindow(tk.Toplevel):
             f"إجمالي الوارد: {s['incoming_qty']}  |  "
             f"{sold_label}: {s['sold_total_qty']}  |  "
             f"{rem_label}: {s['remaining_total_qty']}  |  "
+            f"{req_label}: {s['requested_qty']}  |  "
             f"إجمالي الحجوزات: {s['reserved_qty']}"
         )
 
@@ -9263,13 +9573,18 @@ class MovementsWindow(tk.Toplevel):
             return
         headers = [
             "item_type", "school", "color", "size",
-            "incoming_qty", "sold_total_qty", "remaining_total_qty", "reserved_qty",
+            "incoming_qty", "sold_total_qty", "remaining_total_qty", "requested_qty", "reserved_qty",
         ]
         table = [[
             m.get("item_type",""), m.get("school",""), m.get("color",""), m.get("size",""),
             int(m.get("incoming_qty") or 0),
             int((m.get("sold_branch_qty") if str(self.fbranch.get() or "").strip() else m.get("sold_total_qty")) or 0),
             int((m.get("remaining_branch_qty") if str(self.fbranch.get() or "").strip() else m.get("remaining_total_qty")) or 0),
+            max(
+                0,
+                int((m.get("sold_branch_qty") if str(self.fbranch.get() or "").strip() else m.get("sold_total_qty")) or 0)
+                - int((m.get("remaining_branch_qty") if str(self.fbranch.get() or "").strip() else m.get("remaining_total_qty")) or 0)
+            ),
             int(m.get("reserved_qty") or 0),
         ] for m in rows]
         try:
@@ -9314,6 +9629,11 @@ class MovementsWindow(tk.Toplevel):
             "incoming": sum(int(r.get("incoming_qty") or 0) for r in rows),
             "sold": sum(int((r.get("sold_branch_qty") if str(self.fbranch.get() or "").strip() else r.get("sold_total_qty")) or 0) for r in rows),
             "remaining": sum(int((r.get("remaining_branch_qty") if str(self.fbranch.get() or "").strip() else r.get("remaining_total_qty")) or 0) for r in rows),
+            "requested": sum(max(
+                0,
+                int((r.get("sold_branch_qty") if str(self.fbranch.get() or "").strip() else r.get("sold_total_qty")) or 0)
+                - int((r.get("remaining_branch_qty") if str(self.fbranch.get() or "").strip() else r.get("remaining_total_qty")) or 0)
+            ) for r in rows),
             "reserved": sum(int(r.get("reserved_qty") or 0) for r in rows),
         }
 
@@ -9328,6 +9648,7 @@ class MovementsWindow(tk.Toplevel):
                 f"<td class='num'>{int(r.get('incoming_qty') or 0)}</td>"
                 f"<td class='num'>{int((r.get('sold_branch_qty') if str(self.fbranch.get() or '').strip() else r.get('sold_total_qty')) or 0)}</td>"
                 f"<td class='num'>{int((r.get('remaining_branch_qty') if str(self.fbranch.get() or '').strip() else r.get('remaining_total_qty')) or 0)}</td>"
+                f"<td class='num'>{max(0, int((r.get('sold_branch_qty') if str(self.fbranch.get() or '').strip() else r.get('sold_total_qty')) or 0) - int((r.get('remaining_branch_qty') if str(self.fbranch.get() or '').strip() else r.get('remaining_total_qty')) or 0))}</td>"
                 f"<td class='num'>{int(r.get('reserved_qty') or 0)}</td>"
                 "</tr>"
             )
@@ -9388,6 +9709,7 @@ tbody tr:nth-child(even) {{ background: #f8fafc; }}
       إجمالي الوارد: {totals['incoming']} |
       إجمالي المباع: {totals['sold']} |
       إجمالي المتبقي: {totals['remaining']} |
+      إجمالي المطلوب: {totals['requested']} |
       إجمالي الحجوزات: {totals['reserved']}
     </div>
     <table>
@@ -9400,6 +9722,7 @@ tbody tr:nth-child(even) {{ background: #f8fafc; }}
           <th>وارد</th>
           <th>مباع</th>
           <th>متبقي</th>
+          <th>المطلوب</th>
           <th>حجوزات</th>
         </tr>
       </thead>
@@ -11133,6 +11456,12 @@ class SchoolAccountsFrame(ttk.Frame):
         self._build()
         self._refresh()
 
+    def _update_selected_schools_label(self) -> None:
+        if self._selected_schools:
+            self._schools_var.set("المدارس المختارة: " + " - ".join(self._selected_schools))
+        else:
+            self._schools_var.set("كل المدارس")
+
     def _build(self):
         ttk.Label(self, text="حسابات المدارس", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 12))
 
@@ -11189,14 +11518,16 @@ class SchoolAccountsFrame(ttk.Frame):
     def _pick_schools(self):
         values = self.db.list_schools_all()
         dlg = MultiSelectDialog(self, title="اختيار المدارس", values=values, preselected=self._selected_schools)
-        result = dlg.show()
+        result = dlg.run()
         if result is None:
             return
         self._selected_schools = list(result)
+        self._update_selected_schools_label()
         self._refresh()
 
     def _clear_schools(self):
         self._selected_schools = []
+        self._update_selected_schools_label()
         self._refresh()
 
     def _refresh(self):
@@ -11229,13 +11560,569 @@ class SchoolAccountsFrame(ttk.Frame):
                 ),
             )
         apply_zebra_tags(self._tree)
-        if self._selected_schools:
-            self._schools_var.set("المدارس المختارة: " + " - ".join(self._selected_schools))
-        else:
-            self._schools_var.set("كل المدارس")
+        self._update_selected_schools_label()
         self._sum_school_count.set(str(len(schools_seen)))
         self._sum_qty.set(str(total_qty))
         self._sum_sales.set(f"{total_sales:.2f}")
+
+
+class FabricWeightsDialog(tk.Toplevel):
+    def __init__(self, master, db: SqliteDatabase, on_change=None):
+        super().__init__(master)
+        self.db = db
+        self.on_change = on_change
+        self.title("إدارة أوزان القماش")
+        self.geometry("760x520")
+        self.configure(bg=_UI["BG"])
+        _wh = tk.Frame(self, bg=_UI["ACCENT"], height=44)
+        _wh.pack(fill=tk.X)
+        _wh.pack_propagate(False)
+        tk.Label(_wh, text="  إدارة أوزان القماش", bg=_UI["ACCENT"], fg="#FFFFFF", font=_FONTS["h3"]).pack(side=tk.RIGHT, padx=12)
+        self.transient(master)
+        self.grab_set()
+        self._build()
+        self._refresh()
+
+    def _build(self):
+        top = ttk.LabelFrame(self, text="بيانات الوزن")
+        top.pack(fill=tk.X, padx=10, pady=10)
+
+        self.f_item = LabeledCombobox(top, "نوع الصنف", self.db, "item_type")
+        self.f_item.grid(row=0, column=0, padx=6, pady=6, sticky="ew")
+        self.f_size = LabeledCombobox(top, "المقاس", self.db, "size")
+        self.f_size.grid(row=0, column=1, padx=6, pady=6, sticky="ew")
+        self.weight_var = tk.StringVar()
+        self.f_weight = LabeledEntry(top, "الوزن بالجرام")
+        self.f_weight.grid(row=0, column=2, padx=6, pady=6, sticky="ew")
+        self.f_weight.entry.configure(textvariable=self.weight_var)
+        top.columnconfigure(0, weight=1)
+        top.columnconfigure(1, weight=1)
+        top.columnconfigure(2, weight=1)
+
+        self.f_item.set_supplier(lambda: self.db.get_distinct_filtered("item_type", {}))
+        self.f_size.set_supplier(
+            lambda: self.db.get_distinct_filtered(
+                "size",
+                {"item_type": self.f_item.get() or None},
+            )
+        )
+        self.f_item.cb.bind("<<ComboboxSelected>>", lambda _e: self.f_size.refresh_values(), add="+")
+        self.f_item.cb.bind("<KeyRelease>", lambda _e: self.f_size.refresh_values(), add="+")
+
+        btns = ttk.Frame(top)
+        btns.grid(row=1, column=0, columnspan=3, sticky="e", padx=6, pady=(0, 6))
+        ttk.Button(btns, text="جديد", command=self._clear_form).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="حفظ", command=self._save).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="حذف", command=self._delete_selected).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="تحديث", command=self._refresh).pack(side=tk.LEFT, padx=4)
+
+        wrap = ttk.LabelFrame(self, text="الأوزان المعرفة")
+        wrap.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        cols = ("item_type", "size", "weight_grams")
+        self.tree = ttk.Treeview(wrap, columns=cols, show="headings", height=16)
+        for col, txt, w in [
+            ("item_type", "نوع الصنف", 280),
+            ("size", "المقاس", 140),
+            ("weight_grams", "الوزن بالجرام", 140),
+        ]:
+            self.tree.heading(col, text=txt)
+            self.tree.column(col, width=w, anchor="center")
+        ysb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=ysb.set)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        ysb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 4), pady=4)
+        add_context_menu(self.tree)
+        _bind_mousewheel(self.tree)
+        self.tree.bind("<<TreeviewSelect>>", self._load_selected, add="+")
+
+    def _selected_specs(self) -> Tuple[str, str]:
+        item_type = self.f_item.get().strip()
+        size = self.f_size.get().strip()
+        return item_type, size
+
+    def _clear_form(self):
+        self.f_item.set("")
+        self.f_size.set("")
+        self.weight_var.set("")
+        try:
+            self.tree.selection_remove(self.tree.selection())
+        except Exception:
+            pass
+
+    def _load_selected(self, *_):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        vals = self.tree.item(sel[0], "values")
+        if not vals:
+            return
+        self.f_item.set(str(vals[0] or ""))
+        self.f_size.set(str(vals[1] or ""))
+        self.weight_var.set(str(vals[2] or ""))
+
+    def _refresh(self):
+        rows = self.db.list_fabric_weights()
+        self.tree.delete(*self.tree.get_children())
+        for row in rows:
+            self.tree.insert(
+                "",
+                tk.END,
+                values=(
+                    row.get("item_type") or "",
+                    row.get("size") or "",
+                    f"{float(row.get('weight_grams') or 0.0):.3f}".rstrip("0").rstrip("."),
+                ),
+            )
+        apply_zebra_tags(self.tree)
+        self.f_item.refresh_values()
+        self.f_size.refresh_values()
+
+    def _save(self):
+        item_type, size = self._selected_specs()
+        try:
+            weight = float((self.weight_var.get() or "").strip())
+            self.db.upsert_fabric_weight(item_type, size, weight)
+        except Exception as ex:
+            messagebox.showerror("فشل الحفظ", str(ex), parent=self)
+            return
+        self._refresh()
+        if self.on_change:
+            try:
+                self.on_change()
+            except Exception:
+                pass
+        show_toast(self, "تم حفظ وزن القماش بنجاح")
+
+    def _delete_selected(self):
+        item_type, size = self._selected_specs()
+        if not item_type or not size:
+            messagebox.showwarning("لم يتم التحديد", "اختر وزنًا من القائمة أولاً.", parent=self)
+            return
+        if not messagebox.askyesno(
+            "تأكيد الحذف",
+            f"حذف وزن القماش للصنف '{item_type}' والمقاس '{size}'؟",
+            parent=self,
+        ):
+            return
+        deleted = self.db.delete_fabric_weight(item_type, size)
+        if deleted <= 0:
+            show_toast(self, "لم يتم العثور على الوزن المحدد", bg="#f59e0b")
+            return
+        self._clear_form()
+        self._refresh()
+        if self.on_change:
+            try:
+                self.on_change()
+            except Exception:
+                pass
+        show_toast(self, "تم حذف وزن القماش")
+
+
+class FabricCalculationFrame(ttk.Frame):
+    def __init__(self, master, db: SqliteDatabase):
+        super().__init__(master, padding=10)
+        self.db = db
+        self._last_result: Optional[Dict[str, Any]] = None
+        self._build()
+
+    def _build(self):
+        ttk.Label(self, text="حساب القماش", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 12))
+
+        top = ttk.LabelFrame(self, text="الفلاتر")
+        top.pack(fill=tk.X, pady=(0, 8))
+        self.ftype = LabeledCombobox(top, "النوع", self.db, "item_type")
+        self.ftype.grid(row=0, column=0, padx=6, pady=4, sticky="ew")
+        self.fsch = LabeledCombobox(top, "المدرسة", self.db, "school")
+        self.fsch.grid(row=0, column=1, padx=6, pady=4, sticky="ew")
+        self.fclr = LabeledCombobox(top, "اللون", self.db, "color")
+        self.fclr.grid(row=0, column=2, padx=6, pady=4, sticky="ew")
+        self.fsiz = LabeledCombobox(top, "المقاس", self.db, "size")
+        self.fsiz.grid(row=0, column=3, padx=6, pady=4, sticky="ew")
+        branch_vals = [""] + [branch_display_name(n) for n in DEFAULT_BRANCH_POS_NAMES]
+        branch_map = {n: branch_display_name(n) for n in DEFAULT_BRANCH_POS_NAMES}
+        self.fbranch = LabeledStaticCombo(top, "الفرع", branch_vals, value_map=branch_map, width=18)
+        self.fbranch.grid(row=0, column=4, padx=6, pady=4, sticky="ew")
+
+        def _constraints(exclude: Optional[str] = None) -> Dict[str, Any]:
+            data = {
+                "item_type": self.ftype.get() or None,
+                "school": self.fsch.get() or None,
+                "color": self.fclr.get() or None,
+                "size": self.fsiz.get() or None,
+            }
+            if exclude:
+                data.pop(exclude, None)
+            return {k: v for k, v in data.items() if v not in (None, "")}
+
+        self.ftype.set_supplier(lambda: self.db.get_distinct_filtered("item_type", _constraints("item_type")))
+        self.fsch.set_supplier(lambda: self.db.get_distinct_filtered("school", _constraints("school")))
+        self.fclr.set_supplier(lambda: self.db.get_distinct_filtered("color", _constraints("color")))
+        self.fsiz.set_supplier(lambda: self.db.get_distinct_filtered("size", _constraints("size")))
+
+        self.df = DateField(top, "من")
+        self.df.grid(row=1, column=0, padx=6, pady=4, sticky="w")
+        self.dt = DateField(top, "إلى")
+        self.dt.grid(row=1, column=1, padx=6, pady=4, sticky="w")
+        ttk.Label(top, text="بحث").grid(row=1, column=2, sticky="e", padx=4, pady=4)
+        self.txt = ttk.Entry(top)
+        self.txt.grid(row=1, column=3, sticky="ew", padx=6, pady=4)
+        top.columnconfigure(3, weight=1)
+
+        btns = ttk.Frame(top)
+        btns.grid(row=0, column=5, rowspan=2, sticky="e", padx=6, pady=4)
+        ttk.Button(btns, text="احسب", command=self._calculate).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="إدارة الأوزان", command=self._open_weights_dialog).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="تصدير", command=self._export).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="طباعة", command=self._print_report).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="مسح", command=self._clear).pack(side=tk.LEFT, padx=4)
+
+        summary = ttk.LabelFrame(self, text="الملخص")
+        summary.pack(fill=tk.X, pady=(0, 8))
+        self._sum_rows = tk.StringVar(value="0")
+        self._sum_requested = tk.StringVar(value="0")
+        self._sum_weight = tk.StringVar(value="0 كجم")
+        self._sum_missing = tk.StringVar(value="0")
+        summary_items = [
+            ("عدد الصفوف:", self._sum_rows),
+            ("إجمالي المطلوب:", self._sum_requested),
+            ("إجمالي القماش:", self._sum_weight),
+            ("أوزان غير معرفة:", self._sum_missing),
+        ]
+        for i, (label, var) in enumerate(summary_items):
+            ttk.Label(summary, text=label).grid(row=0, column=i * 2, padx=6, pady=8, sticky="e")
+            ttk.Label(summary, textvariable=var, font=("Segoe UI", 12, "bold")).grid(
+                row=0, column=i * 2 + 1, padx=(0, 16), pady=8, sticky="w"
+            )
+
+        wrap = ttk.LabelFrame(self, text="النتائج")
+        wrap.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        cols = ("school", "item_type", "color", "requested_qty", "total_weight")
+        self.tree = ttk.Treeview(wrap, columns=cols, show="headings", height=14)
+        for col, txt, w in [
+            ("school", "المدرسة", 170),
+            ("item_type", "نوع الصنف", 170),
+            ("color", "اللون", 110),
+            ("requested_qty", "إجمالي المطلوب", 110),
+            ("total_weight", "إجمالي القماش", 140),
+        ]:
+            self.tree.heading(col, text=txt)
+            self.tree.column(col, width=w, anchor="center")
+        ysb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=ysb.set)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        ysb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 4), pady=4)
+        add_context_menu(self.tree)
+        _bind_mousewheel(self.tree)
+
+        missing_wrap = ttk.LabelFrame(self, text="أوزان غير معرفة")
+        missing_wrap.pack(fill=tk.BOTH, expand=False)
+        miss_cols = ("school", "item_type", "color", "size", "requested_qty")
+        self.missing_tree = ttk.Treeview(missing_wrap, columns=miss_cols, show="headings", height=7)
+        for col, txt, w in [
+            ("school", "المدرسة", 170),
+            ("item_type", "نوع الصنف", 170),
+            ("color", "اللون", 110),
+            ("size", "المقاس", 90),
+            ("requested_qty", "المطلوب", 90),
+        ]:
+            self.missing_tree.heading(col, text=txt)
+            self.missing_tree.column(col, width=w, anchor="center")
+        mysb = ttk.Scrollbar(missing_wrap, orient="vertical", command=self.missing_tree.yview)
+        self.missing_tree.configure(yscrollcommand=mysb.set)
+        self.missing_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        mysb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 4), pady=4)
+        add_context_menu(self.missing_tree)
+        _bind_mousewheel(self.missing_tree)
+
+    def _filters(self) -> Dict[str, Any]:
+        return {
+            "item_type": self.ftype.get(),
+            "school": self.fsch.get(),
+            "color": self.fclr.get(),
+            "size": self.fsiz.get(),
+            "branch_device": self.fbranch.get() or None,
+            "date_from": self.df.get() or None,
+            "date_to": self.dt.get() or None,
+            "text": (self.txt.get().strip() or None),
+        }
+
+    def _open_weights_dialog(self):
+        FabricWeightsDialog(self, self.db, on_change=self._on_weights_changed)
+
+    def _on_weights_changed(self):
+        if self._last_result:
+            self._calculate()
+
+    def _clear(self):
+        for w in (self.ftype, self.fsch, self.fclr, self.fsiz, self.fbranch):
+            w.set("")
+        self.df.set("")
+        self.dt.set("")
+        self.txt.delete(0, tk.END)
+        self.tree.delete(*self.tree.get_children())
+        self.missing_tree.delete(*self.missing_tree.get_children())
+        self._sum_rows.set("0")
+        self._sum_requested.set("0")
+        self._sum_weight.set("0 كجم")
+        self._sum_missing.set("0")
+        self._last_result = None
+
+    def _calculate(self):
+        try:
+            result = self.db.calculate_fabric_requirements(self._filters())
+        except Exception as ex:
+            messagebox.showerror("فشل الحساب", str(ex), parent=self)
+            return
+        self._last_result = result
+        rows = list(result.get("rows") or [])
+        missing = list(result.get("missing") or [])
+        summary = dict(result.get("summary") or {})
+
+        self.tree.delete(*self.tree.get_children())
+        for row in rows:
+            self.tree.insert(
+                "",
+                tk.END,
+                values=(
+                    row.get("school") or "",
+                    row.get("item_type") or "",
+                    row.get("color") or "",
+                    int(row.get("requested_qty") or 0),
+                    format_weight_kg(row.get("total_weight_grams") or 0.0),
+                ),
+            )
+        apply_zebra_tags(self.tree)
+
+        self.missing_tree.delete(*self.missing_tree.get_children())
+        for row in missing:
+            self.missing_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    row.get("school") or "",
+                    row.get("item_type") or "",
+                    row.get("color") or "",
+                    row.get("size") or "",
+                    int(row.get("requested_qty") or 0),
+                ),
+            )
+        apply_zebra_tags(self.missing_tree)
+
+        self._sum_rows.set(str(int(summary.get("row_count") or 0)))
+        self._sum_requested.set(str(int(summary.get("requested_qty") or 0)))
+        self._sum_weight.set(format_weight_kg(summary.get("total_weight_grams") or 0.0))
+        self._sum_missing.set(str(int(summary.get("missing_count") or 0)))
+
+    def _export(self):
+        if not self._last_result:
+            messagebox.showwarning("لا توجد نتائج", "احسب النتائج أولاً قبل التصدير.", parent=self)
+            return
+        path = filedialog.asksaveasfilename(
+            title="تصدير حساب القماش",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Workbook", "*.xlsx"), ("Excel 97-2003 XML", "*.xls"), ("All files", "*.*")],
+            initialfile=f"fabric_requirements_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            parent=self,
+        )
+        if not path:
+            return
+        headers = [
+            "school",
+            "item_type",
+            "color",
+            "requested_qty",
+            "total_weight_grams",
+            "total_weight_kg",
+        ]
+        table: List[List[Any]] = []
+        for row in self._last_result.get("rows") or []:
+            grams = float(row.get("total_weight_grams") or 0.0)
+            table.append([
+                row.get("school") or "",
+                row.get("item_type") or "",
+                row.get("color") or "",
+                int(row.get("requested_qty") or 0),
+                grams,
+                format_weight_kg(grams),
+            ])
+        missing = list(self._last_result.get("missing") or [])
+        if missing:
+            table.append(["", "", "", "", "", ""])
+            table.append(["أوزان غير معرفة", "", "", "", "", ""])
+            for row in missing:
+                table.append([
+                    row.get("school") or "",
+                    row.get("item_type") or "",
+                    row.get("color") or "",
+                    int(row.get("requested_qty") or 0),
+                    row.get("size") or "",
+                    "وزن غير معرف",
+                ])
+        try:
+            export_to_excel(path, headers, table)
+            show_toast(self, "تم تصدير حساب القماش بنجاح")
+        except Exception as ex:
+            messagebox.showerror("فشل التصدير", str(ex), parent=self)
+
+    def _print_report(self):
+        if not self._last_result:
+            messagebox.showwarning("لا توجد نتائج", "احسب النتائج أولاً قبل الطباعة.", parent=self)
+            return
+
+        def _h(v: Any) -> str:
+            s = str(v if v is not None else "")
+            return (
+                s.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+            )
+
+        filters = self._filters()
+        filter_bits = []
+        for label, key in (
+            ("الفرع", "branch_device"),
+            ("النوع", "item_type"),
+            ("المدرسة", "school"),
+            ("اللون", "color"),
+            ("المقاس", "size"),
+            ("من", "date_from"),
+            ("إلى", "date_to"),
+            ("بحث", "text"),
+        ):
+            val = str(filters.get(key) or "").strip()
+            if val:
+                filter_bits.append(f"{label}: {_h(val)}")
+        filters_html = " | ".join(filter_bits) if filter_bits else "بدون فلاتر"
+
+        rows_html = []
+        for row in self._last_result.get("rows") or []:
+            rows_html.append(
+                "<tr>"
+                f"<td>{_h(row.get('school') or '')}</td>"
+                f"<td>{_h(row.get('item_type') or '')}</td>"
+                f"<td>{_h(row.get('color') or '')}</td>"
+                f"<td class='num'>{int(row.get('requested_qty') or 0)}</td>"
+                f"<td class='num'>{_h(format_weight_kg(row.get('total_weight_grams') or 0.0))}</td>"
+                "</tr>"
+            )
+
+        missing_html = []
+        for row in self._last_result.get("missing") or []:
+            missing_html.append(
+                "<tr>"
+                f"<td>{_h(row.get('school') or '')}</td>"
+                f"<td>{_h(row.get('item_type') or '')}</td>"
+                f"<td>{_h(row.get('color') or '')}</td>"
+                f"<td>{_h(row.get('size') or '')}</td>"
+                f"<td class='num'>{int(row.get('requested_qty') or 0)}</td>"
+                "</tr>"
+            )
+
+        summary = dict(self._last_result.get("summary") or {})
+        missing_section = ""
+        if missing_html:
+            missing_section = f"""
+            <div class="subhead">أوزان غير معرفة</div>
+            <table>
+              <thead>
+                <tr>
+                  <th>المدرسة</th>
+                  <th>نوع الصنف</th>
+                  <th>اللون</th>
+                  <th>المقاس</th>
+                  <th>المطلوب</th>
+                </tr>
+              </thead>
+              <tbody>
+                {''.join(missing_html)}
+              </tbody>
+            </table>
+            """
+
+        html = f"""<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<title>حساب القماش</title>
+<style>
+@page {{ size: A4 landscape; margin: 10mm; }}
+body {{
+  margin: 0;
+  font-family: "Segoe UI", Tahoma, Arial, "Noto Sans Arabic", sans-serif;
+  color: #0f172a;
+  direction: rtl;
+}}
+.wrap {{ padding: 8px; }}
+.title {{ font-size: 20px; font-weight: 700; margin-bottom: 4px; }}
+.meta {{ font-size: 12px; color: #334155; margin-bottom: 4px; }}
+.summary {{
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  padding: 8px;
+  margin: 8px 0 10px;
+  font-weight: 600;
+  font-size: 13px;
+}}
+.subhead {{ font-size: 16px; font-weight: 700; margin: 14px 0 6px; }}
+table {{
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+}}
+th, td {{
+  border: 1px solid #64748b;
+  padding: 6px 4px;
+  text-align: center;
+  vertical-align: middle;
+  word-wrap: break-word;
+}}
+th {{
+  background: #e2e8f0;
+  font-weight: 700;
+}}
+tbody tr:nth-child(even) {{ background: #f8fafc; }}
+.num {{ font-variant-numeric: tabular-nums; }}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="title">تقرير حساب القماش</div>
+    <div class="meta">وقت التقرير: {_h(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))}</div>
+    <div class="meta">الفلاتر: {filters_html}</div>
+    <div class="summary">
+      عدد الصفوف: {int(summary.get('row_count') or 0)} |
+      إجمالي المطلوب: {int(summary.get('requested_qty') or 0)} |
+      إجمالي القماش: {_h(format_weight_kg(summary.get('total_weight_grams') or 0.0))} |
+      أوزان غير معرفة: {int(summary.get('missing_count') or 0)}
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>المدرسة</th>
+          <th>نوع الصنف</th>
+          <th>اللون</th>
+          <th>إجمالي المطلوب</th>
+          <th>إجمالي القماش</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(rows_html)}
+      </tbody>
+    </table>
+    {missing_section}
+  </div>
+</body>
+</html>
+"""
+        path = os.path.join(
+            tempfile.gettempdir(),
+            f"fabric_requirements_print_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+        )
+        with open(path, "w", encoding="utf-8") as fobj:
+            fobj.write(html)
+        _print_html_auto(path, copies=1, parent=self)
 
 
 # ------------------- Branch / POS reporting (warehouse) -------------------
@@ -11919,9 +12806,9 @@ class WarehouseApp(tk.Tk):
             "dashboard": 0,
             "outcome": 1,
             "income": 2,
-            "sync_diagnostics": 3,
-            "statistics": 4,
-            "school_accounts": 5,
+            "fabric_calculation": 3,
+            "sync_diagnostics": 4,
+            "statistics": 5,
         }
         idx = tab_map.get(name)
         if idx is not None and hasattr(self, "notebook"):
@@ -11936,12 +12823,10 @@ class WarehouseApp(tk.Tk):
             idx = self.notebook.index(self.notebook.select())
             if idx == 0 and hasattr(self, "_dashboard"):
                 self._dashboard._refresh()
-            elif idx == 3 and hasattr(self, "_sync_diagnostics"):
+            elif idx == 4 and hasattr(self, "_sync_diagnostics"):
                 self._sync_diagnostics._refresh()
-            elif idx == 4 and hasattr(self, "_statistics"):
+            elif idx == 5 and hasattr(self, "_statistics"):
                 self._statistics._refresh()
-            elif idx == 5 and hasattr(self, "_school_accounts"):
-                self._school_accounts._refresh()
         except Exception:
             pass
 
@@ -12089,7 +12974,6 @@ class WarehouseApp(tk.Tk):
         shortcuts_menu.add_command(label="F9  - لوحة التحكم", state="disabled")
         shortcuts_menu.add_command(label="F11 - تشخيص المزامنة", state="disabled")
         shortcuts_menu.add_command(label="F10 - الإحصائيات", state="disabled")
-        shortcuts_menu.add_command(label="حسابات المدارس", state="disabled")
         menubar.add_cascade(label="اختصارات", menu=shortcuts_menu)
 
         sync_menu = tk.Menu(menubar, tearoff=False)
@@ -12133,9 +13017,9 @@ class WarehouseApp(tk.Tk):
             ("لوحة التحكم", 0),
             ("المنصرف", 1),
             ("الوارد", 2),
-            ("تشخيص المزامنة", 3),
-            ("الإحصائيات", 4),
-            ("حسابات المدارس", 5),
+            ("حساب القماش", 3),
+            ("تشخيص المزامنة", 4),
+            ("الإحصائيات", 5),
         ]
         for text, idx in nav_items:
             b = tk.Button(nav, text=f"  {text}  ", bg=_HBG2, fg=_UI["TEXT_SEC"],
@@ -12190,14 +13074,14 @@ class WarehouseApp(tk.Tk):
         self._income = IncomeFrame(self.notebook, self.db)
         self.notebook.add(self._income, text="  الوارد  (F1)  ")
 
+        self._fabric_calculation = FabricCalculationFrame(self.notebook, self.db)
+        self.notebook.add(self._fabric_calculation, text="  حساب القماش  ")
+
         self._sync_diagnostics = SyncDiagnosticsFrame(self.notebook, self.db, app=self)
         self.notebook.add(self._sync_diagnostics, text="  تشخيص المزامنة  (F11)  ")
 
         self._statistics = StatisticsFrame(self.notebook, self.db)
         self.notebook.add(self._statistics, text="  الإحصائيات  (F10)  ")
-
-        self._school_accounts = SchoolAccountsFrame(self.notebook, self.db)
-        self.notebook.add(self._school_accounts, text="  حسابات المدارس  ")
 
         self.notebook.select(1)
         self._highlight_nav(1)
@@ -12208,12 +13092,10 @@ class WarehouseApp(tk.Tk):
                 self._highlight_nav(idx)
                 if idx == 0:
                     self._dashboard._refresh()
-                elif idx == 3:
-                    self._sync_diagnostics._refresh()
                 elif idx == 4:
-                    self._statistics._refresh()
+                    self._sync_diagnostics._refresh()
                 elif idx == 5:
-                    self._school_accounts._refresh()
+                    self._statistics._refresh()
             except Exception:
                 pass
         self.notebook.bind("<<NotebookTabChanged>>", _on_tab_change)

@@ -45,3 +45,139 @@ _tkinter.TclError: expected integer but got "UI"
 2026-05-13 02:18:33 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=44824, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
 2026-05-31 19:12:44 INFO hosny: ============================================================
 2026-05-31 19:12:44 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=17036, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-03 15:55:45 INFO hosny: ============================================================
+2026-06-03 15:55:45 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=29640, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-03 15:55:48 ERROR hosny: UNCAUGHT EXCEPTION
+Traceback (most recent call last):
+  File "HosnyWarehouse.py", line 12341, in <module>
+    main()
+    ~~~~^^
+  File "HosnyWarehouse.py", line 12336, in main
+    app = WarehouseApp()
+  File "HosnyWarehouse.py", line 11771, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyWarehouse.py", line 12199, in _build
+    self._school_accounts = SchoolAccountsFrame(self.notebook, self.db)
+                            ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyWarehouse.py", line 11134, in __init__
+    self._refresh()
+    ~~~~~~~~~~~~~^^
+  File "HosnyWarehouse.py", line 11203, in _refresh
+    rows = self.db.get_school_accounts_report(
+        self._selected_schools or self.db.list_schools_all(),
+        date_from=self.df.get() or None,
+        date_to=self.dt.get() or None,
+    )
+  File "HosnyWarehouse.py", line 1157, in get_school_accounts_report
+    cur.execute(
+    ~~~~~~~~~~~^
+        f"""
+        ^^^^
+    ...<13 lines>...
+        args,
+        ^^^^^
+    )
+    ^
+sqlite3.OperationalError: no such column: b.bill_type
+2026-06-03 16:02:04 INFO hosny: ============================================================
+2026-06-03 16:02:04 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=11040, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-03 16:02:06 ERROR hosny: UNCAUGHT EXCEPTION
+Traceback (most recent call last):
+  File "HosnyWarehouse.py", line 12341, in <module>
+    main()
+    ~~~~^^
+  File "HosnyWarehouse.py", line 12336, in main
+    app = WarehouseApp()
+  File "HosnyWarehouse.py", line 11771, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyWarehouse.py", line 12199, in _build
+    self._school_accounts = SchoolAccountsFrame(self.notebook, self.db)
+                            ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyWarehouse.py", line 11134, in __init__
+    self._refresh()
+    ~~~~~~~~~~~~~^^
+  File "HosnyWarehouse.py", line 11203, in _refresh
+    rows = self.db.get_school_accounts_report(
+        self._selected_schools or self.db.list_schools_all(),
+        date_from=self.df.get() or None,
+        date_to=self.dt.get() or None,
+    )
+  File "HosnyWarehouse.py", line 1157, in get_school_accounts_report
+    cur.execute(
+    ~~~~~~~~~~~^
+        f"""
+        ^^^^
+    ...<13 lines>...
+        args,
+        ^^^^^
+    )
+    ^
+sqlite3.OperationalError: no such column: b.bill_type
+2026-06-03 16:03:38 INFO hosny: ============================================================
+2026-06-03 16:03:38 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=27932, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-03 16:03:38 INFO hosny: [(0, 'id', 'INTEGER', 0, None, 1), (1, 'created_at', 'TEXT', 1, None, 0), (2, 'customer', 'TEXT', 0, None, 0), (3, 'total', 'REAL', 1, None, 0), (4, 'status', 'TEXT', 1, "'CONFIRMED'", 0), (5, 'uuid', 'TEXT', 0, None, 0), (6, 'bill_type', 'TEXT', 1, "'SALE'", 0)]
+2026-06-03 16:53:02 INFO hosny: ============================================================
+2026-06-03 16:53:02 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=21512, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-04 10:28:55 INFO hosny: ============================================================
+2026-06-04 10:28:55 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=13896, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-04 10:29:08 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 11222, in _pick_schools
+    result = dlg.show()
+             ^^^^^^^^
+AttributeError: 'MultiSelectDialog' object has no attribute 'show'
+2026-06-04 10:30:11 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 11222, in _pick_schools
+    result = dlg.show()
+             ^^^^^^^^
+AttributeError: 'MultiSelectDialog' object has no attribute 'show'
+2026-06-04 10:30:54 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 11222, in _pick_schools
+    result = dlg.show()
+             ^^^^^^^^
+AttributeError: 'MultiSelectDialog' object has no attribute 'show'
+2026-06-08 12:59:56 INFO hosny: ============================================================
+2026-06-08 12:59:56 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=22736, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-08 15:46:36 INFO hosny: ============================================================
+2026-06-08 15:46:36 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=20008, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-08 16:12:11 INFO hosny: ============================================================
+2026-06-08 16:12:11 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=31220, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-08 16:33:17 INFO hosny: ============================================================
+2026-06-08 16:33:17 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=20776, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-08 16:45:34 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "tkinter\__init__.py", line 862, in callit
+  File "HosnyWarehouse.py", line 4677, in _maybe_close_after_blur
+    if self._opened and not self._mouse_inside_popup and self.focus_get() is not self.cb:
+                                                         ~~~~~~~~~~~~~~^^
+  File "tkinter\__init__.py", line 806, in focus_get
+  File "tkinter\__init__.py", line 1677, in nametowidget
+KeyError: 'popdown'
+2026-06-08 16:45:40 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "tkinter\__init__.py", line 862, in callit
+  File "HosnyWarehouse.py", line 4677, in _maybe_close_after_blur
+    if self._opened and not self._mouse_inside_popup and self.focus_get() is not self.cb:
+                                                         ~~~~~~~~~~~~~~^^
+  File "tkinter\__init__.py", line 806, in focus_get
+  File "tkinter\__init__.py", line 1677, in nametowidget
+KeyError: 'popdown'
+2026-06-09 15:41:16 INFO hosny: ============================================================
+2026-06-09 15:41:16 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=4336, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-09 15:41:16 INFO hosny: ============================================================
+2026-06-09 15:41:16 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=5752, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-09 15:43:36 INFO hosny: ============================================================
+2026-06-09 15:43:36 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=4080, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-09 15:46:41 INFO hosny: ============================================================
+2026-06-09 15:46:41 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=5148, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-09 16:04:54 INFO hosny: ============================================================
+2026-06-09 16:04:54 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=13536, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
