@@ -1645,9 +1645,10 @@ class SqliteDatabase:
                 (*args, *ids),
             )
 
-            self._cascade_spec_rename(old_specs, changes)
+            rename_events = self._cascade_spec_rename(old_specs, changes)
 
             self._upsert_history(changes)
+        self._emit_spec_rename_sync_events(rename_events)
         self.cleanup_unused_specs()
         return count
 
@@ -1656,7 +1657,7 @@ class SqliteDatabase:
         self,
         old_specs: Sequence[Any],
         changes: Dict[str, Any],
-    ) -> None:
+    ) -> List[Dict[str, Any]]:
         """Propagate a completed spec rename from `stocks` to historical tables.
 
         For each old (item_type, school, color, size) tuple we just rewrote,
@@ -1665,7 +1666,7 @@ class SqliteDatabase:
         (best-effort) the POS mirror tables so audit views stay consistent.
         """
         if not changes or not old_specs:
-            return
+            return []
         sets_parts: List[str] = []
         new_vals: List[Any] = []
         for fld in ("item_type", "school", "color", "size"):
@@ -1673,8 +1674,9 @@ class SqliteDatabase:
                 sets_parts.append(f"{fld} = ?")
                 new_vals.append(changes[fld])
         if not sets_parts:
-            return
+            return []
         set_sql = ", ".join(sets_parts)
+        rename_events: List[Dict[str, Any]] = []
 
         for row in old_specs:
             old_it = row["item_type"] if isinstance(row, sqlite3.Row) else row[0]
@@ -1700,6 +1702,38 @@ class SqliteDatabase:
                     )
                 except sqlite3.OperationalError:
                     pass
+            new_spec = {
+                "item_type": str(changes.get("item_type", old_it) or "").strip(),
+                "school": str(changes.get("school", old_sc) or "").strip(),
+                "color": str(changes.get("color", old_cl) or "").strip(),
+                "size": str(changes.get("size", old_sz) or "").strip(),
+            }
+            old_spec = {
+                "item_type": str(old_it or "").strip(),
+                "school": str(old_sc or "").strip(),
+                "color": str(old_cl or "").strip(),
+                "size": str(old_sz or "").strip(),
+            }
+            if old_spec != new_spec:
+                rename_events.append({
+                    "old_spec": old_spec,
+                    "new_spec": new_spec,
+                    "changed_fields": [fld for fld in ("item_type", "school", "color", "size") if old_spec.get(fld) != new_spec.get(fld)],
+                })
+        return rename_events
+
+    def _emit_spec_rename_sync_events(self, rename_events: Sequence[Dict[str, Any]]) -> None:
+        for payload in (rename_events or []):
+            try:
+                old_spec = payload.get("old_spec") or {}
+                new_spec = payload.get("new_spec") or {}
+                if not isinstance(old_spec, dict) or not isinstance(new_spec, dict):
+                    continue
+                if old_spec == new_spec:
+                    continue
+                self._record_sync_event("SPEC_RENAMED", dict(payload), target_scope="all-pos")
+            except Exception:
+                pass
 
     def update_specs_in_package(
         self,
@@ -1761,9 +1795,10 @@ class SqliteDatabase:
                 (*args, w, p),
             )
 
-            self._cascade_spec_rename(old_specs, changes)
+            rename_events = self._cascade_spec_rename(old_specs, changes)
 
             self._upsert_history(changes)
+        self._emit_spec_rename_sync_events(rename_events)
         self.cleanup_unused_specs()
         return count
 
@@ -5526,6 +5561,15 @@ class IncomeFrame(ttk.Frame):
         self._income_r1 = tk.StringVar(value=DEFAULT_NUMERIC_SIZE_RANGE_LABEL)
         self._income_r2 = tk.StringVar()
         self._income_has_alpha = tk.BooleanVar(value=False)
+        self._income_view_mode = tk.StringVar(value="undefined")
+        self._defined_school: Optional[str] = None
+        self._defined_item_type: Optional[str] = None
+        self._defined_color: Optional[str] = None
+        self._defined_size: Optional[str] = None
+        self._defined_has_badge = tk.BooleanVar(value=False)
+        self._defined_qty_var = tk.StringVar(value="1")
+        self._defined_price_var = tk.StringVar(value="")
+        self._defined_path_var = tk.StringVar(value="")
 
         self._build()
 
@@ -5565,7 +5609,27 @@ class IncomeFrame(ttk.Frame):
         pkg_frame.columnconfigure(0, weight=1)
         pkg_frame.columnconfigure(1, weight=1)
 
-        grid = ttk.LabelFrame(self, text="بيانات الصنف")
+        view_bar = ttk.Frame(self)
+        view_bar.pack(fill=tk.X, pady=(0, 6))
+        self._btn_undefined_view = ttk.Button(
+            view_bar,
+            text="أصناف غير معرفة",
+            command=lambda: self._switch_income_view("undefined"),
+        )
+        self._btn_undefined_view.pack(side=tk.LEFT, padx=(0, 6))
+        self._btn_defined_view = ttk.Button(
+            view_bar,
+            text="أصناف معرفة",
+            command=lambda: self._switch_income_view("defined"),
+        )
+        self._btn_defined_view.pack(side=tk.LEFT)
+
+        self._income_views = ttk.Frame(self)
+        self._income_views.pack(fill=tk.BOTH, expand=True)
+        self._undefined_view = ttk.Frame(self._income_views)
+        self._defined_view = ttk.Frame(self._income_views)
+
+        grid = ttk.LabelFrame(self._undefined_view, text="بيانات الصنف")
         grid.pack(fill=tk.BOTH, expand=True)
 
         # Specs comboboxes (no single 'size' field now)
@@ -5689,11 +5753,13 @@ class IncomeFrame(ttk.Frame):
         _btn_add = ttk.Button(pkg_btns, text="إضافة", command=self._on_add); _btn_add.pack(side=tk.LEFT)
         ToolTip(_btn_add, "إضافة الصنف بالكمية المحددة إلى المخزون")
 
-        btns = ttk.Frame(self)
-        btns.pack(fill=tk.X, pady=(12, 0))
+        btns = ttk.Frame(self._undefined_view)
+        btns.pack(side=tk.BOTTOM, fill=tk.X, pady=(12, 0))
         _btn_reset = ttk.Button(btns, text="تفريغ (يبقي المخزن/العبوة)", command=self._on_reset_keep_pkg); _btn_reset.pack(side=tk.LEFT, padx=8)
         ToolTip(_btn_reset, "مسح الحقول مع الإبقاء على رقم المخزن والعبوة")
         # removed "إضافة مقاسات متعددة…" button (inline grid used instead)
+
+        self._build_defined_income_view(self._defined_view)
 
         # bindings
         self.wh.cb.bind("<<ComboboxSelected>>", lambda *_: (self._refresh_pkg_hints(), self._refresh_pkg_status()))
@@ -5702,6 +5768,408 @@ class IncomeFrame(ttk.Frame):
         # initial
         self._refresh_pkg_hints()
         self._refresh_pkg_status()
+        self._switch_income_view("undefined")
+
+    def _switch_income_view(self, mode: str) -> None:
+        mode = "defined" if mode == "defined" else "undefined"
+        self._income_view_mode.set(mode)
+        self._undefined_view.pack_forget()
+        self._defined_view.pack_forget()
+        if mode == "defined":
+            self._defined_view.pack(fill=tk.BOTH, expand=True)
+            if not self._defined_school:
+                self._defined_render_schools()
+        else:
+            self._undefined_view.pack(fill=tk.BOTH, expand=True)
+
+        for btn, is_active in (
+            (self._btn_undefined_view, mode == "undefined"),
+            (self._btn_defined_view, mode == "defined"),
+        ):
+            try:
+                btn.state(["disabled"] if is_active else ["!disabled"])
+            except Exception:
+                pass
+
+    def _build_defined_income_view(self, parent):
+        wrap = ttk.LabelFrame(parent, text="إضافة إلى صنف معرف")
+        wrap.pack(fill=tk.BOTH, expand=True)
+        wrap.columnconfigure(0, weight=3)
+        wrap.columnconfigure(1, weight=2)
+        wrap.rowconfigure(3, weight=1)
+
+        self._defined_crumb_var = tk.StringVar(value="اختر المدرسة")
+        ttk.Label(
+            wrap,
+            text="اختر المدرسة ثم النوع ثم اللون ثم المقاس لإضافة كمية على صنف موجود بالفعل.",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 4))
+        ttk.Label(wrap, textvariable=self._defined_crumb_var, font=_FONTS["h3"]).grid(
+            row=1, column=0, sticky="w", padx=8, pady=(0, 6)
+        )
+
+        filters = ttk.LabelFrame(wrap, text="فلاتر سريعة")
+        filters.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
+        filters.columnconfigure(0, weight=1)
+        filters.columnconfigure(1, weight=1)
+        filters.columnconfigure(2, weight=1)
+
+        self._defined_filter_school = LabeledCombobox(filters, "المدرسة", self.db, "school")
+        self._defined_filter_item = LabeledCombobox(filters, "النوع", self.db, "item_type")
+        self._defined_filter_color = LabeledCombobox(filters, "اللون", self.db, "color")
+        self._defined_filter_school.grid(row=0, column=0, padx=6, pady=6, sticky="ew")
+        self._defined_filter_item.grid(row=0, column=1, padx=6, pady=6, sticky="ew")
+        self._defined_filter_color.grid(row=0, column=2, padx=6, pady=6, sticky="ew")
+
+        self._defined_filter_school.set_supplier(
+            lambda: self.db.get_distinct_filtered("school", self._defined_filter_constraints("school")) or []
+        )
+        self._defined_filter_item.set_supplier(
+            lambda: self.db.get_distinct_filtered("item_type", self._defined_filter_constraints("item_type")) or []
+        )
+        self._defined_filter_color.set_supplier(
+            lambda: self.db.get_distinct_filtered("color", self._defined_filter_constraints("color")) or []
+        )
+        for w in (
+            self._defined_filter_school.cb,
+            self._defined_filter_item.cb,
+            self._defined_filter_color.cb,
+        ):
+            w.bind("<<ComboboxSelected>>", lambda _e: self._defined_on_filter_changed(), add="+")
+            w.bind("<KeyRelease>", lambda _e: self._defined_on_filter_changed(), add="+")
+
+        grid_wrap = ttk.Frame(wrap)
+        grid_wrap.grid(row=3, column=0, sticky="nsew", padx=(8, 4), pady=(0, 8))
+        grid_wrap.columnconfigure(0, weight=1)
+        grid_wrap.rowconfigure(0, weight=1)
+
+        self._defined_canvas = tk.Canvas(grid_wrap, highlightthickness=0)
+        defined_scroll = ttk.Scrollbar(grid_wrap, orient="vertical", command=self._defined_canvas.yview)
+        self._defined_canvas.configure(yscrollcommand=defined_scroll.set)
+        self._defined_canvas.grid(row=0, column=0, sticky="nsew")
+        defined_scroll.grid(row=0, column=1, sticky="ns")
+        self._defined_grid_host = ttk.Frame(self._defined_canvas)
+        self._defined_grid_window = self._defined_canvas.create_window((0, 0), window=self._defined_grid_host, anchor="nw")
+        self._defined_grid_host.bind("<Configure>", lambda _e=None: self._defined_sync_canvas())
+        self._defined_canvas.bind("<Configure>", lambda _e=None: self._defined_sync_canvas())
+        _bind_mousewheel(grid_wrap, self._defined_canvas)
+
+        side = ttk.LabelFrame(wrap, text="بيانات الإضافة")
+        side.grid(row=3, column=1, sticky="nsew", padx=(4, 8), pady=(0, 8))
+        side.columnconfigure(1, weight=1)
+
+        ttk.Label(side, text="الاختيار").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
+        ttk.Label(side, textvariable=self._defined_path_var, wraplength=260, justify="left").grid(
+            row=0, column=1, sticky="ew", padx=8, pady=(8, 4)
+        )
+        ttk.Label(side, text="السعر الحالي").grid(row=1, column=0, sticky="w", padx=8, pady=4)
+        ttk.Label(side, textvariable=self._defined_price_var).grid(row=1, column=1, sticky="w", padx=8, pady=4)
+        ttk.Label(side, text="الكمية المضافة").grid(row=2, column=0, sticky="w", padx=8, pady=4)
+        ttk.Entry(side, textvariable=self._defined_qty_var, width=12).grid(row=2, column=1, sticky="w", padx=8, pady=4)
+        ttk.Checkbutton(side, text="بادج", variable=self._defined_has_badge).grid(
+            row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 8)
+        )
+
+        action_bar = ttk.Frame(side)
+        action_bar.grid(row=4, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 4))
+        ttk.Button(action_bar, text="إضافة", command=self._on_add_defined).pack(side=tk.LEFT)
+        ttk.Button(action_bar, text="تفريغ الاختيار", command=self._defined_reset_selection).pack(side=tk.LEFT, padx=(6, 0))
+
+        pkg_actions = ttk.Frame(side)
+        pkg_actions.grid(row=5, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 8))
+        ttk.Button(pkg_actions, text="تفريغ (يبقي المخزن/العبوة)", command=self._on_reset_keep_pkg).pack(side=tk.LEFT)
+        ttk.Button(pkg_actions, text="إغلاق العبوة", command=self._close_current_package).pack(side=tk.RIGHT)
+
+        self._defined_size_rows: Dict[str, Dict[str, Any]] = {}
+        self._defined_update_summary()
+
+    def _defined_sync_canvas(self) -> None:
+        try:
+            self._defined_canvas.configure(scrollregion=self._defined_canvas.bbox("all"))
+            self._defined_canvas.itemconfigure(self._defined_grid_window, width=self._defined_canvas.winfo_width())
+        except Exception:
+            pass
+
+    def _defined_clear_grid(self) -> None:
+        for child in self._defined_grid_host.winfo_children():
+            child.destroy()
+        try:
+            self._defined_canvas.yview_moveto(0)
+        except Exception:
+            pass
+
+    def _defined_make_buttons(self, values: List[str], command, *, cols: int = 4) -> None:
+        self._defined_clear_grid()
+        if not values:
+            ttk.Label(self._defined_grid_host, text="لا توجد بيانات مطابقة.").pack(anchor="w", padx=8, pady=8)
+            return
+        row_frame = None
+        for i, value in enumerate(values):
+            if i % cols == 0:
+                row_frame = ttk.Frame(self._defined_grid_host)
+                row_frame.pack(fill=tk.X, padx=4, pady=2)
+            ttk.Button(row_frame, text=value, command=lambda v=value: command(v)).pack(
+                side=tk.LEFT, padx=3, pady=3, fill=tk.X, expand=True
+            )
+
+    def _defined_add_back_button(self, text: str, command) -> None:
+        ttk.Button(self._defined_grid_host, text=text, command=command).pack(anchor="w", padx=8, pady=(6, 8))
+
+    def _defined_filter_constraints(self, exclude_field: str) -> Dict[str, Any]:
+        constraints: Dict[str, Any] = {}
+        school = (self._defined_filter_school.get() or "").strip()
+        item_type = (self._defined_filter_item.get() or "").strip()
+        color = (self._defined_filter_color.get() or "").strip()
+        if exclude_field != "school" and school:
+            constraints["school"] = school
+        if exclude_field != "item_type" and item_type:
+            constraints["item_type"] = item_type
+        if exclude_field != "color" and color:
+            constraints["color"] = color
+        return constraints
+
+    def _defined_refresh_filter_combos(self) -> None:
+        for w in (
+            self._defined_filter_school,
+            self._defined_filter_item,
+            self._defined_filter_color,
+        ):
+            try:
+                w.refresh_values()
+            except Exception:
+                pass
+
+    def _defined_on_filter_changed(self) -> None:
+        self._defined_refresh_filter_combos()
+        school_filter = (self._defined_filter_school.get() or "").strip()
+        item_filter = (self._defined_filter_item.get() or "").strip()
+        color_filter = (self._defined_filter_color.get() or "").strip()
+        if school_filter and self._defined_school and school_filter.casefold() != self._defined_school.casefold():
+            self._defined_school = None
+            self._defined_item_type = None
+            self._defined_color = None
+            self._defined_size = None
+        elif item_filter and self._defined_item_type and item_filter.casefold() != self._defined_item_type.casefold():
+            self._defined_item_type = None
+            self._defined_color = None
+            self._defined_size = None
+        elif color_filter and self._defined_color and color_filter.casefold() != self._defined_color.casefold():
+            self._defined_color = None
+            self._defined_size = None
+        if self._defined_color:
+            self._defined_render_sizes()
+        elif self._defined_item_type:
+            self._defined_select_item(self._defined_item_type)
+        elif self._defined_school:
+            self._defined_select_school(self._defined_school)
+        else:
+            self._defined_render_schools()
+
+    def _defined_update_summary(self) -> None:
+        parts = []
+        if self._defined_school:
+            parts.append(self._defined_school)
+        if self._defined_item_type:
+            parts.append(self._defined_item_type)
+        if self._defined_color:
+            parts.append(self._defined_color)
+        if self._defined_size:
+            parts.append(self._defined_size)
+        self._defined_path_var.set(" / ".join(parts) if parts else "لم يتم اختيار صنف بعد")
+
+    def _defined_reset_selection(self) -> None:
+        self._defined_school = None
+        self._defined_item_type = None
+        self._defined_color = None
+        self._defined_size = None
+        self._defined_filter_school.set("")
+        self._defined_filter_item.set("")
+        self._defined_filter_color.set("")
+        self._defined_qty_var.set("1")
+        self._defined_price_var.set("")
+        self._defined_has_badge.set(False)
+        self._defined_size_rows = {}
+        self._defined_update_summary()
+        self._defined_refresh_filter_combos()
+        self._defined_render_schools()
+
+    def _defined_render_schools(self) -> None:
+        self._defined_school = None
+        self._defined_item_type = None
+        self._defined_color = None
+        self._defined_size = None
+        self._defined_price_var.set("")
+        self._defined_crumb_var.set("اختر المدرسة")
+        self._defined_update_summary()
+        schools = self.db.get_distinct_filtered("school", self._defined_filter_constraints("school")) or []
+        self._defined_make_buttons(schools, self._defined_select_school)
+
+    def _defined_select_school(self, school: str) -> None:
+        if not school:
+            self._defined_render_schools()
+            return
+        self._defined_school = school
+        self._defined_item_type = None
+        self._defined_color = None
+        self._defined_size = None
+        self._defined_price_var.set("")
+        self._defined_crumb_var.set(f"{school} ← اختر النوع")
+        self._defined_update_summary()
+        constraints = self._defined_filter_constraints("item_type")
+        constraints["school"] = school
+        items = self.db.get_distinct_filtered("item_type", constraints) or []
+        self._defined_make_buttons(items, self._defined_select_item)
+        self._defined_add_back_button("رجوع إلى المدارس", self._defined_render_schools)
+
+    def _defined_select_item(self, item_type: str) -> None:
+        if not item_type:
+            self._defined_select_school(self._defined_school or "")
+            return
+        self._defined_item_type = item_type
+        self._defined_color = None
+        self._defined_size = None
+        self._defined_price_var.set("")
+        self._defined_crumb_var.set(f"{self._defined_school} / {item_type} ← اختر اللون")
+        self._defined_update_summary()
+        constraints = self._defined_filter_constraints("color")
+        constraints["school"] = self._defined_school
+        constraints["item_type"] = item_type
+        colors = self.db.get_distinct_filtered("color", constraints) or []
+        self._defined_make_buttons(colors, self._defined_select_color)
+        self._defined_add_back_button("رجوع إلى الأنواع", lambda: self._defined_select_school(self._defined_school or ""))
+
+    def _defined_select_color(self, color: str) -> None:
+        if not color:
+            self._defined_select_item(self._defined_item_type or "")
+            return
+        self._defined_color = color
+        self._defined_size = None
+        self._defined_price_var.set("")
+        self._defined_crumb_var.set(
+            f"{self._defined_school} / {self._defined_item_type} / {color} ← اختر المقاس"
+        )
+        self._defined_update_summary()
+        self._defined_render_sizes()
+
+    def _defined_render_sizes(self) -> None:
+        school = self._defined_school or ""
+        item_type = self._defined_item_type or ""
+        color = self._defined_color or ""
+        size_rows = self._defined_collect_size_rows(school, item_type, color)
+        self._defined_size_rows = {str(r.get("size") or "").strip(): r for r in size_rows}
+        labels = []
+        for row in size_rows:
+            size = str(row.get("size") or "").strip()
+            if not size:
+                continue
+            labels.append(f"{size} ({int(row.get('count') or 0)})")
+        self._defined_make_buttons(labels, self._defined_select_size)
+        self._defined_add_back_button("رجوع إلى الألوان", lambda: self._defined_select_item(self._defined_item_type or ""))
+
+    def _defined_collect_size_rows(self, school: str, item_type: str, color: str) -> List[Dict[str, Any]]:
+        sizes: List[str] = []
+        profile = self.db.get_size_profile(item_type, school, color)
+        if profile:
+            r1s, r1e, r2s, r2e, has_alpha = profile
+            sizes.extend(merged_numeric_size_labels_from_profile(r1s, r1e, r2s, r2e))
+            if has_alpha:
+                sizes.extend(ALPHA_SIZES)
+        else:
+            seen = set()
+            try:
+                for row in self.db.current_inventory({
+                    "school": school,
+                    "item_type": item_type,
+                    "color": color,
+                }):
+                    size = str(row.get("size") or "").strip()
+                    if size and size not in seen:
+                        seen.add(size)
+                        sizes.append(size)
+            except Exception:
+                pass
+
+        rows: List[Dict[str, Any]] = []
+        for size in sizes:
+            try:
+                rows.append(self.db._size_row(school, item_type, color, size))
+            except Exception:
+                rows.append({"size": size, "count": 0, "last_price": None})
+        return rows
+
+    def _defined_select_size(self, label: str) -> None:
+        size = label.split(" (", 1)[0].strip()
+        self._defined_size = size
+        self._defined_update_summary()
+        row = self._defined_size_rows.get(size, {})
+        price = row.get("last_price")
+        if price is None:
+            try:
+                price = self.db.get_effective_price(
+                    self._defined_item_type or "",
+                    self._defined_school or "",
+                    self._defined_color or "",
+                    size,
+                )
+            except Exception:
+                price = None
+        if price is None:
+            self._defined_price_var.set("غير معروف")
+        else:
+            try:
+                self._defined_price_var.set(f"{float(price):.2f}")
+            except Exception:
+                self._defined_price_var.set(str(price))
+
+    def _on_add_defined(self) -> None:
+        w = self._parse_int_or_none(self.wh.get())
+        p = self._parse_int_or_none(self.pkg.get())
+        if not (w and p and w >= 1 and p >= 1):
+            messagebox.showerror("بيانات ناقصة", "أدخل رقم المخزن والعبوة بشكل صحيح (>= 1).")
+            return
+        if not all([self._defined_school, self._defined_item_type, self._defined_color, self._defined_size]):
+            messagebox.showwarning("بيانات ناقصة", "اختر المدرسة والنوع واللون والمقاس أولاً.", parent=self)
+            return
+        try:
+            qty = int((self._defined_qty_var.get() or "").strip())
+        except Exception:
+            qty = 0
+        if qty <= 0:
+            messagebox.showwarning("كمية غير صالحة", "أدخل كمية أكبر من صفر.", parent=self)
+            return
+
+        price_txt = (self._defined_price_var.get() or "").strip()
+        price = None
+        if price_txt and price_txt != "غير معروف":
+            try:
+                price = float(price_txt)
+            except Exception:
+                price = None
+
+        try:
+            self.db.ensure_package_open(w, p)
+            self.db.add_stock(
+                item_type=self._defined_item_type or "",
+                school=self._defined_school or "",
+                color=self._defined_color or "",
+                size=self._defined_size or "",
+                warehouse_no=w,
+                package_no=p,
+                unit_price=price,
+                count=qty,
+                has_badge=1 if self._defined_has_badge.get() else 0,
+            )
+        except Exception as ex:
+            messagebox.showerror("فشل الإضافة", str(ex), parent=self)
+            return
+
+        self._defined_qty_var.set("1")
+        self._defined_has_badge.set(False)
+        self._refresh_pkg_hints()
+        self._refresh_pkg_status()
+        self._defined_render_sizes()
+        if self._defined_size:
+            self._defined_select_size(self._defined_size)
+        show_toast(self, "تمت إضافة الكمية بنجاح")
 
     def _income_constraints(self, exclude_field: str) -> dict:
         """Build a constraints dict from the other two spec fields (for cascading)."""
@@ -5807,30 +6275,16 @@ class IncomeFrame(ttk.Frame):
             a, b = label.split("→")
             return int(a.strip()), int(b.strip())
 
-        # collect selected ranges
-        for lbl in (self._income_r1.get(), self._income_r2.get()):
-            pair = _parse_range(lbl)
-            if pair:
-                numeric_ranges.append(pair)
+        r1 = _parse_range(self._income_r1.get())
+        r2 = _parse_range(self._income_r2.get())
+        sizes = merged_numeric_size_labels_from_profile(
+            r1[0] if r1 else None,
+            r1[1] if r1 else None,
+            r2[0] if r2 else None,
+            r2[1] if r2 else None,
+        )
 
-        # --- MERGE OVERLAPPING RANGES ---
-        numeric_ranges.sort()
-        merged = []
-
-        for start, end in numeric_ranges:
-            if not merged:
-                merged.append([start, end])
-            else:
-                last_start, last_end = merged[-1]
-                if start <= last_end:  # overlap or touch
-                    merged[-1][1] = max(last_end, end)
-                else:
-                    merged.append([start, end])
-
-        # --- EXPAND MERGED RANGES ---
-        sizes = []
-        for start, end in merged:
-            sizes.extend(str(x) for x in range(start, end + 1, 2))
+        numeric_ranges = []
 
         # alpha sizes
         if self._income_has_alpha.get():
@@ -5958,6 +6412,19 @@ class IncomeFrame(ttk.Frame):
         self._sizes_inner.update_idletasks()
 
         self.has_badge.set(False)
+        self._defined_school = None
+        self._defined_item_type = None
+        self._defined_color = None
+        self._defined_size = None
+        self._defined_qty_var.set("1")
+        self._defined_price_var.set("")
+        self._defined_has_badge.set(False)
+        self._defined_size_rows = {}
+        self._defined_update_summary()
+        try:
+            self._defined_render_schools()
+        except Exception:
+            pass
 
         self._refresh_pkg_status()
 

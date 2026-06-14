@@ -136,6 +136,149 @@ def _apply_size_profile_rows(conn: sqlite3.Connection, profiles: Any) -> int:
     return n
 
 
+def _delete_old_spec_history_if_unused(
+    conn: sqlite3.Connection,
+    field: str,
+    old_value: str,
+) -> None:
+    if field not in ("item_type", "school", "color", "size"):
+        return
+    value = _clean(old_value)
+    if not value:
+        return
+    row = conn.execute(
+        f"""
+        SELECT 1
+          FROM stocks
+         WHERE LOWER(TRIM({field})) = LOWER(TRIM(?))
+         LIMIT 1
+        """,
+        (value,),
+    ).fetchone()
+    if not row:
+        row = conn.execute(
+            f"""
+            SELECT 1
+              FROM bill_items
+             WHERE LOWER(TRIM({field})) = LOWER(TRIM(?))
+             LIMIT 1
+            """,
+            (value,),
+        ).fetchone()
+    if not row:
+        conn.execute(
+            "DELETE FROM spec_history WHERE field = ? AND LOWER(TRIM(value)) = LOWER(TRIM(?))",
+            (field, value),
+        )
+
+
+def apply_spec_renamed(
+    conn: sqlite3.Connection,
+    payload: Dict[str, Any],
+    event_uuid: str,
+) -> Dict[str, Any]:
+    old_spec_raw = payload.get("old_spec") or {}
+    new_spec_raw = payload.get("new_spec") or {}
+    if not isinstance(old_spec_raw, dict) or not isinstance(new_spec_raw, dict):
+        raise ApplyError("SPEC_RENAMED payload must include old_spec and new_spec")
+
+    fields = ("item_type", "school", "color", "size")
+    old_spec = {fld: _clean(old_spec_raw.get(fld)) for fld in fields}
+    new_spec = {fld: _clean(new_spec_raw.get(fld)) for fld in fields}
+    if not all(old_spec.values()) or not all(new_spec.values()):
+        raise ApplyError("SPEC_RENAMED requires complete old/new specs")
+    if old_spec == new_spec:
+        return {"skipped": True, "reason": "old and new specs are identical"}
+
+    set_sql = ", ".join(f"{fld}=?" for fld in fields)
+    set_args = tuple(new_spec[fld] for fld in fields)
+    where_sql = " AND ".join(f"LOWER(TRIM({fld})) = LOWER(TRIM(?))" for fld in fields)
+    where_args = tuple(old_spec[fld] for fld in fields)
+
+    updated_tables = 0
+    for table in (
+        "stocks",
+        "movements",
+        "bill_items",
+        "reservations",
+        "reservation_alerts",
+        "incoming_shipment_items_pending",
+    ):
+        try:
+            cur = conn.execute(
+                f"UPDATE {table} SET {set_sql} WHERE {where_sql}",
+                (*set_args, *where_args),
+            )
+            updated_tables += int(cur.rowcount or 0)
+        except sqlite3.OperationalError:
+            pass
+
+    old_item = old_spec["item_type"]
+    new_item = new_spec["item_type"]
+    if old_item != new_item:
+        try:
+            row = conn.execute(
+                "SELECT default_price FROM item_defaults WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))",
+                (old_item,),
+            ).fetchone()
+            if row and row[0] is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO item_defaults(item_type, default_price) VALUES(?, ?)",
+                    (new_item, float(row[0])),
+                )
+                conn.execute(
+                    "DELETE FROM item_defaults WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))",
+                    (old_item,),
+                )
+        except sqlite3.OperationalError:
+            pass
+
+    old_prof_key = (old_spec["item_type"], old_spec["school"], old_spec["color"])
+    new_prof_key = (new_spec["item_type"], new_spec["school"], new_spec["color"])
+    if old_prof_key != new_prof_key:
+        try:
+            conn.execute(
+                """
+                INSERT INTO size_profiles
+                    (item_type, school, color,
+                     num_start_1, num_end_1, num_start_2, num_end_2,
+                     has_alpha, updated_at)
+                SELECT ?, ?, ?,
+                       num_start_1, num_end_1, num_start_2, num_end_2,
+                       has_alpha, datetime('now')
+                  FROM size_profiles
+                 WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                ON CONFLICT(item_type, school, color) DO NOTHING
+                """,
+                (*new_prof_key, *old_prof_key),
+            )
+            conn.execute(
+                """
+                DELETE FROM size_profiles
+                 WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                """,
+                old_prof_key,
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    _upsert_spec_history(conn, new_spec)
+    for fld in fields:
+        if old_spec[fld] != new_spec[fld]:
+            _delete_old_spec_history_if_unused(conn, fld, old_spec[fld])
+
+    return {
+        "updated_rows": int(updated_tables),
+        "old_spec": old_spec,
+        "new_spec": new_spec,
+        "event_uuid": str(event_uuid),
+    }
+
+
 def apply_stock_transfer_out(
     conn: sqlite3.Connection,
     payload: Dict[str, Any],
@@ -1151,6 +1294,7 @@ _POS_REGISTRY: Dict[str, ApplierFn] = {
     "STOCK_TRANSFER_OUT": apply_stock_transfer_out,
     "PRICE_UPDATE":       apply_price_update,
     "CATALOG_UPSERT":     apply_catalog_upsert,
+    "SPEC_RENAMED":       apply_spec_renamed,
     "REMOTE_RESERVATION_REQUEST": apply_remote_reservation_request,
 }
 
