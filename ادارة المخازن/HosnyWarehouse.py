@@ -950,6 +950,19 @@ class SqliteDatabase:
                 ON shipment_receipt_reviews(shown_at, created_at DESC);
         """)
 
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS branch_cash_receipts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                branch_device TEXT NOT NULL,
+                amount REAL NOT NULL,
+                received_at TEXT NOT NULL,
+                note TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_branch_cash_receipts_branch_date
+                ON branch_cash_receipts(branch_device, received_at DESC);
+        """)
+
         # ------------------- Sync layer (Phase 1) -------------------
         # Additive: creates sync_outbox/inbox/state/device_identity tables
         # and backfills a `uuid` column on every syncable domain table.
@@ -1401,6 +1414,9 @@ class SqliteDatabase:
         where = [
             "COALESCE(b.status,'CONFIRMED')='CONFIRMED'",
             "(b.bill_type='SALE' OR b.bill_type IS NULL)",
+            "LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))",
+            "LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('الى المصنع'))",
+            "UPPER(TRIM(COALESCE(b.customer,''))) != 'WAREHOUSE'",
             f"LOWER(TRIM(bi.school)) IN ({placeholders})",
         ]
         args: List[Any] = [s.lower() for s in cleaned]
@@ -3702,9 +3718,11 @@ class SqliteDatabase:
                 "shipment_qty": 0,
                 "shipment_value": 0.0,
                 "cash_net": 0.0,
+                "actual_received": 0.0,
                 "stock_qty": 0,
                 "stock_value": 0.0,
                 "cycle_gap": 0.0,
+                "actual_gap": 0.0,
             }
 
         # 1) Warehouse branch shipments
@@ -3749,6 +3767,14 @@ class SqliteDatabase:
                 out[dev]["cash_net"] = float((row[0] if row else 0.0) or 0.0)
             except sqlite3.OperationalError:
                 out[dev]["cash_net"] = 0.0
+
+        # 2b) Manual actual cash received at warehouse
+        for dev in approved:
+            out[dev]["actual_received"] = self.sum_branch_cash_receipts(
+                branch_device=dev,
+                date_from=date_from,
+                date_to=date_to,
+            )
 
         # 3) Current stock value from latest snapshot source per branch
         latest_src: Dict[str, str] = {}
@@ -3797,10 +3823,96 @@ class SqliteDatabase:
         for dev in approved:
             b = out[dev]
             b["cycle_gap"] = float(b["shipment_value"]) - float(b["cash_net"]) - float(b["stock_value"])
+            b["actual_gap"] = float(b["shipment_value"]) - float(b["actual_received"]) - float(b["stock_value"])
 
         rows = list(out.values())
         rows.sort(key=lambda r: str(r.get("branch_name") or ""))
         return rows
+
+    def add_branch_cash_receipt(
+        self,
+        branch_device: str,
+        amount: float,
+        *,
+        received_at: Optional[str] = None,
+        note: str = "",
+    ) -> int:
+        dev = canonical_branch_device_name(branch_device, DEFAULT_BRANCH_POS_NAMES) or str(branch_device or "").strip()
+        if not dev:
+            raise ValueError("اختر الفرع أولاً.")
+        try:
+            amt = float(amount)
+        except (TypeError, ValueError):
+            raise ValueError("المبلغ غير صالح.")
+        if amt < 0:
+            raise ValueError("المبلغ يجب أن يكون صفراً أو أكبر.")
+        dt_txt = str(received_at or "").strip() or now_iso()[:10]
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                INSERT INTO branch_cash_receipts(branch_device, amount, received_at, note, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (dev, amt, dt_txt[:10], str(note or "").strip(), now_iso()),
+            )
+            return int(cur.lastrowid)
+
+    def delete_branch_cash_receipt(self, receipt_id: int) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM branch_cash_receipts WHERE id = ?", (int(receipt_id),))
+
+    def list_branch_cash_receipts(
+        self,
+        branch_device: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        where = ["1=1"]
+        args: List[Any] = []
+        dev = canonical_branch_device_name(branch_device, DEFAULT_BRANCH_POS_NAMES) if branch_device else None
+        if dev:
+            where.append("branch_device = ?")
+            args.append(dev)
+        if date_from:
+            where.append("received_at >= ?")
+            args.append(str(date_from)[:10])
+        if date_to:
+            where.append("received_at <= ?")
+            args.append(str(date_to)[:10])
+        cur = self.conn.execute(
+            f"""
+            SELECT id, branch_device, amount, received_at, note, created_at
+            FROM branch_cash_receipts
+            WHERE {' AND '.join(where)}
+            ORDER BY received_at DESC, id DESC
+            """,
+            tuple(args),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def sum_branch_cash_receipts(
+        self,
+        branch_device: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+    ) -> float:
+        where = ["1=1"]
+        args: List[Any] = []
+        dev = canonical_branch_device_name(branch_device, DEFAULT_BRANCH_POS_NAMES) if branch_device else None
+        if dev:
+            where.append("branch_device = ?")
+            args.append(dev)
+        if date_from:
+            where.append("received_at >= ?")
+            args.append(str(date_from)[:10])
+        if date_to:
+            where.append("received_at <= ?")
+            args.append(str(date_to)[:10])
+        row = self.conn.execute(
+            f"SELECT COALESCE(SUM(amount), 0) FROM branch_cash_receipts WHERE {' AND '.join(where)}",
+            tuple(args),
+        ).fetchone()
+        return float((row[0] if row else 0.0) or 0.0)
 
     def get_branch_inventory_queue_item(self, queue_id: int) -> Optional[Dict[str, Any]]:
         row = self.conn.execute(
@@ -4594,7 +4706,12 @@ class SqliteDatabase:
                         m.direction = 'OUT_FACTORY'
                     AND (
                             b.id IS NULL
-                         OR LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))
+                         OR (
+                                (COALESCE(b.bill_type, 'SALE') = 'SALE' OR b.bill_type IS NULL)
+                            AND LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))
+                            AND LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('الى المصنع'))
+                            AND UPPER(TRIM(COALESCE(b.customer,''))) != 'WAREHOUSE'
+                            )
                         )
                     )
                   )
@@ -4617,7 +4734,12 @@ class SqliteDatabase:
             WHERE m.direction IN ('OUT', 'OUT_FACTORY')
               AND (
                     b.id IS NULL
-                 OR LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))
+                 OR (
+                        (COALESCE(b.bill_type, 'SALE') = 'SALE' OR b.bill_type IS NULL)
+                    AND LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))
+                    AND LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('الى المصنع'))
+                    AND UPPER(TRIM(COALESCE(b.customer,''))) != 'WAREHOUSE'
+                    )
               )
             {d_sql}
             GROUP BY m.item_type, m.school, m.color, m.size
@@ -11907,7 +12029,13 @@ class StatisticsFrame(ttk.Frame):
             cur = self.db.conn.cursor()
 
             # Bills stats (confirmed only)
-            where = ["COALESCE(status,'CONFIRMED')='CONFIRMED'"]
+            where = [
+                "COALESCE(status,'CONFIRMED')='CONFIRMED'",
+                "(COALESCE(bill_type,'SALE')='SALE' OR bill_type IS NULL)",
+                "LOWER(TRIM(COALESCE(customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))",
+                "LOWER(TRIM(COALESCE(customer,''))) != LOWER(TRIM('الى المصنع'))",
+                "UPPER(TRIM(COALESCE(customer,''))) != 'WAREHOUSE'",
+            ]
             args: List[Any] = []
             if date_from:
                 where.append("date(created_at) >= date(?)")
@@ -11939,7 +12067,13 @@ class StatisticsFrame(ttk.Frame):
 
             # Top items
             self.top_tree.delete(*self.top_tree.get_children())
-            bi_where = ["COALESCE(b.status,'CONFIRMED')='CONFIRMED'"]
+            bi_where = [
+                "COALESCE(b.status,'CONFIRMED')='CONFIRMED'",
+                "(COALESCE(b.bill_type,'SALE')='SALE' OR b.bill_type IS NULL)",
+                "LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))",
+                "LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('الى المصنع'))",
+                "UPPER(TRIM(COALESCE(b.customer,''))) != 'WAREHOUSE'",
+            ]
             bi_args: List[Any] = []
             if date_from:
                 bi_where.append("date(b.created_at) >= date(?)")
@@ -11973,7 +12107,13 @@ class StatisticsFrame(ttk.Frame):
             else:
                 group_expr = "strftime('%Y-%m', b.created_at)"
 
-            trend_where = ["COALESCE(b.status,'CONFIRMED')='CONFIRMED'"]
+            trend_where = [
+                "COALESCE(b.status,'CONFIRMED')='CONFIRMED'",
+                "(COALESCE(b.bill_type,'SALE')='SALE' OR b.bill_type IS NULL)",
+                "LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))",
+                "LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('الى المصنع'))",
+                "UPPER(TRIM(COALESCE(b.customer,''))) != 'WAREHOUSE'",
+            ]
             trend_args: List[Any] = []
             if date_from:
                 trend_where.append("date(b.created_at) >= date(?)")
@@ -12012,9 +12152,19 @@ class StatisticsFrame(ttk.Frame):
                        SUM(s.count) AS qty,
                        SUM(s.count * s.unit_price) AS value,
                        (SELECT MAX(m.ts) FROM movements m
+                        LEFT JOIN bills b ON b.id = m.bill_id
                         WHERE m.item_type = s.item_type AND m.school = s.school
                           AND m.color = s.color AND m.size = s.size
-                          AND m.direction IN ('OUT', 'OUT_FACTORY')) AS last_sale
+                          AND m.direction IN ('OUT', 'OUT_FACTORY')
+                          AND (
+                                b.id IS NULL
+                             OR (
+                                    (COALESCE(b.bill_type,'SALE')='SALE' OR b.bill_type IS NULL)
+                                AND LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))
+                                AND LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('الى المصنع'))
+                                AND UPPER(TRIM(COALESCE(b.customer,''))) != 'WAREHOUSE'
+                                )
+                          )) AS last_sale
                 FROM stocks s
                 WHERE s.count > 0
                 GROUP BY s.item_type, s.school, s.color, s.size
@@ -13041,11 +13191,11 @@ class PosBranchFinancialWindow(tk.Toplevel):
         top = ttk.Frame(self)
         top.pack(fill=tk.X, padx=8, pady=8)
         ttk.Label(top, text="من تاريخ:").pack(side=tk.RIGHT, padx=4)
-        self._df = tk.StringVar(value="")
-        ttk.Entry(top, textvariable=self._df, width=12).pack(side=tk.RIGHT)
+        self._df = DateField(top, "")
+        self._df.pack(side=tk.RIGHT)
         ttk.Label(top, text="إلى:").pack(side=tk.RIGHT, padx=4)
-        self._dt = tk.StringVar(value="")
-        ttk.Entry(top, textvariable=self._dt, width=12).pack(side=tk.RIGHT)
+        self._dt = DateField(top, "")
+        self._dt.pack(side=tk.RIGHT)
         ttk.Label(top, text="الجهاز:").pack(side=tk.RIGHT, padx=4)
         names = self.db.list_pos_reservations_mirror_device_picklist()
         self._dev = tk.StringVar(value="")
@@ -13161,35 +13311,40 @@ class BranchCycleSummaryWindow(tk.Toplevel):
     def __init__(self, master, db: "SqliteDatabase"):
         super().__init__(master)
         self.db = db
+        self._row_branch_by_iid: Dict[str, str] = {}
         self.title("ملخص دورة الفروع")
-        self.geometry("1180x600")
+        self.geometry("1400x760")
         self._build()
 
     def _build(self):
         top = ttk.Frame(self)
         top.pack(fill=tk.X, padx=8, pady=8)
         ttk.Label(top, text="من تاريخ:").pack(side=tk.RIGHT, padx=4)
-        self._df = tk.StringVar(value="")
-        ttk.Entry(top, textvariable=self._df, width=12).pack(side=tk.RIGHT)
+        self._df = DateField(top, "")
+        self._df.pack(side=tk.RIGHT)
         ttk.Label(top, text="إلى:").pack(side=tk.RIGHT, padx=4)
-        self._dt = tk.StringVar(value="")
-        ttk.Entry(top, textvariable=self._dt, width=12).pack(side=tk.RIGHT)
+        self._dt = DateField(top, "")
+        self._dt.pack(side=tk.RIGHT)
         ttk.Button(top, text="تحديث", command=self._refresh).pack(side=tk.LEFT)
+        ttk.Button(top, text="تسجيل متحصل فعلي…", command=self._add_actual_receipt).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(top, text="حذف المتحصل المحدد", command=self._delete_selected_receipt).pack(side=tk.LEFT, padx=(8, 0))
 
         cols = (
             "branch", "bills", "ship_qty", "ship_value", "cash_net",
-            "stock_qty", "stock_value", "gap",
+            "actual_received", "stock_qty", "stock_value", "gap", "actual_gap",
         )
-        self._tree = ttk.Treeview(self, columns=cols, show="headings", height=19)
+        self._tree = ttk.Treeview(self, columns=cols, show="headings", height=14)
         for col, txt, w in [
             ("branch", "الفرع", 160),
             ("bills", "عدد فواتير الشحن", 110),
             ("ship_qty", "كمية الشحنات", 95),
             ("ship_value", "قيمة الشحنات", 120),
             ("cash_net", "صافي المتحصل", 110),
+            ("actual_received", "المستلم فعلياً", 110),
             ("stock_qty", "كمية المخزون الحالي", 120),
             ("stock_value", "قيمة المخزون الحالي", 130),
-            ("gap", "فجوة الدورة", 120),
+            ("gap", "فجوة حسب POS", 120),
+            ("actual_gap", "الفجوة الفعلية", 120),
         ]:
             self._tree.heading(col, text=txt)
             self._tree.column(col, width=w, anchor="center")
@@ -13200,11 +13355,136 @@ class BranchCycleSummaryWindow(tk.Toplevel):
         self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         ysb.pack(side=tk.RIGHT, fill=tk.Y)
         _bind_mousewheel(self._tree)
+        self._tree.bind("<<TreeviewSelect>>", lambda _e: self._refresh_receipts())
+
+        receipts = ttk.LabelFrame(self, text="المتحصل الفعلي المسجل للفرع المحدد")
+        receipts.pack(fill=tk.BOTH, expand=False, padx=8, pady=(0, 8))
+        rwrap = ttk.Frame(receipts)
+        rwrap.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        rcols = ("id", "date", "branch", "amount", "note")
+        self._receipt_tree = ttk.Treeview(rwrap, columns=rcols, show="headings", height=7)
+        for col, txt, w in [
+            ("id", "#", 60),
+            ("date", "التاريخ", 110),
+            ("branch", "الفرع", 150),
+            ("amount", "المبلغ", 100),
+            ("note", "ملاحظة", 520),
+        ]:
+            self._receipt_tree.heading(col, text=txt)
+            self._receipt_tree.column(col, width=w, anchor="center" if col != "note" else "w")
+        rysb = ttk.Scrollbar(rwrap, orient="vertical", command=self._receipt_tree.yview)
+        self._receipt_tree.configure(yscrollcommand=rysb.set)
+        self._receipt_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        rysb.pack(side=tk.RIGHT, fill=tk.Y)
+        _bind_mousewheel(self._receipt_tree)
 
         self._sum = tk.StringVar(value="")
         ttk.Label(self, textvariable=self._sum).pack(fill=tk.X, padx=10, pady=(0, 8))
 
         self._refresh()
+
+    def _selected_branch_device(self) -> Optional[str]:
+        sel = self._tree.selection()
+        if not sel:
+            return None
+        return self._row_branch_by_iid.get(sel[0])
+
+    def _add_actual_receipt(self) -> None:
+        branch_device = self._selected_branch_device()
+        if not branch_device:
+            messagebox.showwarning("اختر الفرع", "اختر فرعاً من الجدول أولاً.", parent=self)
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("تسجيل متحصل فعلي")
+        dlg.transient(self)
+        dlg.grab_set()
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frm, text=f"الفرع: {branch_display_name(branch_device)}", font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(frm, text="التاريخ:").grid(row=1, column=0, sticky="e", padx=4, pady=4)
+        date_field = DateField(frm, "")
+        current_df = self._df.get()
+        if current_df:
+            date_field.set(current_df)
+        date_field.grid(row=1, column=1, sticky="w", padx=4, pady=4)
+
+        ttk.Label(frm, text="المبلغ:").grid(row=2, column=0, sticky="e", padx=4, pady=4)
+        amount_var = tk.StringVar()
+        ttk.Entry(frm, textvariable=amount_var, width=18).grid(row=2, column=1, sticky="w", padx=4, pady=4)
+
+        ttk.Label(frm, text="ملاحظة:").grid(row=3, column=0, sticky="ne", padx=4, pady=4)
+        note_txt = tk.Text(frm, width=40, height=4)
+        note_txt.grid(row=3, column=1, sticky="ew", padx=4, pady=4)
+        frm.columnconfigure(1, weight=1)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(8, 0))
+
+        def _save() -> None:
+            try:
+                amount = float((amount_var.get() or "").strip())
+            except Exception:
+                messagebox.showerror("مبلغ غير صالح", "أدخل مبلغاً رقمياً صحيحاً.", parent=dlg)
+                return
+            try:
+                self.db.add_branch_cash_receipt(
+                    branch_device,
+                    amount,
+                    received_at=date_field.get() or None,
+                    note=note_txt.get("1.0", tk.END).strip(),
+                )
+            except Exception as ex:
+                messagebox.showerror("فشل الحفظ", str(ex), parent=dlg)
+                return
+            dlg.destroy()
+            self._refresh()
+
+        ttk.Button(btns, text="إلغاء", command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="حفظ", command=_save).pack(side=tk.RIGHT, padx=6)
+
+    def _delete_selected_receipt(self) -> None:
+        sel = self._receipt_tree.selection()
+        if not sel:
+            messagebox.showwarning("اختر متحصلاً", "اختر سجل متحصل فعلي من القائمة أولاً.", parent=self)
+            return
+        vals = self._receipt_tree.item(sel[0], "values")
+        if not vals:
+            return
+        rid = int(vals[0])
+        if not messagebox.askyesno("تأكيد الحذف", "حذف المتحصل المحدد؟", parent=self):
+            return
+        try:
+            self.db.delete_branch_cash_receipt(rid)
+        except Exception as ex:
+            messagebox.showerror("فشل الحذف", str(ex), parent=self)
+            return
+        self._refresh()
+
+    def _refresh_receipts(self) -> None:
+        self._receipt_tree.delete(*self._receipt_tree.get_children())
+        branch_device = self._selected_branch_device()
+        rows = self.db.list_branch_cash_receipts(
+            branch_device=branch_device,
+            date_from=(self._df.get() or "").strip() or None,
+            date_to=(self._dt.get() or "").strip() or None,
+        )
+        for r in rows:
+            self._receipt_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    int(r.get("id") or 0),
+                    r.get("received_at") or "",
+                    branch_display_name(r.get("branch_device") or ""),
+                    f"{float(r.get('amount') or 0.0):.2f}",
+                    r.get("note") or "",
+                ),
+            )
+        apply_zebra_tags(self._receipt_tree)
 
     def _refresh(self):
         self._tree.delete(*self._tree.get_children())
@@ -13213,14 +13493,19 @@ class BranchCycleSummaryWindow(tk.Toplevel):
         rows = self.db.list_branch_cycle_reconciliation(df, dt)
         t_ship = 0.0
         t_cash = 0.0
+        t_actual = 0.0
         t_stock = 0.0
         t_gap = 0.0
+        t_actual_gap = 0.0
+        self._row_branch_by_iid.clear()
         for r in rows:
             t_ship += float(r.get("shipment_value") or 0.0)
             t_cash += float(r.get("cash_net") or 0.0)
+            t_actual += float(r.get("actual_received") or 0.0)
             t_stock += float(r.get("stock_value") or 0.0)
             t_gap += float(r.get("cycle_gap") or 0.0)
-            self._tree.insert(
+            t_actual_gap += float(r.get("actual_gap") or 0.0)
+            iid = self._tree.insert(
                 "",
                 tk.END,
                 values=(
@@ -13229,16 +13514,21 @@ class BranchCycleSummaryWindow(tk.Toplevel):
                     int(r.get("shipment_qty") or 0),
                     f"{float(r.get('shipment_value') or 0.0):.2f}",
                     f"{float(r.get('cash_net') or 0.0):.2f}",
+                    f"{float(r.get('actual_received') or 0.0):.2f}",
                     int(r.get("stock_qty") or 0),
                     f"{float(r.get('stock_value') or 0.0):.2f}",
                     f"{float(r.get('cycle_gap') or 0.0):.2f}",
+                    f"{float(r.get('actual_gap') or 0.0):.2f}",
                 ),
             )
+            self._row_branch_by_iid[iid] = str(r.get("branch_device") or "")
         apply_zebra_tags(self._tree)
         self._sum.set(
-            f"إجمالي قيمة الشحنات: {t_ship:.2f}  |  إجمالي صافي المتحصل: {t_cash:.2f}  |  "
-            f"إجمالي قيمة المخزون الحالي: {t_stock:.2f}  |  الفجوة الكلية: {t_gap:.2f}"
+            f"إجمالي قيمة الشحنات: {t_ship:.2f}  |  إجمالي صافي المتحصل (POS): {t_cash:.2f}  |  "
+            f"إجمالي المستلم فعلياً: {t_actual:.2f}  |  إجمالي قيمة المخزون الحالي: {t_stock:.2f}  |  "
+            f"فجوة POS: {t_gap:.2f}  |  الفجوة الفعلية: {t_actual_gap:.2f}"
         )
+        self._refresh_receipts()
 
 
 # ------------------- App -------------------
@@ -13536,63 +13826,63 @@ class WarehouseApp(tk.Tk):
         menubar = tk.Menu(self)
         self.config(menu=menubar)
 
-        appearance = tk.Menu(menubar, tearoff=False)
         self._colorful_var = tk.BooleanVar(value=True)
         self._dark_var = tk.BooleanVar(value=False)
 
         def _toggle_theme():
             self._apply_colorful_theme(self._colorful_var.get())
+
         def _toggle_dark():
             self._dark_mode = self._dark_var.get()
             self._apply_dark_mode(self._dark_mode)
 
-        appearance.add_checkbutton(label="مظهر ملوّن", variable=self._colorful_var, command=_toggle_theme)
-        appearance.add_checkbutton(label="الوضع الليلي", variable=self._dark_var, command=_toggle_dark)
-        menubar.add_cascade(label="المظهر", menu=appearance)
+        warehouse_menu = tk.Menu(menubar, tearoff=False)
+        warehouse_menu.add_command(label="عرض المخزون (جدول)      Ctrl+I", command=self._open_inventory)
+        warehouse_menu.add_command(label="سجل الحركات", command=self._open_movements)
+        warehouse_menu.add_command(label="سجل الفواتير      Ctrl+P", command=self._open_bills_history)
+        warehouse_menu.add_separator()
+        warehouse_menu.add_command(label="تحويل بين المخازن", command=self._open_transfer)
+        warehouse_menu.add_command(label="جرد المخزون", command=self._open_audit)
+        menubar.add_cascade(label="إدارة المخزن", menu=warehouse_menu)
 
-        inv = tk.Menu(menubar, tearoff=False)
-        inv.add_command(label="عرض المخزون (جدول)      Ctrl+I", command=self._open_inventory)
-        inv.add_command(label="سجل الحركات", command=self._open_movements)
-        inv.add_command(label="تحويل بين المخازن", command=self._open_transfer)
-        inv.add_command(label="جرد المخزون", command=self._open_audit)
-        inv.add_separator()
-        inv.add_command(label="مخزون الفروع", command=self._open_branch_stock)
-        inv.add_command(label="منتجات الفروع غير المعالجة", command=self._open_branch_inventory_queue)
-        menubar.add_cascade(label="المخزون", menu=inv)
-
-        bills = tk.Menu(menubar, tearoff=False)
-        bills.add_command(label="السجل      Ctrl+P", command=self._open_bills_history)
-        bills.add_command(label="شحنات الفروع والوارد المتزامن…", command=self._open_branch_bills_sync_log)
-        menubar.add_cascade(label="الفواتير", menu=bills)
-
-        admin_menu = tk.Menu(menubar, tearoff=False)
-        admin_menu.add_command(label="إعدادات المدير…", command=self._open_admin)
-        menubar.add_cascade(label="المدير", menu=admin_menu)
-
-        shortcuts_menu = tk.Menu(menubar, tearoff=False)
-        shortcuts_menu.add_command(label="F1  - الوارد", state="disabled")
-        shortcuts_menu.add_command(label="F2  - المنصرف", state="disabled")
-        shortcuts_menu.add_command(label="F3  - المخزون", state="disabled")
-        shortcuts_menu.add_command(label="F4  - الفواتير", state="disabled")
-        shortcuts_menu.add_command(label="F5  - تحديث", state="disabled")
-        shortcuts_menu.add_command(label="F9  - لوحة التحكم", state="disabled")
-        shortcuts_menu.add_command(label="F11 - تشخيص المزامنة", state="disabled")
-        shortcuts_menu.add_command(label="F10 - الإحصائيات", state="disabled")
-        menubar.add_cascade(label="اختصارات", menu=shortcuts_menu)
+        branches_menu = tk.Menu(menubar, tearoff=False)
+        branches_menu.add_command(label="مخزون الفروع", command=self._open_branch_stock)
+        branches_menu.add_command(label="منتجات الفروع غير المعالجة", command=self._open_branch_inventory_queue)
+        branches_menu.add_separator()
+        branches_menu.add_command(label="سجل شحنات الفروع والوارد المتزامن…", command=self._open_branch_bills_sync_log)
+        branches_menu.add_command(label="حجوزات الفروع (مرآة)…", command=self._open_pos_reservations_mirror)
+        branches_menu.add_command(label="التدفقات المالية للفروع (يومي)…", command=self._open_pos_financial_by_day)
+        branches_menu.add_command(label="ملخص دورة الفروع…", command=self._open_branch_cycle_summary)
+        menubar.add_cascade(label="إدارة الفروع", menu=branches_menu)
 
         sync_menu = tk.Menu(menubar, tearoff=False)
         sync_menu.add_command(label="مزامنة الآن…", command=self._open_sync_dialog)
         sync_menu.add_command(label="إعدادات المزامنة…", command=self._open_sync_setup)
         sync_menu.add_separator()
         sync_menu.add_command(label="سجل تعديلات أسعار الفروع…", command=self._open_price_sync_audit)
-        sync_menu.add_separator()
-        sync_menu.add_command(label="سجل شحنات الفروع والوارد المتزامن…", command=self._open_branch_bills_sync_log)
-        sync_menu.add_command(label="حجوزات الفروع (مرآة)…", command=self._open_pos_reservations_mirror)
-        sync_menu.add_command(label="التدفقات المالية للفروع (يومي)…", command=self._open_pos_financial_by_day)
-        sync_menu.add_command(label="ملخص دورة الفروع…", command=self._open_branch_cycle_summary)
-        sync_menu.add_separator()
         sync_menu.add_command(label="تشخيص المزامنة (F11)", command=lambda: self._switch_tab("sync_diagnostics"))
-        menubar.add_cascade(label="المزامنة", menu=sync_menu)
+        menubar.add_cascade(label="إدارة المزامنة", menu=sync_menu)
+
+        system_menu = tk.Menu(menubar, tearoff=False)
+        system_menu.add_command(label="إعدادات المدير…", command=self._open_admin)
+        system_menu.add_separator()
+
+        appearance = tk.Menu(system_menu, tearoff=False)
+        appearance.add_checkbutton(label="مظهر ملوّن", variable=self._colorful_var, command=_toggle_theme)
+        appearance.add_checkbutton(label="الوضع الليلي", variable=self._dark_var, command=_toggle_dark)
+        system_menu.add_cascade(label="المظهر", menu=appearance)
+
+        shortcuts_menu = tk.Menu(system_menu, tearoff=False)
+        shortcuts_menu.add_command(label="F1  - الوارد", state="disabled")
+        shortcuts_menu.add_command(label="F2  - المنصرف", state="disabled")
+        shortcuts_menu.add_command(label="F3  - المخزون", state="disabled")
+        shortcuts_menu.add_command(label="F4  - الفواتير", state="disabled")
+        shortcuts_menu.add_command(label="F5  - تحديث", state="disabled")
+        shortcuts_menu.add_command(label="F9  - لوحة التحكم", state="disabled")
+        shortcuts_menu.add_command(label="F10 - الإحصائيات", state="disabled")
+        shortcuts_menu.add_command(label="F11 - تشخيص المزامنة", state="disabled")
+        system_menu.add_cascade(label="الاختصارات", menu=shortcuts_menu)
+        menubar.add_cascade(label="النظام", menu=system_menu)
 
         # ======== HEADER BAR (POS-like light + blue accents) ========
         _HBG = _UI["SURFACE"]

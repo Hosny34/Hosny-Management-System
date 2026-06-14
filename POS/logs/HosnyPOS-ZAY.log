@@ -192,3 +192,5 @@ Traceback (most recent call last):
 NameError: name 'add_context_menu' is not defined. Did you mean: '_add_context_menu'?
 2026-06-14 16:02:29 INFO hosny: ============================================================
 2026-06-14 16:02:29 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=14540, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-14 19:02:03 INFO hosny: ============================================================
+2026-06-14 19:02:03 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=26072, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)

@@ -3568,15 +3568,26 @@ class SqliteDatabase:
             where.append("LOWER(TRIM(color)) = LOWER(?)")
             args.append(color.strip())
         cur = self.conn.execute(f"""
-            SELECT item_type, school, color, size,
-                SUM(CASE WHEN direction='IN' THEN qty ELSE 0 END) as received,
-                SUM(CASE WHEN direction IN ('OUT','OUT_FACTORY') THEN qty ELSE 0 END) as sold,
-                SUM(CASE WHEN direction='RESERVE' THEN qty ELSE 0 END) as reserved,
-                SUM(CASE WHEN direction='ADJUST_OUT' THEN qty ELSE 0 END) as adjusted
-            FROM movements
+            SELECT m.item_type, m.school, m.color, m.size,
+                SUM(CASE WHEN m.direction='IN' THEN m.qty ELSE 0 END) as received,
+                SUM(
+                    CASE
+                        WHEN m.direction IN ('OUT','OUT_FACTORY')
+                         AND (
+                                m.bill_id IS NULL
+                             OR COALESCE(b.bill_type,'SALE')='SALE'
+                         )
+                        THEN m.qty
+                        ELSE 0
+                    END
+                ) as sold,
+                SUM(CASE WHEN m.direction='RESERVE' THEN m.qty ELSE 0 END) as reserved,
+                SUM(CASE WHEN m.direction='ADJUST_OUT' THEN m.qty ELSE 0 END) as adjusted
+            FROM movements m
+            LEFT JOIN bills b ON b.id = m.bill_id
             WHERE {' AND '.join(where)}
-            GROUP BY item_type, school, color, size
-            ORDER BY item_type, school, color, size
+            GROUP BY m.item_type, m.school, m.color, m.size
+            ORDER BY m.item_type, m.school, m.color, m.size
         """, args)
         return [dict(r) for r in cur.fetchall()]
 
