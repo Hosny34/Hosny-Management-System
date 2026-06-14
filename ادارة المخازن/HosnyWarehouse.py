@@ -196,6 +196,14 @@ def warehouse_item_sort_key(item_type: Any, color: Any = "") -> Tuple[Any, ...]:
     )
 
 
+def warehouse_size_sort_key(size: Any) -> Tuple[Any, ...]:
+    size_clean = _normalize_size_label(str(size or ""))
+    if size_clean.isdigit():
+        return (0, int(size_clean), "")
+    alpha_rank = {label: idx for idx, label in enumerate(ALPHA_SIZES, start=1)}
+    return (1, alpha_rank.get(size_clean, 999), size_clean.lower())
+
+
 def format_weight_kg(grams: Any) -> str:
     try:
         grams_val = float(grams or 0.0)
@@ -1171,11 +1179,7 @@ class SqliteDatabase:
         total_weight_grams = 0.0
 
         for row in movement_rows:
-            requested_qty = max(
-                0,
-                int((row.get("sold_branch_qty") if use_branch_only else row.get("sold_total_qty")) or 0)
-                - int((row.get("remaining_branch_qty") if use_branch_only else row.get("remaining_total_qty")) or 0)
-            )
+            requested_qty = int(row.get("requested_qty") or 0)
             if requested_qty <= 0:
                 continue
 
@@ -1232,27 +1236,27 @@ class SqliteDatabase:
         summary_rows = list(grouped.values())
         summary_rows.sort(
             key=lambda r: (
+                (r.get("color") or "").lower(),
                 (r.get("school") or "").lower(),
                 warehouse_item_priority(r.get("item_type")),
                 (r.get("item_type") or "").lower(),
-                (r.get("color") or "").lower(),
             )
         )
         detail_rows.sort(
             key=lambda r: (
+                (r.get("color") or "").lower(),
                 (r.get("school") or "").lower(),
                 warehouse_item_priority(r.get("item_type")),
                 (r.get("item_type") or "").lower(),
-                (r.get("color") or "").lower(),
                 _normalize_size_label(r.get("size") or "").lower(),
             )
         )
         missing.sort(
             key=lambda r: (
+                (r.get("color") or "").lower(),
                 (r.get("school") or "").lower(),
                 warehouse_item_priority(r.get("item_type")),
                 (r.get("item_type") or "").lower(),
-                (r.get("color") or "").lower(),
                 _normalize_size_label(r.get("size") or "").lower(),
             )
         )
@@ -2634,7 +2638,17 @@ class SqliteDatabase:
             )
 
         cur.close()
-        rows.sort(key=lambda r: warehouse_item_priority(r.get("item_type")))
+        rows.sort(
+            key=lambda r: (
+                warehouse_item_priority(r.get("item_type")),
+                (r.get("item_type") or "").lower(),
+                (r.get("school") or "").lower(),
+                (r.get("color") or "").lower(),
+                warehouse_size_sort_key(r.get("size")),
+                str(r.get("warehouse_no") or ""),
+                str(r.get("package_no") or ""),
+            )
+        )
         return rows
 
     # -------- Billing --------
@@ -4641,7 +4655,7 @@ class SqliteDatabase:
                 (r.get("item_type") or "").lower(),
                 (r.get("school") or "").lower(),
                 (r.get("color") or "").lower(),
-                (r.get("size") or "").lower(),
+                warehouse_size_sort_key(r.get("size")),
             )
         )
         return out
@@ -9507,7 +9521,7 @@ class MovementsWindow(tk.Toplevel):
         for r in rows:
             sold_qty = int((r.get("sold_branch_qty") if use_branch_only else r.get("sold_total_qty")) or 0)
             remaining_qty = int((r.get("remaining_branch_qty") if use_branch_only else r.get("remaining_total_qty")) or 0)
-            requested_qty = max(0, sold_qty - remaining_qty)
+            requested_qty = int(r.get("requested_qty") or 0)
             self.table.insert(
                 "", tk.END,
                 values=(
@@ -9526,11 +9540,7 @@ class MovementsWindow(tk.Toplevel):
             "sold_total_qty": sum(int((r.get("sold_branch_qty") if use_branch_only else r.get("sold_total_qty")) or 0) for r in rows),
             "reserved_qty": sum(int(r.get("reserved_qty") or 0) for r in rows),
             "remaining_total_qty": sum(int((r.get("remaining_branch_qty") if use_branch_only else r.get("remaining_total_qty")) or 0) for r in rows),
-            "requested_qty": sum(max(
-                0,
-                int((r.get("sold_branch_qty") if use_branch_only else r.get("sold_total_qty")) or 0)
-                - int((r.get("remaining_branch_qty") if use_branch_only else r.get("remaining_total_qty")) or 0)
-            ) for r in rows),
+            "requested_qty": sum(int(r.get("requested_qty") or 0) for r in rows),
         }
         sold_label = "إجمالي مباع الفرع" if use_branch_only else "إجمالي المباع"
         rem_label = "إجمالي متبقي الفرع" if use_branch_only else "إجمالي المتبقي (المخزن + الفروع)"
@@ -9580,11 +9590,7 @@ class MovementsWindow(tk.Toplevel):
             int(m.get("incoming_qty") or 0),
             int((m.get("sold_branch_qty") if str(self.fbranch.get() or "").strip() else m.get("sold_total_qty")) or 0),
             int((m.get("remaining_branch_qty") if str(self.fbranch.get() or "").strip() else m.get("remaining_total_qty")) or 0),
-            max(
-                0,
-                int((m.get("sold_branch_qty") if str(self.fbranch.get() or "").strip() else m.get("sold_total_qty")) or 0)
-                - int((m.get("remaining_branch_qty") if str(self.fbranch.get() or "").strip() else m.get("remaining_total_qty")) or 0)
-            ),
+            int(m.get("requested_qty") or 0),
             int(m.get("reserved_qty") or 0),
         ] for m in rows]
         try:
@@ -9629,11 +9635,7 @@ class MovementsWindow(tk.Toplevel):
             "incoming": sum(int(r.get("incoming_qty") or 0) for r in rows),
             "sold": sum(int((r.get("sold_branch_qty") if str(self.fbranch.get() or "").strip() else r.get("sold_total_qty")) or 0) for r in rows),
             "remaining": sum(int((r.get("remaining_branch_qty") if str(self.fbranch.get() or "").strip() else r.get("remaining_total_qty")) or 0) for r in rows),
-            "requested": sum(max(
-                0,
-                int((r.get("sold_branch_qty") if str(self.fbranch.get() or "").strip() else r.get("sold_total_qty")) or 0)
-                - int((r.get("remaining_branch_qty") if str(self.fbranch.get() or "").strip() else r.get("remaining_total_qty")) or 0)
-            ) for r in rows),
+            "requested": sum(int(r.get("requested_qty") or 0) for r in rows),
             "reserved": sum(int(r.get("reserved_qty") or 0) for r in rows),
         }
 
@@ -9648,7 +9650,7 @@ class MovementsWindow(tk.Toplevel):
                 f"<td class='num'>{int(r.get('incoming_qty') or 0)}</td>"
                 f"<td class='num'>{int((r.get('sold_branch_qty') if str(self.fbranch.get() or '').strip() else r.get('sold_total_qty')) or 0)}</td>"
                 f"<td class='num'>{int((r.get('remaining_branch_qty') if str(self.fbranch.get() or '').strip() else r.get('remaining_total_qty')) or 0)}</td>"
-                f"<td class='num'>{max(0, int((r.get('sold_branch_qty') if str(self.fbranch.get() or '').strip() else r.get('sold_total_qty')) or 0) - int((r.get('remaining_branch_qty') if str(self.fbranch.get() or '').strip() else r.get('remaining_total_qty')) or 0))}</td>"
+                f"<td class='num'>{int(r.get('requested_qty') or 0)}</td>"
                 f"<td class='num'>{int(r.get('reserved_qty') or 0)}</td>"
                 "</tr>"
             )

@@ -60,3 +60,23 @@ TypeError: 'str' object is not callable
 2026-06-04 10:17:26 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=16656, cwd=G:\TestManagementSystem\Hosny-Management-System\POS-ZAY)
 2026-06-09 16:05:15 INFO hosny: ============================================================
 2026-06-09 16:05:15 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=11172, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-09 17:28:58 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "HosnyPOS.py", line 9456, in _confirm_close
+    if not (item_type and school and color and size):
+            ^^^^^^^^^^^^^^
+  File "tkinter\__init__.py", line 2788, in destroy
+_tkinter.TclError: can't invoke "destroy" command: application has been destroyed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyPOS.py", line 9447, in <lambda>
+  File "HosnyPOS.py", line 9459, in _confirm_close
+    try:
+    
+  File "tkinter\messagebox.py", line 98, in showerror
+  File "tkinter\messagebox.py", line 76, in _show
+  File "tkinter\commondialog.py", line 45, in show
+_tkinter.TclError: can't invoke "tk_messageBox" command: application has been destroyed
