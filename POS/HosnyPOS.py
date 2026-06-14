@@ -7110,7 +7110,7 @@ class SchoolAccountsFrame(ttk.Frame):
             self._schools_var.set("كل المدارس")
 
     def _build(self):
-        ttk.Label(self, text="حسابات المدارس", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 12))
+        ttk.Label(self, text="حسابات المدارس", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 12))
 
         filters = ttk.Frame(self)
         filters.pack(fill=tk.X, pady=(0, 8))
@@ -7124,7 +7124,7 @@ class SchoolAccountsFrame(ttk.Frame):
         ttk.Button(filters, text="مسح الاختيار", command=self._clear_schools).pack(side=tk.LEFT, padx=8)
 
         self._schools_var = tk.StringVar(value="كل المدارس")
-        ttk.Label(self, textvariable=self._schools_var, foreground=_UI["TEXT_DIM"]).pack(anchor="w", pady=(0, 8))
+        ttk.Label(self, textvariable=self._schools_var, foreground="#64748b").pack(anchor="w", pady=(0, 8))
 
         summary = ttk.LabelFrame(self, text="ملخص")
         summary.pack(fill=tk.X, pady=(0, 8))
@@ -7159,7 +7159,7 @@ class SchoolAccountsFrame(ttk.Frame):
         self._tree.configure(yscrollcommand=ysb.set)
         self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
         ysb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 4), pady=4)
-        add_context_menu(self._tree)
+        _add_context_menu(self._tree, self)
         _bind_mousewheel(self._tree)
 
     def _pick_schools(self):

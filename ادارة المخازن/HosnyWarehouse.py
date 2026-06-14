@@ -2096,6 +2096,11 @@ class SqliteDatabase:
                     where.append(f"{k} = ?")
                     args.append(int(v))
 
+            unit_price_filter = filters.get("unit_price")
+            if unit_price_filter not in (None, ""):
+                where.append("unit_price = ?")
+                args.append(float(unit_price_filter))
+
 
         if not where:
             raise ValueError("No filter provided for price update.")
@@ -5927,6 +5932,73 @@ class IncomeFrame(ttk.Frame):
             constraints["color"] = color
         return constraints
 
+    def _defined_active_filters(self) -> Dict[str, Any]:
+        constraints: Dict[str, Any] = {}
+        school = (self._defined_filter_school.get() or "").strip()
+        item_type = (self._defined_filter_item.get() or "").strip()
+        color = (self._defined_filter_color.get() or "").strip()
+        if school:
+            constraints["school"] = school
+        if item_type:
+            constraints["item_type"] = item_type
+        if color:
+            constraints["color"] = color
+        return constraints
+
+    def _defined_filter_texts(self) -> Dict[str, str]:
+        return {
+            "school": (self._defined_filter_school.get() or "").strip(),
+            "item_type": (self._defined_filter_item.get() or "").strip(),
+            "color": (self._defined_filter_color.get() or "").strip(),
+        }
+
+    def _defined_filtered_inventory_rows(
+        self,
+        *,
+        school: Optional[str] = None,
+        item_type: Optional[str] = None,
+        color: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        rows = self.db.current_inventory({}) or []
+        texts = self._defined_filter_texts()
+        school_exact = (school or "").strip()
+        item_exact = (item_type or "").strip()
+        color_exact = (color or "").strip()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            row_school = str(row.get("school") or "").strip()
+            row_item = str(row.get("item_type") or "").strip()
+            row_color = str(row.get("color") or "").strip()
+            if not (row_school and row_item and row_color):
+                continue
+            if school_exact and row_school.casefold() != school_exact.casefold():
+                continue
+            if item_exact and row_item.casefold() != item_exact.casefold():
+                continue
+            if color_exact and row_color.casefold() != color_exact.casefold():
+                continue
+            if texts["school"] and texts["school"].casefold() not in row_school.casefold():
+                continue
+            if texts["item_type"] and texts["item_type"].casefold() not in row_item.casefold():
+                continue
+            if texts["color"] and texts["color"].casefold() not in row_color.casefold():
+                continue
+            out.append(row)
+        return out
+
+    @staticmethod
+    def _defined_unique_values(rows: List[Dict[str, Any]], field: str) -> List[str]:
+        seen = set()
+        values: List[str] = []
+        for row in rows:
+            value = str(row.get(field) or "").strip()
+            key = value.casefold()
+            if value and key not in seen:
+                seen.add(key)
+                values.append(value)
+        values.sort(key=lambda s: s.casefold())
+        return values
+
     def _defined_refresh_filter_combos(self) -> None:
         for w in (
             self._defined_filter_school,
@@ -6000,7 +6072,7 @@ class IncomeFrame(ttk.Frame):
         self._defined_price_var.set("")
         self._defined_crumb_var.set("اختر المدرسة")
         self._defined_update_summary()
-        schools = self.db.get_distinct_filtered("school", self._defined_filter_constraints("school")) or []
+        schools = self._defined_unique_values(self._defined_filtered_inventory_rows(), "school")
         self._defined_make_buttons(schools, self._defined_select_school)
 
     def _defined_select_school(self, school: str) -> None:
@@ -6014,9 +6086,10 @@ class IncomeFrame(ttk.Frame):
         self._defined_price_var.set("")
         self._defined_crumb_var.set(f"{school} ← اختر النوع")
         self._defined_update_summary()
-        constraints = self._defined_filter_constraints("item_type")
-        constraints["school"] = school
-        items = self.db.get_distinct_filtered("item_type", constraints) or []
+        items = self._defined_unique_values(
+            self._defined_filtered_inventory_rows(school=school),
+            "item_type",
+        )
         self._defined_make_buttons(items, self._defined_select_item)
         self._defined_add_back_button("رجوع إلى المدارس", self._defined_render_schools)
 
@@ -6030,10 +6103,13 @@ class IncomeFrame(ttk.Frame):
         self._defined_price_var.set("")
         self._defined_crumb_var.set(f"{self._defined_school} / {item_type} ← اختر اللون")
         self._defined_update_summary()
-        constraints = self._defined_filter_constraints("color")
-        constraints["school"] = self._defined_school
-        constraints["item_type"] = item_type
-        colors = self.db.get_distinct_filtered("color", constraints) or []
+        colors = self._defined_unique_values(
+            self._defined_filtered_inventory_rows(
+                school=self._defined_school,
+                item_type=item_type,
+            ),
+            "color",
+        )
         self._defined_make_buttons(colors, self._defined_select_color)
         self._defined_add_back_button("رجوع إلى الأنواع", lambda: self._defined_select_school(self._defined_school or ""))
 
@@ -6642,6 +6718,32 @@ class OutcomeFrame(ttk.Frame):
             cb.pack(side=tk.RIGHT)
             setattr(self, attr, cb)
         self._filter_warehouse["values"] = ["", *WAREHOUSE_NUMBER_DISPLAY_VALUES]
+        for child in qf_inner.winfo_children():
+            child.destroy()
+
+        filter_specs = [
+            ("المخزن", "_filter_warehouse", "warehouse_no", 14),
+            ("المدرسة", "_filter_school", "school", 18),
+            ("النوع", "_filter_type", "item_type", 16),
+            ("اللون", "_filter_color", "color", 12),
+        ]
+        for label_text, attr, field, width in filter_specs:
+            pill = tk.Frame(qf_inner, bg=_UI["SURFACE2"])
+            pill.pack(side=tk.RIGHT, padx=6)
+            widget = LabeledCombobox(pill, label_text, self.db, field, width=width)
+            widget.pack(side=tk.RIGHT)
+            setattr(self, attr, widget)
+
+        self._filter_warehouse.set_supplier(lambda: list(WAREHOUSE_NUMBER_DISPLAY_VALUES))
+        self._filter_school.set_supplier(
+            lambda: self.db.get_distinct_filtered("school", self._outcome_filter_constraints("school")) or []
+        )
+        self._filter_type.set_supplier(
+            lambda: self.db.get_distinct_filtered("item_type", self._outcome_filter_constraints("item_type")) or []
+        )
+        self._filter_color.set_supplier(
+            lambda: self.db.get_distinct_filtered("color", self._outcome_filter_constraints("color")) or []
+        )
 
         clear_f = tk.Button(qf_inner, text="مسح", command=self._clear_quick_filters,
                             bg=_UI["SURFACE"], fg=_UI["TEXT_SEC"], font=_FONTS["small"],
@@ -6651,10 +6753,22 @@ class OutcomeFrame(ttk.Frame):
         clear_f.pack(side=tk.LEFT, padx=4)
         _add_hover(clear_f, _UI["SURFACE2"], _UI["SURFACE"])
 
-        self._filter_warehouse.bind("<<ComboboxSelected>>", lambda e: self._on_filter_changed("warehouse_no"))
-        self._filter_school.bind("<<ComboboxSelected>>", lambda e: self._on_filter_changed("school"))
-        self._filter_type.bind("<<ComboboxSelected>>", lambda e: self._on_filter_changed("item_type"))
-        self._filter_color.bind("<<ComboboxSelected>>", lambda e: self._on_filter_changed("color"))
+        for field_name, widget in (
+            ("warehouse_no", self._filter_warehouse),
+            ("school", self._filter_school),
+            ("item_type", self._filter_type),
+            ("color", self._filter_color),
+        ):
+            widget.cb.bind(
+                "<<ComboboxSelected>>",
+                lambda _e, changed=field_name: self._on_filter_changed(changed),
+                add="+",
+            )
+            widget.cb.bind(
+                "<KeyRelease>",
+                lambda _e, changed=field_name: self._on_filter_changed(changed),
+                add="+",
+            )
         self._refresh_filter_combos()
 
         # -- Breadcrumb --
@@ -6994,44 +7108,58 @@ class OutcomeFrame(ttk.Frame):
             return ""
         return WAREHOUSE_NUMBER_LABELS.get(str(int(warehouse_no)), str(int(warehouse_no)))
 
+    def _exact_filter_text(self, widget) -> Optional[str]:
+        text = (widget.get() or "").strip()
+        if not text:
+            return None
+        values = getattr(widget, "_all_values", None) or []
+        return text if text in values else None
+
+    def _exact_warehouse_no_from_filter(self) -> Optional[int]:
+        raw_no = self._warehouse_no_from_filter()
+        if raw_no is None:
+            return None
+        text = (self._filter_warehouse.get() or "").strip()
+        if not text:
+            return None
+        expected_label = self._warehouse_display_for_no(raw_no)
+        if text in {expected_label, str(int(raw_no))}:
+            return raw_no
+        return None
+
+    def _outcome_filter_constraints(self, exclude: Optional[str] = None) -> Dict[str, Any]:
+        constraints: Dict[str, Any] = {}
+        warehouse_no = None if exclude == "warehouse_no" else self._exact_warehouse_no_from_filter()
+        school = None if exclude == "school" else self._exact_filter_text(self._filter_school)
+        item_type = None if exclude == "item_type" else self._exact_filter_text(self._filter_type)
+        color = None if exclude == "color" else self._exact_filter_text(self._filter_color)
+
+        if warehouse_no is not None:
+            constraints["warehouse_no"] = warehouse_no
+        if school:
+            constraints["school"] = school
+        if item_type:
+            constraints["item_type"] = item_type
+        if color:
+            constraints["color"] = color
+        return constraints
+
     def _refresh_filter_combos(self):
-        """Repopulate each filter combobox based on the other two selections."""
+        """Refresh outcome filter menus using only confirmed exact selections."""
         try:
-            constraints: Dict[str, Any] = {}
-            warehouse_no = self._warehouse_no_from_filter()
-            school = self._filter_school.get().strip()
-            item_type = self._filter_type.get().strip()
-            color = self._filter_color.get().strip()
-
-            if warehouse_no is not None:
-                constraints["warehouse_no"] = warehouse_no
-            if school:
-                constraints["school"] = school
-            if item_type:
-                constraints["item_type"] = item_type
-            if color:
-                constraints["color"] = color
-
-            # School dropdown: filtered by type + color
-            sc = {k: v for k, v in constraints.items() if k != "school"}
-            self._filter_school["values"] = self.db.get_distinct_filtered("school", sc)
-
-            # Type dropdown: filtered by school + color
-            tc = {k: v for k, v in constraints.items() if k != "item_type"}
-            self._filter_type["values"] = self.db.get_distinct_filtered("item_type", tc)
-
-            # Color dropdown: filtered by school + type
-            cc = {k: v for k, v in constraints.items() if k != "color"}
-            self._filter_color["values"] = self.db.get_distinct_filtered("color", cc)
+            self._filter_warehouse.refresh_values()
+            self._filter_school.refresh_values()
+            self._filter_type.refresh_values()
+            self._filter_color.refresh_values()
         except Exception:
             pass
 
     def _on_filter_changed(self, changed_field: str):
-        """Called when any quick-filter combobox selection changes."""
-        warehouse_no = self._warehouse_no_from_filter()
-        school = self._filter_school.get().strip() or None
-        item_type = self._filter_type.get().strip() or None
-        color = self._filter_color.get().strip() or None
+        """Called when any quick filter changes, including typed narrowing input."""
+        warehouse_no = self._exact_warehouse_no_from_filter()
+        school = self._exact_filter_text(self._filter_school)
+        item_type = self._exact_filter_text(self._filter_type)
+        color = self._exact_filter_text(self._filter_color)
 
         # Invalidate any selection that is no longer valid given the others
         # Check school against current item_type + color
@@ -9135,6 +9263,26 @@ try {{ window.print(); }} catch(e) {{}}
 
         # ---- OK handler ----
         def on_ok():
+            def _single_int_or_none(value: Any) -> Optional[int]:
+                txt = str(value or "").strip()
+                if not txt or "," in txt:
+                    return None
+                try:
+                    return int(txt)
+                except Exception:
+                    return None
+
+            def _visible_row_filter(values: Sequence[Any]) -> Dict[str, Any]:
+                return {
+                    "item_type": values[1],
+                    "school": values[2],
+                    "color": values[3],
+                    "size": values[4],
+                    "warehouse_no": values[5],
+                    "package_no": values[6],
+                    "unit_price": float(values[8]),
+                }
+
             try:
                 new_price = float(price_var.get())
                 if new_price < 0:
@@ -9171,44 +9319,23 @@ try {{ window.print(); }} catch(e) {{}}
                 sync_devs = selected_pos if sync_mode == "selected-pos" else None
 
                 if multi:
-                    # Same (type, school, color, size) + single wh/pkg → one SQL + one fan-out batch.
-                    keys = {(v[1], v[2], v[3], v[4]) for v in rows}
-                    whs = sorted({int(v[5]) for v in rows})
-                    pkgs = sorted({int(v[6]) for v in rows})
-                    if len(keys) == 1 and len(whs) == 1 and len(pkgs) == 1:
-                        it, sc, cl, sz = next(iter(keys))
-                        flt: Dict[str, Any] = {
-                            "item_type": it,
-                            "school": sc,
-                            "color": cl,
-                            "size": sz,
-                            "warehouse_no": whs[0],
-                            "package_no": pkgs[0],
-                        }
+                    # Always update the exact selected inventory rows.
+                    # The inventory table can show grouped package text like
+                    # "70, 163, 166, 219", so rebuilding a shared warehouse/package
+                    # filter from the visible cells is not reliable.
+                    for vals in rows:
                         updated_total += self.db.update_prices(
-                            flt,
+                            _visible_row_filter(vals),
                             new_price,
                             note="Price update (multi-selection)",
                             price_sync_mode=sync_mode,
                             price_sync_pos_devices=sync_devs,
                             emit_price_sync=emit_sync,
                         )
-                    else:
-                        # Mixed sizes/colours/locations: update each stock row so POS gets
-                        # one PRICE_UPDATE per (item_type, school, color, size) from that row.
-                        for vals in rows:
-                            updated_total += self.db.update_prices(
-                                {"id": int(vals[0])},
-                                new_price,
-                                note="Price update (multi-selection)",
-                                price_sync_mode=sync_mode,
-                                price_sync_pos_devices=sync_devs,
-                                emit_price_sync=emit_sync,
-                            )
                 else:
                     if scope_var.get() == "row":
                         updated_total = self.db.update_prices(
-                            {"id": int(first[0])},
+                            _visible_row_filter(first),
                             new_price,
                             note="Price update (single row)",
                             price_sync_mode=sync_mode,
@@ -9216,6 +9343,14 @@ try {{ window.print(); }} catch(e) {{}}
                             emit_price_sync=emit_sync,
                         )
                     else:
+                        pkg_value = _single_int_or_none(first[6])
+                        if pkg_value is None:
+                            messagebox.showwarning(
+                                "نطاق غير صالح",
+                                "هذا الصف يعرض أكثر من عبوة مجمعة، لذلك لا يمكن استخدام خيار «نفس المخزن/العبوة» معه. استخدم «الصف المحدد فقط».",
+                                parent=dlg,
+                            )
+                            return
                         updated_total = self.db.update_prices(
                             {
                                 "item_type": first[1],

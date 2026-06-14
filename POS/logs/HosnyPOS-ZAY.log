@@ -80,3 +80,115 @@ Traceback (most recent call last):
   File "tkinter\messagebox.py", line 76, in _show
   File "tkinter\commondialog.py", line 45, in show
 _tkinter.TclError: can't invoke "tk_messageBox" command: application has been destroyed
+2026-06-14 15:52:25 INFO hosny: ============================================================
+2026-06-14 15:52:25 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=176, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-14 15:52:26 ERROR hosny: UNCAUGHT EXCEPTION
+Traceback (most recent call last):
+  File "HosnyPOS.py", line 10580, in <module>
+    main()
+    ~~~~^^
+  File "HosnyPOS.py", line 10449, in main
+    _app = WarehouseApp(root, db)
+  File "HosnyPOS.py", line 9892, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 10003, in _build
+    self._school_accounts_frame = SchoolAccountsFrame(school_accounts_tab, self.db)
+                                  ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyPOS.py", line 7103, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 7113, in _build
+    ttk.Label(self, text="حسابات المدارس", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 12))
+                                                ^^^^^^
+NameError: name '_FONTS' is not defined
+2026-06-14 15:52:46 INFO hosny: ============================================================
+2026-06-14 15:52:46 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=10416, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-14 15:52:47 ERROR hosny: UNCAUGHT EXCEPTION
+Traceback (most recent call last):
+  File "HosnyPOS.py", line 10580, in <module>
+    main()
+    ~~~~^^
+  File "HosnyPOS.py", line 10449, in main
+    _app = WarehouseApp(root, db)
+  File "HosnyPOS.py", line 9892, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 10003, in _build
+    self._school_accounts_frame = SchoolAccountsFrame(school_accounts_tab, self.db)
+                                  ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyPOS.py", line 7103, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 7113, in _build
+    ttk.Label(self, text="حسابات المدارس", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 12))
+                                                ^^^^^^
+NameError: name '_FONTS' is not defined
+2026-06-14 15:56:39 INFO hosny: ============================================================
+2026-06-14 15:56:39 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=20416, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-14 15:56:40 ERROR hosny: UNCAUGHT EXCEPTION
+Traceback (most recent call last):
+  File "HosnyPOS.py", line 10580, in <module>
+    main()
+    ~~~~^^
+  File "HosnyPOS.py", line 10449, in main
+    _app = WarehouseApp(root, db)
+  File "HosnyPOS.py", line 9892, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 10003, in _build
+    self._school_accounts_frame = SchoolAccountsFrame(school_accounts_tab, self.db)
+                                  ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyPOS.py", line 7103, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 7127, in _build
+    ttk.Label(self, textvariable=self._schools_var, foreground=_UI["TEXT_DIM"]).pack(anchor="w", pady=(0, 8))
+                                                               ^^^
+NameError: name '_UI' is not defined
+2026-06-14 15:59:48 INFO hosny: ============================================================
+2026-06-14 15:59:48 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=15032, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-14 15:59:49 ERROR hosny: UNCAUGHT EXCEPTION
+Traceback (most recent call last):
+  File "HosnyPOS.py", line 10580, in <module>
+    main()
+    ~~~~^^
+  File "HosnyPOS.py", line 10449, in main
+    _app = WarehouseApp(root, db)
+  File "HosnyPOS.py", line 9892, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 10003, in _build
+    self._school_accounts_frame = SchoolAccountsFrame(school_accounts_tab, self.db)
+                                  ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyPOS.py", line 7103, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 7127, in _build
+    ttk.Label(self, textvariable=self._schools_var, foreground="#64748b").pack(anchor="w", pady=(0, 8))
+                                                               ^^^
+NameError: name '_UI' is not defined
+2026-06-14 16:00:52 INFO hosny: ============================================================
+2026-06-14 16:00:52 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=7172, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-14 16:00:53 ERROR hosny: UNCAUGHT EXCEPTION
+Traceback (most recent call last):
+  File "HosnyPOS.py", line 10580, in <module>
+    main()
+    ~~~~^^
+  File "HosnyPOS.py", line 10449, in main
+    _app = WarehouseApp(root, db)
+  File "HosnyPOS.py", line 9892, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 10003, in _build
+    self._school_accounts_frame = SchoolAccountsFrame(school_accounts_tab, self.db)
+                                  ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyPOS.py", line 7103, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 7162, in _build
+    add_context_menu(self._tree)
+    ^^^^^^^^^^^^^^^^
+NameError: name 'add_context_menu' is not defined. Did you mean: '_add_context_menu'?
+2026-06-14 16:02:29 INFO hosny: ============================================================
+2026-06-14 16:02:29 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=14540, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
