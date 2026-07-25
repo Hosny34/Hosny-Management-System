@@ -1,11 +1,13 @@
 # Reset Scripts Guide
 
-This folder contains utilities for resetting sync-server state.
+This folder contains utilities for resetting sync-server state and, for POS
+devices, wiping the local POS database too.
 
-Current script:
+Current scripts:
 
 - `reset_sync_server.sh`
 - `_run_reset.bat`
+- `reset_sync_target.py`
 
 One-click Windows launchers:
 
@@ -20,11 +22,18 @@ One-click Windows launchers:
 
 ## What It Does
 
-The script works directly on the sync server SQLite database:
+The reset flow now supports two server modes:
 
-- `sync_server/Hosny-sync-server/sync_server.sqlite3`
+1. Remote Railway reset through the live sync server admin endpoint
+2. Local SQLite reset through `sync_server/Hosny-sync-server/sync_server.sqlite3`
 
-It can delete:
+For POS modes, it also tries to delete the matching local POS DB:
+
+- `warehouse_data.sqlite3`
+- `warehouse_data.sqlite3-wal`
+- `warehouse_data.sqlite3-shm`
+
+Server-side it can delete:
 
 - device registrations
 - pulled cursor state
@@ -35,7 +44,8 @@ It can delete:
 - These reset tools work on the local SQLite file:
   `sync_server/Hosny-sync-server/sync_server.sqlite3`
 - If you have a local sync server window/terminal currently using that file, close it first.
-- If you are only using Railway and not a local SQLite server, these local reset files do not reset Railway by themselves.
+- If you are using Railway, set `SERVER_URL` so the script can call the
+  live reset endpoint on the deployed server.
 
 Simple rule:
 
@@ -47,10 +57,12 @@ Simple rule:
 
 Recommended:
 
-1. Close any local sync server window if you are using one.
-2. Close warehouse/POS apps if you want a clean restart flow.
+1. Close the target POS app before wiping its local DB.
+2. Close any local sync server window if you are using one.
 3. Make sure Python is installed.
-4. Git Bash is optional now. It is only needed if you want to run the `.sh` file manually.
+4. If you want to reset Railway, set:
+
+- `SERVER_URL`
 
 ## Easiest Way To Run It
 
@@ -68,7 +80,9 @@ On Windows, just double-click one of these files:
 Each file will:
 
 - run the correct reset directly on Windows
-- use Python's built-in `sqlite3`
+- reset the live Railway server if `SERVER_URL` is set
+- otherwise fall back to the local sync server SQLite DB
+- wipe the local POS DB automatically for POS reset modes when it finds it
 - keep the window open so you can read the result
 
 ## Manual Way To Run It
@@ -197,22 +211,15 @@ SERVER_DB="/full/path/to/sync_server.sqlite3" bash "/c/Users/youssef.sherif/Down
 1. If you run a local SQLite sync server, close it first
 2. Double-click the branch reset `.bat` file you want
 3. Or run the matching Bash command manually
-4. Delete local POS DB files if you want a fully fresh local start:
-
-- `POS-ZAY/warehouse_data.sqlite3`
-- `POS-ZAY/warehouse_data.sqlite3-shm`
-- `POS-ZAY/warehouse_data.sqlite3-wal`
-
-5. Start the app again
-6. Configure sync if needed
-7. Sync as a fresh device
+4. Start the app again
+5. Configure sync if needed
+6. Sync as a fresh device
 
 ### Full clean reset for everything
 
 1. If you run a local SQLite sync server, close it first
 2. Double-click `Reset ALL Devices.bat`
-3. Delete local DB files on warehouse and POS if you want full clean restart locally too
-4. Start apps again
+3. Start apps again
 
 ## Important Warnings
 
@@ -220,7 +227,8 @@ SERVER_DB="/full/path/to/sync_server.sqlite3" bash "/c/Users/youssef.sherif/Down
 - `all` removes every device and every stored sync event from the server DB.
 - If you reset server state but keep old local DBs, apps may still hold local history/state.
 - If you reset local DBs but not the server DB, old events may be pulled again.
-- These reset files are for the local SQLite sync DB path used by this project.
+- For Railway resets, the deployed sync server just needs the updated code
+  deployed.
 
 ## Recommended Rule
 

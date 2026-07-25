@@ -174,88 +174,42 @@ def present_sync_cycle_summary(master: tk.Misc, summary: Dict[str, Any]) -> None
             parent=master.winfo_toplevel(),
         )
 
-    interesting = pulled > 0 or applied > 0 or skipped > 0 or errc > 0
-    if not interesting:
-        return
 
-    lines = [
-        f"تنزيل: {pulled}  •  تطبيق: {applied}  •  تخطي: {skipped}",
-    ]
-    ae = summary.get("applied_events") or []
-    for r in ae[:3]:
-        lines.append(f"• {r.get('event_type')}: {r.get('summary')}")
-    if len(ae) > 3:
-        lines.append(f"… و {len(ae) - 3} أخرى")
-
-    msg = "\n".join(lines)
-
-    try:
-        topw = master.winfo_toplevel()
-    except Exception:
-        topw = master
-
-    bar = tk.Toplevel(topw)
-    bar.overrideredirect(True)
-    try:
-        bar.attributes("-topmost", True)
-    except Exception:
-        pass
-    bg = "#0F172A"
-    fg = "#F8FAFC"
-    fr = tk.Frame(bar, bg=bg, padx=12, pady=10)
-    fr.pack(fill=tk.BOTH, expand=True)
-    tk.Label(fr, text="تم استلام تحديثات من المزامنة", bg=bg, fg=fg, font=("Segoe UI", 10, "bold")).pack(anchor="e")
-    tk.Label(fr, text=msg, bg=bg, fg=fg, font=("Segoe UI", 9), wraplength=440, justify="right").pack(anchor="e", pady=(4, 0))
-    bf = tk.Frame(fr, bg=bg)
-    bf.pack(fill=tk.X, pady=(8, 0))
-
-    def _details() -> None:
-        try:
-            bar.destroy()
-        except Exception:
-            pass
-        open_sync_received_details(master, summary)
-
-    tk.Button(
-        bf,
-        text="تفاصيل…",
-        command=_details,
-        bg="#334155",
-        fg=fg,
-        activebackground="#475569",
-        activeforeground=fg,
-        bd=0,
-        padx=10,
-        pady=4,
-        cursor="hand2",
-    ).pack(side=tk.LEFT, padx=(0, 8))
-    tk.Button(
-        bf,
-        text="إغلاق",
-        command=bar.destroy,
-        bg="#1E293B",
-        fg=fg,
-        activebackground="#334155",
-        activeforeground=fg,
-        bd=0,
-        padx=10,
-        pady=4,
-        cursor="hand2",
-    ).pack(side=tk.LEFT)
-
-    bar.update_idletasks()
-    try:
-        sw = int(topw.winfo_screenwidth())
-        sh = int(topw.winfo_screenheight())
-        w = int(bar.winfo_width())
-        h = int(bar.winfo_height())
-        bar.geometry(f"+{max(8, sw - w - 24)}+{max(8, sh - h - 72)}")
-    except Exception:
-        pass
-    bar.after(20000, bar.destroy)
+def is_transient_network_failure(err_text: str) -> bool:
+    """Return True for expected offline/server-unreachable sync failures."""
+    text = str(err_text or "").strip().lower()
+    if not text:
+        return False
+    markers = (
+        "network error",
+        "timeout",
+        "timed out",
+        "temporarily unavailable",
+        "temporary failure",
+        "connection refused",
+        "connection reset",
+        "connection aborted",
+        "connection timed out",
+        "no route to host",
+        "host is unreachable",
+        "network is unreachable",
+        "name or service not known",
+        "getaddrinfo failed",
+        "failed to establish a new connection",
+        "winerror 10051",
+        "winerror 10053",
+        "winerror 10054",
+        "winerror 10060",
+        "winerror 10061",
+        "winerror 10065",
+        "errno 11001",
+    )
+    return any(marker in text for marker in markers)
 
 
 def present_sync_cycle_failure(master: tk.Misc, err_text: str) -> None:
+    if is_transient_network_failure(err_text):
+        return
     messagebox.showerror("فشل المزامنة", str(err_text), parent=master.winfo_toplevel())
 
 

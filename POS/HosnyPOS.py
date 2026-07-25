@@ -1,5 +1,5 @@
 # filepath: app/warehouse_manager_nosqlite_excel_billing.py
-# Python 3.10+
+# Python 3.7.3+
 
 try:
     import logging_setup
@@ -15,13 +15,149 @@ import sqlite3
 import time
 import tempfile
 import webbrowser
+import re
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta   # +date for calendar
 import calendar                       # ADD
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
+
+_DIGIT_TRANSLATION = str.maketrans({
+    "\u0660": "0", "\u0661": "1", "\u0662": "2", "\u0663": "3", "\u0664": "4",
+    "\u0665": "5", "\u0666": "6", "\u0667": "7", "\u0668": "8", "\u0669": "9",
+    "\u06f0": "0", "\u06f1": "1", "\u06f2": "2", "\u06f3": "3", "\u06f4": "4",
+    "\u06f5": "5", "\u06f6": "6", "\u06f7": "7", "\u06f8": "8", "\u06f9": "9",
+})
+
+
+def western_digits(value: Any) -> str:
+    return ("" if value is None else str(value)).translate(_DIGIT_TRANSLATION)
+
+
+_LTR_MARK = "\u200e"
+_RTL_MARK = "\u200f"
+_NUMBER_RUN_RE = re.compile(r"(?<!\u200e)([0-9](?:[0-9.,:/\\\- ]*[0-9])?)(?!\u200e)")
+
+
+def _strip_digit_marks(value: Any) -> str:
+    return western_digits(value).replace(_LTR_MARK, "").replace(_RTL_MARK, "")
+
+
+def western_digits_for_display(value: Any) -> str:
+    text = _strip_digit_marks(value)
+    return _NUMBER_RUN_RE.sub(lambda m: _LTR_MARK + m.group(1) + _LTR_MARK, text)
+
+
+def _westernize_value(value: Any) -> Any:
+    if value is None:
+        return value
+    if isinstance(value, (list, tuple)):
+        return type(value)(_westernize_value(v) for v in value)
+    return western_digits_for_display(value)
+
+
+def _westernize_options(options: Dict[str, Any]) -> None:
+    for key in ("text", "value", "values"):
+        if key in options:
+            options[key] = _westernize_value(options[key])
+
+
+def _install_western_digit_tk_patch() -> None:
+    """Keep Tk widgets from showing Arabic-Indic/Persian digits."""
+    if getattr(tk, "_hosny_western_digits_patch", False):
+        return
+    tk._hosny_western_digits_patch = True
+
+    original_stringvar_set = tk.StringVar.set
+    original_stringvar_get = tk.StringVar.get
+
+    def stringvar_set(self, value):
+        return original_stringvar_set(self, _westernize_value(value))
+
+    def stringvar_get(self):
+        return _strip_digit_marks(original_stringvar_get(self))
+
+    tk.StringVar.set = stringvar_set
+    tk.StringVar.get = stringvar_get
+
+    def patch_entry_class(cls):
+        original_get = cls.get
+
+        def get(self):
+            return _strip_digit_marks(original_get(self))
+
+        cls.get = get
+
+    for entry_cls in (tk.Entry, ttk.Entry, ttk.Combobox):
+        patch_entry_class(entry_cls)
+
+    def patch_widget_class(cls):
+        original_init = cls.__init__
+        original_configure = cls.configure
+
+        def __init__(self, *args, **kwargs):
+            _westernize_options(kwargs)
+            original_init(self, *args, **kwargs)
+
+        def configure(self, cnf=None, **kwargs):
+            if isinstance(cnf, dict):
+                cnf = dict(cnf)
+                _westernize_options(cnf)
+            _westernize_options(kwargs)
+            return original_configure(self, cnf, **kwargs)
+
+        cls.__init__ = __init__
+        cls.configure = configure
+        cls.config = configure
+
+    for widget_cls in (
+        tk.Label, tk.Button, tk.LabelFrame, tk.Checkbutton, tk.Radiobutton,
+        ttk.Label, ttk.Button, ttk.LabelFrame, ttk.Checkbutton, ttk.Radiobutton,
+        ttk.Combobox,
+    ):
+        patch_widget_class(widget_cls)
+
+    original_title = tk.Wm.title
+
+    def title(self, string=None):
+        if string is not None:
+            string = western_digits(string)
+        return original_title(self, string)
+
+    tk.Wm.title = title
+
+    original_heading = ttk.Treeview.heading
+    original_insert = ttk.Treeview.insert
+    original_item = ttk.Treeview.item
+    original_set = ttk.Treeview.set
+
+    def heading(self, column, option=None, **kwargs):
+        _westernize_options(kwargs)
+        return original_heading(self, column, option, **kwargs)
+
+    def insert(self, parent, index, iid=None, **kwargs):
+        _westernize_options(kwargs)
+        return original_insert(self, parent, index, iid, **kwargs)
+
+    def item(self, item, option=None, **kwargs):
+        _westernize_options(kwargs)
+        return original_item(self, item, option, **kwargs)
+
+    def set_value(self, item, column=None, value=None):
+        if value is not None:
+            value = _westernize_value(value)
+        return original_set(self, item, column, value)
+
+    ttk.Treeview.heading = heading
+    ttk.Treeview.insert = insert
+    ttk.Treeview.item = item
+    ttk.Treeview.set = set_value
+
+
+_install_western_digit_tk_patch()
 
 DB_PATH = "warehouse_data.sqlite3"
 LEGACY_JSON_PATH = "warehouse_data.json"
@@ -48,6 +184,7 @@ POS_MANAGER_FEATURE_DEFAULTS = {
     "allow_inventory_price_edit": not POS_CASHIER_LOCKDOWN,
     "allow_inventory_specs_edit": not POS_CASHIER_LOCKDOWN,
     "allow_size_profile_edit": not POS_CASHIER_LOCKDOWN,
+    "allow_stock_audit": True,
 }
 DEFAULT_BRANCH_POS_NAMES = [
     "POS-ZAY",
@@ -66,8 +203,14 @@ BRANCH_UI_NAME_BY_DEVICE = {
     "POS-GESR": "فرع جسر السويس",
 }
 BRANCH_DEVICE_BY_UI_NAME = {v: k for k, v in BRANCH_UI_NAME_BY_DEVICE.items()}
+RECEIPT_SUPPORT_CALL_SETTING = "receipt_support_call"
+RECEIPT_SUPPORT_WHATSAPP_SETTING = "receipt_support_whatsapp"
+RECEIPT_FONT_FILE = os.path.join("Fonts", "V100009_.TTF")
+RECEIPT_FONT_NAME = "HosnyReceiptFont"
+RECEIPT_FONT_STACK = '"%s", Tahoma, Arial, "Segoe UI", sans-serif' % RECEIPT_FONT_NAME
 
 ALLOWED_NUMERIC_RANGES = {
+    (0, 24): [str(i) for i in range(0, 26, 2)],
     (0, 16): [str(i) for i in range(0, 18, 2)],
     (6, 22): [str(i) for i in range(6, 24, 2)],
     (14, 28): [str(i) for i in range(14, 30, 2)],
@@ -93,10 +236,14 @@ def merged_numeric_size_labels_from_profile(
     chunks: List[List[str]] = []
     if r1s is not None and r1e is not None:
         labs = ALLOWED_NUMERIC_RANGES.get((r1s, r1e))
+        if labs is None:
+            labs = [str(i) for i in range(int(r1s), int(r1e) + 1)]
         if labs:
             chunks.append(list(labs))
     if r2s is not None and r2e is not None:
         labs = ALLOWED_NUMERIC_RANGES.get((r2s, r2e))
+        if labs is None:
+            labs = [str(i) for i in range(int(r2s), int(r2e) + 1)]
         if labs:
             chunks.append(list(labs))
     if not chunks:
@@ -119,7 +266,7 @@ def merged_numeric_size_labels_from_profile(
 
 
 def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return western_digits(datetime.now().isoformat(timespec="seconds"))
 
 
 def fmt_local_ts(value: Any, empty: str = "—") -> str:
@@ -130,10 +277,10 @@ def fmt_local_ts(value: Any, empty: str = "—") -> str:
         txt = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
         dt = datetime.fromisoformat(txt)
         if dt.tzinfo is None:
-            return dt.strftime("%Y-%m-%d %H:%M:%S")
-        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            return western_digits(dt.strftime("%Y-%m-%d %H:%M:%S"))
+        return western_digits(dt.astimezone().strftime("%Y-%m-%d %H:%M:%S"))
     except Exception:
-        return raw.replace("T", " ")
+        return western_digits(raw.replace("T", " "))
 
 
 def _cashier_lockdown_message(action: str = "") -> str:
@@ -148,6 +295,25 @@ def _payment_method_label(method: Optional[str]) -> str:
     if code == PAYMENT_METHOD_VISA:
         return "فيزا"
     return "كاش"
+
+
+def _normalize_customer_phone(value: Any) -> str:
+    return _strip_digit_marks(value).strip()
+
+
+def format_money(value: Any) -> str:
+    raw = _strip_digit_marks(value).strip()
+    if not raw:
+        raw = "0"
+    try:
+        dec = Decimal(raw)
+    except (InvalidOperation, ValueError, TypeError):
+        try:
+            dec = Decimal(str(float(value or 0)))
+        except Exception:
+            return "0"
+    dec = dec.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return western_digits(str(int(dec)))
 
 
 def _feature_restricted_message(action: str = "") -> str:
@@ -190,6 +356,69 @@ def _branch_display_name(value: Any) -> str:
     if not raw:
         return ""
     return BRANCH_UI_NAME_BY_DEVICE.get(raw, raw)
+
+
+def _receipt_pos_name(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "POS"
+    return _branch_display_name(raw)
+
+
+def _lookup_receipt_pos_name(conn: sqlite3.Connection) -> str:
+    try:
+        row = conn.execute(
+            "SELECT device_name FROM device_identity WHERE id = 1"
+        ).fetchone()
+        return _receipt_pos_name(row[0] if row else "")
+    except Exception:
+        return "POS"
+
+
+def _lookup_receipt_support(conn: sqlite3.Connection, key: str) -> str:
+    try:
+        row = conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?",
+            (str(key),),
+        ).fetchone()
+        return western_digits((row[0] if row else "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _lookup_receipt_branding(conn: sqlite3.Connection) -> Tuple[str, str, str]:
+    return (
+        _lookup_receipt_pos_name(conn),
+        _lookup_receipt_support(conn, RECEIPT_SUPPORT_CALL_SETTING),
+        _lookup_receipt_support(conn, RECEIPT_SUPPORT_WHATSAPP_SETTING),
+    )
+
+
+def _receipt_bill_type_label(value: Any) -> str:
+    code = str(value or "SALE").strip().upper()
+    return {
+        "SALE": "بيع",
+        "RETURN": "مرتجع",
+        "EXCHANGE": "استبدال",
+        WAREHOUSE_RETURN_BILL_TYPE: WAREHOUSE_RETURN_LABEL,
+        BRANCH_TRANSFER_BILL_TYPE: "تحويل فرع",
+        "RESERVATION": "حجز",
+    }.get(code, code or "بيع")
+
+
+def _app_resource_path(relative_path: str) -> str:
+    base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_dir, *relative_path.replace("\\", "/").split("/"))
+
+
+def _receipt_font_face_css() -> str:
+    font_path = _app_resource_path(RECEIPT_FONT_FILE)
+    if not os.path.exists(font_path):
+        return ""
+    return (
+        '@font-face { font-family: "%s"; src: url("%s") format("truetype"); '
+        "font-weight: 400 900; font-style: normal; }\n"
+    ) % (RECEIPT_FONT_NAME, _file_url(font_path))
 
 
 @dataclass
@@ -261,7 +490,23 @@ def _xml_escape(s: str) -> str:
 def _file_url(path: str) -> str:
     return f"file:///{path.replace(os.sep, '/')}"
 
-def _print_html_auto(path: str, copies: int = 1, parent: Optional[tk.Widget] = None) -> None:
+def _ensure_html_document_encoding(html: str) -> str:
+    if "<meta charset" in html.lower():
+        return html
+    meta = '<meta charset="utf-8">'
+    lower = html.lower()
+    head_idx = lower.find("<head>")
+    if head_idx >= 0:
+        insert_at = head_idx + len("<head>")
+        return html[:insert_at] + meta + html[insert_at:]
+    return meta + html
+
+def _write_html_file(path: str, html: str) -> None:
+    html = _ensure_html_document_encoding(str(html or ""))
+    with open(path, "w", encoding="utf-8-sig") as f:
+        f.write(html)
+
+def _print_html_auto_legacy_ie(path: str, copies: int = 1, parent: Optional[tk.Widget] = None) -> None:
     """
     Try silent HTML print (Windows COM) or shell 'print'. Else open auto-printing copy.
     """
@@ -303,7 +548,7 @@ def _print_html_auto(path: str, copies: int = 1, parent: Optional[tk.Widget] = N
     try:
         auto_path = path[:-5] + "_autoprint.html" if path.lower().endswith(".html") else path + "_autoprint.html"
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8-sig") as f:
                 html = f.read()
             edge_meta = '<meta http-equiv="X-UA-Compatible" content="IE=edge" />'
             if "</head>" in html:
@@ -318,8 +563,7 @@ def _print_html_auto(path: str, copies: int = 1, parent: Optional[tk.Widget] = N
                     html = edge_meta + html
                 html = html + "<script>window.onload=function(){try{window.print();}catch(e){} setTimeout(()=>window.close(),600);};</script>"
 
-            with open(auto_path, "w", encoding="utf-8") as f:
-                f.write(html)
+            _write_html_file(auto_path, html)
         except Exception:
             auto_path = path
 
@@ -333,127 +577,615 @@ def _print_html_auto(path: str, copies: int = 1, parent: Optional[tk.Widget] = N
         if parent is not None:
             messagebox.showerror("فشل الطباعة", f"{ex}", parent=parent)
 
-def save_bill_as_html(path: str, bill: Dict[str, Any], items: List[Dict[str, Any]]) -> None:
+def _html_receipt_to_text(path: str) -> str:
+    """Best-effort plain-text receipt for old Windows print engines."""
+    import re
+    from html import unescape
+
+    with open(path, "r", encoding="utf-8-sig") as f:
+        html = f.read()
+
+    text = re.sub(r"(?is)<script.*?</script>", "", html)
+    text = re.sub(r"(?is)<style.*?</style>", "", text)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</(div|p|h1|h2|h3|tr|table)>", "\n", text)
+    text = re.sub(r"(?i)</t[dh]>", "    ", text)
+    text = re.sub(r"(?is)<[^>]+>", "", text)
+    text = unescape(text)
+
+    lines = []
+    for line in text.splitlines():
+        clean = " ".join(line.split())
+        if clean:
+            lines.append(clean)
+    return western_digits("\n".join(lines).strip()) + "\n"
+
+
+def _rtf_escape(value: Any) -> str:
+    text = western_digits(str(value or ""))
+    out = []
+    for ch in text:
+        if ch == "\\":
+            out.append(r"\\")
+        elif ch == "{":
+            out.append(r"\{")
+        elif ch == "}":
+            out.append(r"\}")
+        elif ch == "\n":
+            out.append(r"\line ")
+        elif ch == "\r":
+            continue
+        else:
+            code = ord(ch)
+            if 32 <= code <= 126:
+                out.append(ch)
+            else:
+                if code > 32767:
+                    code -= 65536
+                out.append(r"\u%d?" % code)
+    return "".join(out)
+
+
+def _rtf_table_row(cells: List[str], widths: List[int], bold: bool = False, font_size: int = 22) -> str:
+    parts = [r"\trowd\trgaph60\trleft0"]
+    pos = 0
+    for width in widths:
+        pos += int(width)
+        parts.append(
+            r"\clbrdrt\brdrs\brdrw10\clbrdrl\brdrs\brdrw10\clbrdrb\brdrs\brdrw10\clbrdrr\brdrs\brdrw10\cellx%d" % pos
+        )
+    cell_prefix = r"\pard\intbl\rtlpar\qr "
+    if bold:
+        cell_prefix += r"\b "
+    cell_prefix += r"\fs%d " % int(font_size)
+    for cell in cells:
+        parts.append(cell_prefix + _rtf_escape(cell) + r"\cell")
+    parts.append(r"\row")
+    return "\n".join(parts)
+
+
+def save_bill_as_rtf(
+    path: str,
+    bill: Dict[str, Any],
+    items: List[Dict[str, Any]],
+    pos_name: str = "",
+    support_call: str = "",
+    support_whatsapp: str = "",
+) -> None:
+    customer = western_digits(bill.get("customer") or "").strip()
+    customer_phone = western_digits(bill.get("customer_phone") or "").strip()
+    pos_name = _receipt_pos_name(pos_name)
+    created_at = western_digits(bill.get("created_at") or "")
+
+    rows = []
+    widths = [2650, 500, 650, 650]
+    rows.append(_rtf_table_row(["الصنف", "العدد", "السعر", "الإجمالي"], widths, bold=True, font_size=22))
+    for line in items:
+        line_total = line.get("line_total")
+        if line_total is None:
+            try:
+                line_total = float(line.get("unit_price", 0)) * int(line.get("qty", 0))
+            except Exception:
+                line_total = 0
+        item_name = "%s - %s\n%s / %s" % (
+            western_digits(line.get("item_type") or ""),
+            western_digits(line.get("school") or ""),
+            western_digits(line.get("color") or ""),
+            western_digits(line.get("size") or ""),
+        )
+        rows.append(
+            _rtf_table_row(
+                [
+                    item_name,
+                    str(int(line.get("qty") or 0)),
+                    format_money(float(line.get("unit_price") or 0)),
+                    format_money(float(line_total or 0)),
+                ],
+                widths,
+                bold=False,
+                font_size=21,
+            )
+        )
+
+    support_lines = []
+    if support_call:
+        support_lines.append(r"\pard\rtlpar\qc\fs22 " + _rtf_escape("للاتصال: %s" % support_call) + r"\par")
+    if support_whatsapp:
+        support_lines.append(r"\pard\rtlpar\qc\fs22 " + _rtf_escape("واتساب: %s" % support_whatsapp) + r"\par")
+
+    content = [
+        r"{\rtf1\ansi\deff0\uc1",
+        r"{\fonttbl{\f0 Tahoma;}}",
+        r"\paperw4535\paperh20000\margl120\margr120\margt120\margb120",
+        r"\pard\rtlpar\qc\b\fs30 " + _rtf_escape(pos_name) + r"\par",
+        r"\pard\rtlpar\qc\b\fs28 " + _rtf_escape("فاتورة #%s" % bill["id"]) + r"\par",
+        r"\pard\rtlpar\qc\fs22 " + _rtf_escape(created_at) + r"\par",
+    ]
+    if customer:
+        content.append(r"\pard\rtlpar\qr\fs22 " + _rtf_escape("العميل: %s" % customer) + r"\par")
+    if customer_phone:
+        content.append(r"\pard\rtlpar\qr\fs22 " + _rtf_escape("رقم العميل: %s" % customer_phone) + r"\par")
+    content.extend(
+        [
+            r"\pard\rtlpar\qr\fs16 ------------------------------------------------\par",
+            "\n".join(rows),
+            r"\pard\rtlpar\qr\fs16 ------------------------------------------------\par",
+            r"\pard\rtlpar\qc\b\fs28 " + _rtf_escape("الإجمالي: %s" % format_money(float(bill["total"]))) + r"\par",
+            r"\pard\rtlpar\qc\fs22 " + _rtf_escape("شكرا لتعاملكم معنا") + r"\par",
+        ]
+    )
+    content.extend(support_lines)
+    content.append("}")
+    with open(path, "w", encoding="ascii", errors="ignore") as f:
+        f.write("\n".join(content))
+
+def _print_text_with_notepad(path: str, copies: int) -> bool:
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        for _ in range(max(1, int(copies))):
+            proc = subprocess.Popen(["notepad.exe", "/p", path])
+            try:
+                proc.wait(timeout=20)
+            except Exception:
+                pass
+        return True
+    except Exception:
+        return False
+
+
+def _print_rtf_with_wordpad(path: str, copies: int) -> bool:
+    if not sys.platform.startswith("win"):
+        return False
+    win_dir = os.environ.get("SystemRoot", r"C:\Windows")
+    candidates = [
+        os.path.join(win_dir, "write.exe"),
+        os.path.join(win_dir, "System32", "write.exe"),
+        os.path.join(win_dir, "System32", "wordpad.exe"),
+        "write.exe",
+        "wordpad.exe",
+    ]
+    for exe_path in candidates:
+        try:
+            for _ in range(max(1, int(copies))):
+                proc = subprocess.Popen([exe_path, "/p", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    proc.wait(timeout=25)
+                except Exception:
+                    pass
+            return True
+        except Exception:
+            continue
+    return False
+
+def _make_autoprint_html(path: str) -> str:
+    auto_path = path[:-5] + "_autoprint.html" if path.lower().endswith(".html") else path + "_autoprint.html"
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            html = f.read()
+        script = (
+            "<script>"
+            "window.onload=function(){setTimeout(function(){try{window.print();}catch(e){}},150);};"
+            "</script>"
+        )
+        if "</head>" in html:
+            if "X-UA-Compatible" not in html:
+                html = html.replace("</head>", '<meta http-equiv="X-UA-Compatible" content="IE=edge" /></head>')
+            if "window.print()" not in html:
+                html = html.replace("</head>", script + "</head>")
+        elif "window.print()" not in html:
+            html += script
+        _write_html_file(auto_path, html)
+        return auto_path
+    except Exception:
+        return path
+
+
+def _print_html_with_ie_silent(path: str, copies: int) -> bool:
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        import win32com.client  # type: ignore
+    except Exception:
+        return False
+    ie = None
+    try:
+        ie = win32com.client.Dispatch("InternetExplorer.Application")
+        ie.Visible = False
+        url = _file_url(path)
+        for _ in range(max(1, int(copies))):
+            ie.Navigate(url)
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                time.sleep(0.1)
+                try:
+                    doc = getattr(ie, "Document", None)
+                    ready = str(getattr(doc, "readyState", "")).lower() if doc is not None else ""
+                    if not ie.Busy and int(ie.ReadyState) == 4 and ready in ("", "complete"):
+                        break
+                except Exception:
+                    break
+            time.sleep(0.4)
+            # OLECMDID_PRINT=6, OLECMDEXECOPT_DONTPROMPTUSER=2.
+            ie.ExecWB(6, 2)
+            time.sleep(0.7)
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            if ie is not None:
+                ie.Quit()
+        except Exception:
+            pass
+
+
+def _print_html_with_shell(path: str, copies: int) -> bool:
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        import win32api  # type: ignore
+        for _ in range(max(1, int(copies))):
+            rc = win32api.ShellExecute(0, "print", path, None, os.path.dirname(path) or ".", 0)
+            if int(rc) <= 32:
+                return False
+            time.sleep(0.25)
+        return True
+    except Exception:
+        try:
+            for _ in range(max(1, int(copies))):
+                os.startfile(path, "print")  # type: ignore[attr-defined]
+                time.sleep(0.25)
+            return True
+        except Exception:
+            return False
+
+
+def _print_html_auto(path: str, copies: int = 1, parent: Optional[tk.Widget] = None) -> None:
+    copies = max(1, int(copies))
+
+    if _print_html_with_ie_silent(path, copies):
+        return
+    if _print_html_with_shell(path, copies):
+        return
+
+    try:
+        auto_path = _make_autoprint_html(path)
+        for _ in range(copies):
+            webbrowser.open_new_tab(_file_url(auto_path))
+        if parent is not None:
+            messagebox.showinfo("Print", "Receipt was sent to the printer. If the browser opened, allow/confirm printing once.", parent=parent)
+    except Exception as ex:
+        if parent is not None:
+            messagebox.showerror("Print failed", f"{ex}", parent=parent)
+
+def save_bill_as_html(
+    path: str,
+    bill: Dict[str, Any],
+    items: List[Dict[str, Any]],
+    pos_name: str = "",
+    support_call: str = "",
+    support_whatsapp: str = "",
+    shift_id: Any = "",
+    user_name: str = "مدير",
+    extra_summary_rows: Optional[List[Tuple[str, Any]]] = None,
+) -> None:
     """Generate receipt-style HTML for thermal printers (80mm width)."""
 
     def _fmtf(x: Any) -> str:
         try:
-            return f"{float(x):.2f}"
+            return f"{format_money(float(x))}"
         except Exception:
-            return "0.00"
+            return "0"
+
+    def _receipt_date_time(value: Any) -> Tuple[str, str]:
+        raw = western_digits(value or "")
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return dt.strftime("%d/%m/%Y"), dt.strftime("%I:%M%p")
+        except Exception:
+            parts = raw.replace("T", " ").split()
+            return (parts[0] if parts else ""), (parts[1][:5] if len(parts) > 1 else "")
 
     rows_html = ""
+    item_count = 0
     for ln in items:
         line_total = _fmtf(ln.get('line_total') or (float(ln.get('unit_price', 0)) * int(ln.get('qty', 0))))
+        qty = int(ln.get('qty') or 0)
+        item_count += qty
         rows_html += f"""<tr>
-<td>{_html(ln['item_type'])} - {_html(ln['school'])}<br><small>{_html(ln['color'])} / {_html(ln['size'])}</small></td>
-<td style="text-align:center">{ln['qty']}</td>
-<td style="text-align:left">{_fmtf(ln['unit_price'])}</td>
-<td style="text-align:left">{line_total}</td>
+<td class="num">{line_total}</td>
+<td class="num">{_fmtf(ln['unit_price'])}</td>
+<td class="item">{_html(ln['item_type'])} مقاس <span class="digits">{_html(ln['size'])}</span> - {_html(ln['color'])}</td>
+<td class="qty">{qty}</td>
 </tr>
 """
 
     customer = _html(bill.get('customer') or '')
+    customer_phone = _html(bill.get('customer_phone') or '')
+    pos_name = _html(_receipt_pos_name(pos_name))
+    support_call = _html(support_call)
+    support_whatsapp = _html(support_whatsapp)
     customer_line = f"<div>العميل: {customer}</div>" if customer else ""
+    customer_phone_line = f"<div>رقم العميل: {customer_phone}</div>" if customer_phone else ""
+    pos_line = f"<div class=\"branch\">{pos_name}</div>" if pos_name else ""
+    support_call_line = f"<div>للاتصال: {support_call}</div>" if support_call else ""
+    support_whatsapp_line = f"<div>واتساب: {support_whatsapp}</div>" if support_whatsapp else ""
+    receipt_date, receipt_time = _receipt_date_time(bill.get("created_at"))
+    bill_type_label = _html(_receipt_bill_type_label(bill.get("bill_type")))
+    total_value = format_money(float(bill['total']))
+    extra_summary_html = ""
+    for label, value in (extra_summary_rows or []):
+        extra_summary_html += (
+            '<tr class="summary"><td class="num">%s</td><td class="label" colspan="3">%s</td></tr>\n'
+            % (format_money(value), _html(str(label)))
+        )
 
     html = f"""<!DOCTYPE html>
-<html lang="ar" dir="rtl">
+<html lang="ar" dir="ltr">
 <head>
 <meta charset="utf-8">
 <title>فاتورة #{bill['id']}</title>
 <style>
-  @page {{ size: 80mm auto; margin: 2mm; }}
+  {_receipt_font_face_css()}
+  @page {{ margin: 1mm; }}
   * {{ box-sizing: border-box; }}
-  body {{
-    font-family: "Segoe UI", Tahoma, Arial, sans-serif;
-    font-size: 11px;
+  html, body {{
+    width: 80mm;
+    min-height: 120mm;
     margin: 0;
     padding: 0;
-    width: 76mm;
-    direction: rtl;
+  }}
+  body {{
+    color: #000;
+    font-family: {RECEIPT_FONT_STACK};
+    font-size: 11px;
+    font-weight: 800;
+    margin: 0;
+    padding: 0;
+    width: 78mm;
+    direction: ltr;
+    -webkit-font-smoothing: none;
+    print-color-adjust: exact;
   }}
   .receipt {{
-    padding: 2mm;
+    display: flex;
+    flex-direction: column;
+    min-height: 120mm;
+    padding: 1.5mm;
+    position: relative;
+    width: 78mm;
   }}
-  .center {{ text-align: center; }}
-  .sep {{
-    border: none;
-    border-top: 1px dashed #000;
-    margin: 4px 0;
+  .receipt-stamp {{
+    color: #000;
+    direction: ltr;
+    font-family: Tahoma, Arial, "Segoe UI", sans-serif;
+    font-size: 10px;
+    font-weight: 900;
+    left: 1.5mm;
+    line-height: 1.25;
+    position: absolute;
+    text-align: left;
+    top: 1.5mm;
   }}
-  h2 {{
-    font-size: 14px;
-    margin: 4px 0;
+  .brand-row {{
+    align-items: flex-start;
+    direction: ltr;
+    display: grid;
+    gap: 5mm;
+    grid-template-columns: 1fr 1fr;
+    margin: 2mm 0 1mm;
+  }}
+  .ossni-logo {{
+    align-items: center;
+    background: #333;
+    color: #fff;
+    display: flex;
+    font-size: 18px;
+    font-weight: 900;
+    height: 18mm;
+    justify-content: center;
+    letter-spacing: 1px;
+    margin-top: 8mm;
+  }}
+  .brand-mark {{
     text-align: center;
   }}
-  .info {{
-    font-size: 11px;
-    margin: 2px 0;
+  .brand-box {{
+    border: 1.5px solid #111;
+    color: #000;
+    display: inline-block;
+    font-family: {RECEIPT_FONT_STACK};
+    font-size: 28px;
+    font-weight: 900;
+    line-height: 1;
+    min-width: 31mm;
+    padding: 3mm 2mm 2mm;
   }}
-  table {{
+  .tagline {{
+    font-size: 16px;
+    color: #000;
+    font-weight: 900;
+    margin-top: 1mm;
+  }}
+  .meta {{
     border-collapse: collapse;
+    direction: rtl;
+    font-size: 11px;
+    margin-top: 1.5mm;
+    table-layout: fixed;
     width: 100%;
-    font-size: 10px;
   }}
-  th {{
-    border-bottom: 1px solid #000;
-    padding: 3px 2px;
+  .meta td {{
+    border: 1.4px dashed #333;
+    color: #000;
+    font-weight: 900;
+    line-height: 1.25;
+    padding: 0.8mm 1mm;
+    text-align: right;
+    white-space: nowrap;
+  }}
+  .meta .label {{
+    width: 30%;
+  }}
+  .meta .value {{
+    text-align: center;
+    width: 20%;
+  }}
+  .digits, .meta .value, .items .num, .items .qty {{
+    font-family: Tahoma, Arial, "Segoe UI", sans-serif;
+  }}
+  .items {{
+    border-collapse: collapse;
+    direction: ltr;
+    font-size: 11px;
+    margin-top: 4mm;
+    table-layout: fixed;
+    width: 100%;
+  }}
+  .items th, .items td {{
+    border: 1.3px solid #555;
+    color: #000;
+    padding: 0.9mm 0.8mm;
+    overflow: hidden;
+    vertical-align: middle;
+  }}
+  .items th {{
+    font-size: 11px;
+    font-weight: 900;
+    text-align: center;
+  }}
+  .items .num {{
+    font-size: 12px;
+    font-weight: 900;
+    text-align: center;
+    width: 18%;
+  }}
+  .items .item {{
+    direction: rtl;
+    font-family: {RECEIPT_FONT_STACK};
+    font-size: 9px;
+    font-weight: 900;
+    line-height: 1.25;
+    max-width: 0;
+    overflow-wrap: break-word;
+    text-align: right;
+    white-space: normal;
+    width: 56%;
+    word-break: break-word;
+  }}
+  .items .qty {{
+    font-size: 12px;
+    font-weight: 900;
+    text-align: center;
+    width: 12%;
+  }}
+  .summary td {{
+    border-left: 0;
+    border-right: 0;
+  }}
+  .summary .label {{
+    direction: rtl;
+    font-size: 14px;
+    font-weight: 900;
     text-align: right;
   }}
-  td {{
-    padding: 3px 2px;
-    vertical-align: top;
-    border-bottom: 1px dotted #ccc;
-  }}
-  .total-row {{
-    font-size: 14px;
-    font-weight: bold;
+  .notes {{
+    border-bottom: 1.3px solid #555;
+    border-top: 1.3px solid #555;
+    color: #000;
+    direction: rtl;
+    font-family: {RECEIPT_FONT_STACK};
+    font-size: 12px;
+    font-weight: 900;
+    margin-top: 1mm;
+    padding: 1mm 0;
     text-align: center;
-    margin: 6px 0;
   }}
   .footer {{
+    border-top: 1.3px solid #555;
+    color: #000;
+    direction: rtl;
+    font-family: {RECEIPT_FONT_STACK};
+    font-size: 11px;
+    font-weight: 900;
+    line-height: 1.35;
+    margin-top: auto;
+    padding-top: 2mm;
     text-align: center;
-    font-size: 10px;
-    margin-top: 6px;
   }}
 </style>
 </head>
 <body>
 <div class="receipt">
-  <h2>فاتورة #{bill['id']}</h2>
-  <hr class="sep">
-  <div class="info">التاريخ: {bill['created_at']}</div>
-  {customer_line}
-  <hr class="sep">
-  <table>
+  <div class="receipt-stamp">
+    <div>{receipt_date}</div>
+    <div>{receipt_time}</div>
+  </div>
+  <div class="brand-row">
+    <div class="ossni-logo">حسنى</div>
+    <div class="brand-mark">
+      <div class="brand-box">حسنى</div>
+      <div class="tagline">للزي المدرسي</div>
+    </div>
+  </div>
+  <table class="meta">
+    <colgroup>
+      <col style="width:30%">
+      <col style="width:20%">
+      <col style="width:30%">
+      <col style="width:20%">
+    </colgroup>
+    <tbody>
+      <tr><td class="label">رقم الفاتورة</td><td class="value">{western_digits(bill['id'])}</td><td class="label">نوع الفاتورة</td><td class="value">{bill_type_label}</td></tr>
+    </tbody>
+  </table>
+  <table class="items">
+    <colgroup>
+      <col style="width:18%">
+      <col style="width:14%">
+      <col style="width:56%">
+      <col style="width:12%">
+    </colgroup>
     <thead>
       <tr>
-        <th>الصنف</th>
-        <th>الكمية</th>
+        <th>الإجمالي</th>
         <th>السعر</th>
-        <th>المجموع</th>
+        <th>الصنف</th>
+        <th>العدد</th>
       </tr>
     </thead>
     <tbody>
       {rows_html}
+      <tr class="summary"><td class="num">{total_value}</td><td class="label" colspan="2">الإجمالي</td><td class="qty">{item_count}</td></tr>
+      {extra_summary_html}
     </tbody>
   </table>
-  <hr class="sep">
-  <div class="total-row">الإجمالي: {float(bill['total']):.2f}</div>
-  <hr class="sep">
-  <div class="footer">شكراً لتعاملكم معنا</div>
+  <div class="notes">{customer_line}{customer_phone_line}</div>
+  <div class="footer">
+    <div>رقم التليفون: {support_call or support_whatsapp}</div>
+    {support_call_line}
+    {support_whatsapp_line}
+  </div>
 </div>
 </body>
 </html>"""
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(html)
+    _write_html_file(path, html)
 
 def _html(s: str) -> str:
-    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return western_digits(s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-# Normalize size text for matching (handles Arabic digits & case)
-_AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+
+def _num_html(value: Any) -> str:
+    return f'<span class="digits">{_html(str(value))}</span>'
+
+
+def _money_html(value: Any) -> str:
+    return _num_html(format_money(value))
+
+# Normalize size text for matching (handles Arabic/Persian digits & case)
+_AR_DIGITS = _DIGIT_TRANSLATION
 def _normalize_size_label(s: str) -> str:
     return (s or "").strip().translate(_AR_DIGITS).upper()
 
@@ -706,10 +1438,43 @@ class SqliteDatabase:
             CREATE INDEX IF NOT EXISTS idx_movements_dir ON movements(direction);
             CREATE INDEX IF NOT EXISTS idx_movements_specs ON movements(item_type,school,color,size);
 
+            CREATE TABLE IF NOT EXISTS stock_audit_reports(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                reason TEXT,
+                diff_count INTEGER NOT NULL DEFAULT 0,
+                total_diff INTEGER NOT NULL DEFAULT 0,
+                total_value REAL NOT NULL DEFAULT 0,
+                bucket_key TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_stock_audit_reports_created
+                ON stock_audit_reports(created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS stock_audit_report_lines(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                report_id INTEGER NOT NULL,
+                stock_id INTEGER,
+                item_type TEXT NOT NULL,
+                school TEXT NOT NULL,
+                color TEXT NOT NULL,
+                size TEXT NOT NULL,
+                expected INTEGER NOT NULL,
+                actual INTEGER NOT NULL,
+                diff INTEGER NOT NULL,
+                unit_price REAL NOT NULL,
+                diff_value REAL NOT NULL,
+                FOREIGN KEY(report_id) REFERENCES stock_audit_reports(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_stock_audit_lines_report
+                ON stock_audit_report_lines(report_id);
+            CREATE INDEX IF NOT EXISTS idx_stock_audit_lines_specs
+                ON stock_audit_report_lines(item_type, school, color, size);
+
             CREATE TABLE IF NOT EXISTS bills(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at TEXT NOT NULL,
                 customer TEXT,
+                customer_phone TEXT,
                 total REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_bills_created ON bills(created_at DESC);
@@ -745,6 +1510,7 @@ class SqliteDatabase:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at TEXT NOT NULL,
                 customer TEXT,
+                customer_phone TEXT,
                 item_type TEXT NOT NULL,
                 school TEXT NOT NULL,
                 color TEXT NOT NULL,
@@ -856,6 +1622,25 @@ class SqliteDatabase:
                 self.conn.execute(
                     "ALTER TABLE bill_items ADD COLUMN origin TEXT NOT NULL DEFAULT 'STOCK'"
                 )
+        except Exception:
+            pass
+
+        try:
+            cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(stock_audit_reports)")}
+            if cols and "reason" not in cols:
+                self.conn.execute("ALTER TABLE stock_audit_reports ADD COLUMN reason TEXT")
+            if cols and "diff_count" not in cols:
+                self.conn.execute("ALTER TABLE stock_audit_reports ADD COLUMN diff_count INTEGER NOT NULL DEFAULT 0")
+            if cols and "total_diff" not in cols:
+                self.conn.execute("ALTER TABLE stock_audit_reports ADD COLUMN total_diff INTEGER NOT NULL DEFAULT 0")
+            if cols and "total_value" not in cols:
+                self.conn.execute("ALTER TABLE stock_audit_reports ADD COLUMN total_value REAL NOT NULL DEFAULT 0")
+            if cols and "bucket_key" not in cols:
+                self.conn.execute("ALTER TABLE stock_audit_reports ADD COLUMN bucket_key TEXT")
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_stock_audit_reports_bucket "
+                "ON stock_audit_reports(reason, bucket_key)"
+            )
         except Exception:
             pass
 
@@ -1032,6 +1817,22 @@ class SqliteDatabase:
         except Exception:
             pass
 
+        # Optional customer phone/number for bills and reservations.
+        try:
+            bill_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(bills)")}
+            if "customer_phone" not in bill_cols:
+                self.conn.execute("ALTER TABLE bills ADD COLUMN customer_phone TEXT")
+            res_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reservations)")}
+            if "customer_phone" not in res_cols:
+                self.conn.execute("ALTER TABLE reservations ADD COLUMN customer_phone TEXT")
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_bills_customer_phone_norm "
+                "ON bills(LOWER(TRIM(customer_phone)))"
+            )
+            self.conn.commit()
+        except Exception:
+            pass
+
         # Migrate reservation statuses from English to Arabic
         try:
             self.conn.execute("UPDATE reservations SET status='معلق' WHERE status='PENDING'")
@@ -1166,31 +1967,39 @@ class SqliteDatabase:
         """
         Insert or update a size profile for (item_type, school, color).
         """
-        self.conn.execute(
-            """
-            INSERT INTO size_profiles (
-                item_type, school, color,
-                num_start_1, num_end_1,
-                num_start_2, num_end_2,
-                has_alpha, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-            ON CONFLICT(item_type, school, color)
-            DO UPDATE SET
-                num_start_1 = excluded.num_start_1,
-                num_end_1   = excluded.num_end_1,
-                num_start_2 = excluded.num_start_2,
-                num_end_2   = excluded.num_end_2,
-                has_alpha   = excluded.has_alpha,
-                updated_at  = datetime('now')
-            """,
-            (
-                item_type, school, color,
-                r1_start, r1_end,
-                r2_start, r2_end,
-                int(has_alpha),
-            )
+        values = (
+            r1_start, r1_end,
+            r2_start, r2_end,
+            int(has_alpha),
         )
+        cur = self.conn.execute(
+            """
+            UPDATE size_profiles
+               SET num_start_1 = ?,
+                   num_end_1   = ?,
+                   num_start_2 = ?,
+                   num_end_2   = ?,
+                   has_alpha   = ?,
+                   updated_at  = datetime('now')
+             WHERE item_type = ?
+               AND school = ?
+               AND color = ?
+            """,
+            (*values, item_type, school, color),
+        )
+        if cur.rowcount == 0:
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO size_profiles (
+                    item_type, school, color,
+                    num_start_1, num_end_1,
+                    num_start_2, num_end_2,
+                    has_alpha, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                """,
+                (item_type, school, color, *values),
+            )
 
         self.conn.commit()
 
@@ -1226,11 +2035,7 @@ class SqliteDatabase:
         Save default price once (only if not exists).
         """
         self.conn.execute(
-            """
-            INSERT INTO item_defaults (item_type, default_price)
-            VALUES (?, ?)
-            ON CONFLICT(item_type) DO NOTHING
-            """,
+            "INSERT OR IGNORE INTO item_defaults (item_type, default_price) VALUES (?, ?)",
             (item_type, float(price))
         )
         self.conn.commit()
@@ -1363,13 +2168,29 @@ class SqliteDatabase:
 
         for r in ranges:
             if r["range_type"] == "NUMERIC":
-                for sz in range(r["start"], r["end"] + 1):
+                labels = ALLOWED_NUMERIC_RANGES.get((r["start"], r["end"]))
+                if labels is None:
+                    labels = [str(sz) for sz in range(r["start"], r["end"] + 1)]
+                for sz in labels:
                     out.append(self._size_row(school, item_type, color, str(sz)))
 
             elif r["range_type"] == "ALPHA":
                 for sz in r["alpha_set"]:
                     out.append(self._size_row(school, item_type, color, sz))
 
+        if out:
+            return out
+
+        seen = set()
+        try:
+            rows = self.current_inventory({"school": school, "item_type": item_type, "color": color})
+        except Exception:
+            rows = []
+        for row in rows:
+            sz = str(row.get("size") or "").strip()
+            if sz and sz not in seen:
+                seen.add(sz)
+                out.append(self._size_row(school, item_type, color, sz))
         return out
 
     def last_price_for_specs(
@@ -1794,7 +2615,7 @@ class SqliteDatabase:
             cur.execute(f"""
                 SELECT DISTINCT TRIM({field}) AS v
                 FROM stocks
-                WHERE count > 0
+                WHERE TRIM({field}) <> ''
                   AND {self._hidden_definition_sql(field, field)}
                 ORDER BY LOWER(v)
             """)
@@ -1951,27 +2772,29 @@ class SqliteDatabase:
 
     def current_inventory(self, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
         where, args = self._filters_where(filters, prefix="s.")
+        having_sql = "HAVING SUM(s.count) > 0" if (filters or {}).get("hide_zero") else ""
 
         cur = self.conn.cursor()
         cur.execute(
             f"""
             SELECT
                 MIN(s.id)              AS id,
-                s.item_type,
-                s.school,
-                s.color,
-                s.size,
-                s.unit_price,
-                SUM(s.count)           AS count,
-                SUM(s.count * s.unit_price) AS value
+                COALESCE(s.item_type, '') AS item_type,
+                COALESCE(s.school, '')    AS school,
+                COALESCE(s.color, '')     AS color,
+                COALESCE(s.size, '')      AS size,
+                COALESCE(s.unit_price, 0) AS unit_price,
+                COALESCE(SUM(COALESCE(s.count, 0)), 0) AS count,
+                COALESCE(SUM(COALESCE(s.count, 0) * COALESCE(s.unit_price, 0)), 0) AS value
             FROM stocks s
             WHERE {where}
             GROUP BY
-                s.item_type,
-                s.school,
-                s.color,
-                s.size,
-                s.unit_price
+                COALESCE(s.item_type, ''),
+                COALESCE(s.school, ''),
+                COALESCE(s.color, ''),
+                COALESCE(s.size, ''),
+                COALESCE(s.unit_price, 0)
+            {having_sql}
             ORDER BY
                 s.item_type,
                 s.school,
@@ -2024,13 +2847,20 @@ class SqliteDatabase:
         return rows
 
     # -------- Billing --------
-    def create_bill(self, customer: str, bill_lines: List[Dict[str, Any]], payment_method: str = PAYMENT_METHOD_CASH) -> int:
+    def create_bill(
+        self,
+        customer: str,
+        bill_lines: List[Dict[str, Any]],
+        payment_method: str = PAYMENT_METHOD_CASH,
+        customer_phone: str = "",
+    ) -> int:
         self._require_shift()
         if not bill_lines:
             raise ValueError("Bill has no items")
         payment_method = str(payment_method or PAYMENT_METHOD_CASH).strip().upper()
         if payment_method not in (PAYMENT_METHOD_CASH, PAYMENT_METHOD_VISA):
             raise ValueError("طريقة الدفع غير مدعومة.")
+        customer_phone = _normalize_customer_phone(customer_phone)
 
         def _candidates_for_line(line: Dict[str, Any]) -> List[sqlite3.Row]:
             cur = self.conn.cursor()
@@ -2055,8 +2885,8 @@ class SqliteDatabase:
 
         with self.conn:
             bill_cur = self.conn.execute(
-                "INSERT INTO bills(created_at,customer,total,bill_type,status,payment_method) VALUES(?,?,?,?,?,?)",
-                (now_iso(), (customer or "").strip() or None, 0.0, "SALE", "CONFIRMED", payment_method),
+                "INSERT INTO bills(created_at,customer,customer_phone,total,bill_type,status,payment_method) VALUES(?,?,?,?,?,?,?)",
+                (now_iso(), (customer or "").strip() or None, customer_phone or None, 0.0, "SALE", "CONFIRMED", payment_method),
             )
             bill_id = int(bill_cur.lastrowid)
             total = 0.0
@@ -2241,6 +3071,7 @@ class SqliteDatabase:
                     "bill_uuid": bill_uuid,
                     "bill_id": bill_id,
                     "customer": (customer or "").strip() or None,
+                    "customer_phone": customer_phone or None,
                     "total": float(total),
                     "payment_method": payment_method,
                     "items": items_payload,
@@ -2250,16 +3081,17 @@ class SqliteDatabase:
             return bill_id
 
     # -------- Return Bill Methods --------
-    def create_return_bill(self, customer: str, return_lines: List[Dict[str, Any]]) -> int:
+    def create_return_bill(self, customer: str, return_lines: List[Dict[str, Any]], customer_phone: str = "") -> int:
         """Create a return bill – adds items back to stock."""
         self._require_shift()
         if not return_lines:
             raise ValueError("لا توجد أصناف في فاتورة المرتجع")
+        customer_phone = _normalize_customer_phone(customer_phone)
 
         with self.conn:
             bill_cur = self.conn.execute(
-                "INSERT INTO bills(created_at,customer,total,bill_type,status) VALUES(?,?,?,?,?)",
-                (now_iso(), (customer or "").strip() or None, 0.0, "RETURN", "CONFIRMED"),
+                "INSERT INTO bills(created_at,customer,customer_phone,total,bill_type,status) VALUES(?,?,?,?,?,?)",
+                (now_iso(), (customer or "").strip() or None, customer_phone or None, 0.0, "RETURN", "CONFIRMED"),
             )
             bill_id = int(bill_cur.lastrowid)
             total = 0.0
@@ -2316,6 +3148,7 @@ class SqliteDatabase:
                 "bill_uuid": bill_uuid_row[0] if bill_uuid_row else None,
                 "bill_id": bill_id,
                 "customer": (customer or "").strip() or None,
+                "customer_phone": customer_phone or None,
                 "total": float(total),
                 "lines": [
                     {
@@ -2334,11 +3167,13 @@ class SqliteDatabase:
 
     def create_exchange_bill(self, customer: str,
                              return_lines: List[Dict[str, Any]],
-                             take_lines: List[Dict[str, Any]]) -> int:
+                             take_lines: List[Dict[str, Any]],
+                             customer_phone: str = "") -> int:
         """Create an exchange bill – returns items to stock and takes new items."""
         self._require_shift()
         if not return_lines and not take_lines:
             raise ValueError("لا توجد أصناف في فاتورة الاستبدال")
+        customer_phone = _normalize_customer_phone(customer_phone)
 
         def _candidates_for_line(line: Dict[str, Any]) -> List[Any]:
             cur = self.conn.cursor()
@@ -2357,8 +3192,8 @@ class SqliteDatabase:
 
         with self.conn:
             bill_cur = self.conn.execute(
-                "INSERT INTO bills(created_at,customer,total,bill_type,status) VALUES(?,?,?,?,?)",
-                (now_iso(), (customer or "").strip() or None, 0.0, "EXCHANGE", "CONFIRMED"),
+                "INSERT INTO bills(created_at,customer,customer_phone,total,bill_type,status) VALUES(?,?,?,?,?,?)",
+                (now_iso(), (customer or "").strip() or None, customer_phone or None, 0.0, "EXCHANGE", "CONFIRMED"),
             )
             bill_id = int(bill_cur.lastrowid)
             return_total = 0.0
@@ -2460,6 +3295,7 @@ class SqliteDatabase:
                 "bill_uuid": bill_uuid_row[0] if bill_uuid_row else None,
                 "bill_id": bill_id,
                 "customer": (customer or "").strip() or None,
+                "customer_phone": customer_phone or None,
                 "return_total": float(return_total),
                 "take_total": float(take_total),
                 "diff": float(diff),
@@ -2490,11 +3326,12 @@ class SqliteDatabase:
             return bill_id
 
     # -------- New Reservation Methods --------
-    def create_reservation(self, customer, lines, paid_amount=0.0):
+    def create_reservation(self, customer, lines, paid_amount=0.0, customer_phone: str = ""):
         """Create reservation records for items."""
         self._require_shift()
         if not lines:
             raise ValueError("لا توجد أصناف للحجز")
+        customer_phone = _normalize_customer_phone(customer_phone)
         created = []
         import uuid as _uuid
         group_uuid = f"grp-{_uuid.uuid4()}"
@@ -2503,9 +3340,9 @@ class SqliteDatabase:
                 total = float(line["unit_price"]) * int(line["qty"])
                 alloc_paid = float(paid_amount) if idx == 0 else 0.0
                 cur = self.conn.execute(
-                    """INSERT INTO reservations(created_at,customer,item_type,school,color,size,qty,unit_price,total_amount,paid_amount,status,note,reservation_group_uuid)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (now_iso(), (customer or "").strip(), line["item_type"], line["school"],
+                    """INSERT INTO reservations(created_at,customer,customer_phone,item_type,school,color,size,qty,unit_price,total_amount,paid_amount,status,note,reservation_group_uuid)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (now_iso(), (customer or "").strip(), customer_phone or None, line["item_type"], line["school"],
                      line["color"], line["size"], int(line["qty"]), float(line["unit_price"]),
                      total, alloc_paid, "معلق", line.get("note", ""), group_uuid),
                 )
@@ -2535,6 +3372,7 @@ class SqliteDatabase:
                 self._record_sync_event("RESERVATION_CREATED", {
                     "reservation_group_uuid": group_uuid,
                     "customer": (customer or "").strip() or None,
+                    "customer_phone": customer_phone or None,
                     "paid_amount": float(paid_amount),
                     "reservations": [
                         {
@@ -2600,7 +3438,6 @@ class SqliteDatabase:
         )
 
     def get_next_incoming_shipment_alert(self) -> Optional[Dict[str, Any]]:
-        retry_before = (datetime.now() - timedelta(minutes=10)).isoformat(timespec="seconds")
         row = self.conn.execute(
             """
             SELECT id, sync_event_uuid, shipment_uuid, from_device, note, total_qty, created_at
@@ -2611,13 +3448,10 @@ class SqliteDatabase:
                 WHERE p.shipment_uuid = a.shipment_uuid
                   AND p.status = 'PENDING'
             )
-              AND (a.shown_at IS NULL OR a.shown_at <= ?)
-            ORDER BY
-                CASE WHEN a.shown_at IS NULL THEN 0 ELSE 1 END,
-                a.id ASC
+              AND a.shown_at IS NULL
+            ORDER BY a.id ASC
             LIMIT 1
-            """,
-            (retry_before,),
+            """
         ).fetchone()
         return dict(row) if row else None
 
@@ -2653,6 +3487,38 @@ class SqliteDatabase:
             (str(shipment_uuid or "").strip(),),
         )
         return [dict(r) for r in cur.fetchall()]
+
+    def list_grouped_pending_shipment_items(self, shipment_uuid: str) -> List[Dict[str, Any]]:
+        rows = self.list_pending_shipment_items(shipment_uuid)
+        grouped: Dict[Tuple[str, str, str, str, float], Dict[str, Any]] = {}
+        ordered: List[Dict[str, Any]] = []
+        for row in rows:
+            key = (
+                str(row.get("item_type") or ""),
+                str(row.get("school") or ""),
+                str(row.get("color") or ""),
+                str(row.get("size") or ""),
+                float(row.get("unit_price") or 0.0),
+            )
+            bucket = grouped.get(key)
+            if bucket is None:
+                bucket = {
+                    "group_key": len(ordered),
+                    "item_type": key[0],
+                    "school": key[1],
+                    "color": key[2],
+                    "size": key[3],
+                    "unit_price": key[4],
+                    "expected_qty": 0,
+                    "line_indexes": [],
+                    "source_rows": [],
+                }
+                grouped[key] = bucket
+                ordered.append(bucket)
+            bucket["expected_qty"] = int(bucket["expected_qty"]) + int(row.get("expected_qty") or 0)
+            bucket["line_indexes"].append(int(row["line_index"]))
+            bucket["source_rows"].append(dict(row))
+        return ordered
 
     def list_pending_incoming_shipments(self) -> List[Dict[str, Any]]:
         cur = self.conn.execute(
@@ -2786,6 +3652,45 @@ class SqliteDatabase:
             self.mark_incoming_shipment_confirmed(ship)
         return {"shipment_uuid": ship, "has_diff": bool(diffs), "lines": len(rows)}
 
+    def confirm_grouped_incoming_shipment(
+        self,
+        shipment_uuid: str,
+        grouped_receipt_lines: List[Dict[str, Any]],
+        note: str = "",
+    ) -> Dict[str, Any]:
+        rows = self.list_pending_shipment_items(shipment_uuid)
+        by_idx = {int(r["line_index"]): dict(r) for r in rows}
+        payload: List[Dict[str, Any]] = []
+        seen: Set[int] = set()
+
+        for group in (grouped_receipt_lines or []):
+            line_indexes = [int(x) for x in (group.get("line_indexes") or [])]
+            if not line_indexes:
+                raise ValueError("يوجد بند مجمع غير صالح في التأكيد.")
+            received_total = int(group.get("received_qty") or 0)
+            if received_total < 0:
+                raise ValueError("الكمية المستلمة لا يمكن أن تكون سالبة.")
+            expected_total = 0
+            for idx in line_indexes:
+                if idx not in by_idx:
+                    raise ValueError("يوجد بند مجمع غير صالح في التأكيد.")
+                expected_total += int(by_idx[idx].get("expected_qty") or 0)
+            if received_total > expected_total:
+                raise ValueError("الكمية المستلمة للبند المجمع لا يمكن أن تتجاوز الكمية المرسلة.")
+
+            remaining = received_total
+            for idx in line_indexes:
+                expected = int(by_idx[idx].get("expected_qty") or 0)
+                assigned = min(expected, remaining)
+                payload.append({"line_index": idx, "received_qty": assigned})
+                seen.add(idx)
+                remaining -= assigned
+
+        if set(by_idx.keys()) != seen:
+            raise ValueError("يجب إدخال الكمية المستلمة لكل بند.")
+
+        return self.confirm_incoming_shipment(shipment_uuid, payload, note)
+
     def list_reservations(self, status=None, date_from=None, date_to=None, school=None, item_type=None, color=None):
         where = ["1=1"]
         args = []
@@ -2825,6 +3730,45 @@ class SqliteDatabase:
             (group_uuid,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def _stock_qty_for_specs(self, item_type: str, school: str, color: str, size: str) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COALESCE(SUM(count), 0)
+            FROM stocks
+            WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+              AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+              AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+              AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+            """,
+            (item_type, school, color, size),
+        ).fetchone()
+        return int((row[0] if row else 0) or 0)
+
+    def _ensure_reservation_delivery_stock(self, rows: Sequence[sqlite3.Row]) -> None:
+        required: Dict[Tuple[str, str, str, str], int] = {}
+        for row in rows:
+            key = (
+                str(row["item_type"] or "").strip(),
+                str(row["school"] or "").strip(),
+                str(row["color"] or "").strip(),
+                str(row["size"] or "").strip(),
+            )
+            required[key] = required.get(key, 0) + int(row["qty"] or 0)
+
+        shortages: List[str] = []
+        for (item_type, school, color, size), need_qty in required.items():
+            have_qty = self._stock_qty_for_specs(item_type, school, color, size)
+            if have_qty < need_qty:
+                shortages.append(
+                    f"{item_type} / {school} / {color} / {size}: المتاح {have_qty} والمطلوب {need_qty}"
+                )
+
+        if shortages:
+            raise ValueError(
+                "لا يمكن تسليم الحجز لأن بعض الأصناف غير موجودة في المخزون الحالي:\n"
+                + "\n".join(shortages)
+            )
 
     def update_reservation_payment(self, res_id, new_paid):
         rid = int(res_id)
@@ -2878,6 +3822,7 @@ class SqliteDatabase:
             raise ValueError("الحجز غير موجود")
         if row["status"] == "تم التسليم":
             raise ValueError("تم تسليم هذا الحجز مسبقاً")
+        self._ensure_reservation_delivery_stock([row])
         new_paid = float(row["paid_amount"]) + float(collected_amount)
         with self.conn:
             self.conn.execute(
@@ -2915,6 +3860,7 @@ class SqliteDatabase:
         pending_rows = [r for r in rows if str(r["status"]) != "تم التسليم"]
         if not pending_rows:
             raise ValueError("العناصر المحددة تم تسليمها مسبقاً.")
+        self._ensure_reservation_delivery_stock(pending_rows)
         group_uuid = str((rows[0]["reservation_group_uuid"] or "")).strip()
         selected_ids = {int(r["id"]) for r in pending_rows}
         selected_total = sum(float(r["total_amount"] or 0.0) for r in pending_rows)
@@ -2939,7 +3885,7 @@ class SqliteDatabase:
         collect = max(0.0, float(collected_amount))
         if abs(collect - required_collect) > 1e-6:
             raise ValueError(
-                f"المبلغ المطلوب لهذه العملية هو {required_collect:.2f} "
+                f"المبلغ المطلوب لهذه العملية هو {format_money(required_collect)} "
                 f"({'قيمة العناصر المسلمة بالكامل' if partial_mode else 'المتبقي بعد العربون'})."
             )
 
@@ -3408,7 +4354,7 @@ class SqliteDatabase:
                     self.conn.execute(
                         """INSERT INTO movements(ts,direction,stock_id,qty,note,item_type,school,color,size,unit_price)
                         SELECT ?,'PRICE_UPDATE',id,0,?,item_type,school,color,size,? FROM stocks WHERE id=?""",
-                        (now_iso(), f"تعديل سعر جماعي: {old_price:.2f} -> {new_price:.2f}", new_price, int(r["id"]))
+                        (now_iso(), f"تعديل سعر جماعي: {format_money(old_price)} -> {format_money(new_price)}", new_price, int(r["id"]))
                     )
                     updated += 1
             if updated > 0:
@@ -3605,7 +4551,7 @@ class SqliteDatabase:
     def list_bills(self) -> List[Dict[str, Any]]:
         cur = self.conn.cursor()
         cur.execute(
-            "SELECT id,created_at,customer,total,"
+            "SELECT id,created_at,customer,customer_phone,total,"
             " COALESCE(status,'CONFIRMED') AS status,"
             " COALESCE(bill_type,'SALE') AS bill_type,"
             f" COALESCE(payment_method,'{PAYMENT_METHOD_CASH}') AS payment_method,"
@@ -3726,11 +4672,15 @@ class SqliteDatabase:
 
     def set_app_setting(self, key: str, value: Any) -> None:
         with self.conn:
-            self.conn.execute(
-                "INSERT INTO app_settings(key, value) VALUES(?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (str(key), str(value)),
+            cur = self.conn.execute(
+                "UPDATE app_settings SET value = ? WHERE key = ?",
+                (str(value), str(key)),
             )
+            if cur.rowcount == 0:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO app_settings(key, value) VALUES(?, ?)",
+                    (str(key), str(value)),
+                )
 
     def is_manager_feature_enabled(self, feature_key: str) -> bool:
         default = "1" if POS_MANAGER_FEATURE_DEFAULTS.get(feature_key, False) else "0"
@@ -3859,6 +4809,269 @@ class SqliteDatabase:
                 "unit_price": float(s["unit_price"]),
             })
             return int(take)
+
+    def _stock_audit_line_values(self, line: Dict[str, Any]) -> Tuple[Any, ...]:
+        expected = int(line.get("expected") or 0)
+        actual = int(line.get("actual") or 0)
+        diff = int(line.get("diff", actual - expected) or 0)
+        price = float(line.get("unit_price") or 0)
+        return (
+            line.get("stock_id"),
+            str(line.get("item_type") or "").strip(),
+            str(line.get("school") or "").strip(),
+            str(line.get("color") or "").strip(),
+            _normalize_size_label(str(line.get("size") or "").strip()),
+            expected,
+            actual,
+            diff,
+            price,
+            float(diff * price),
+        )
+
+    def _insert_stock_audit_report_lines(self, report_id: int, lines: Sequence[Dict[str, Any]]) -> None:
+        for line in lines:
+            self.conn.execute(
+                """INSERT INTO stock_audit_report_lines
+                   (report_id,stock_id,item_type,school,color,size,expected,actual,diff,unit_price,diff_value)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (int(report_id), *self._stock_audit_line_values(line)),
+            )
+
+    def create_stock_audit_report(self, lines: Sequence[Dict[str, Any]], reason: str = "manual", bucket_key: Optional[str] = None) -> Optional[int]:
+        diff_lines = [dict(line) for line in lines if int(line.get("diff") or 0) != 0]
+        if not diff_lines:
+            return None
+        total_diff = sum(int(line.get("diff") or 0) for line in diff_lines)
+        total_value = sum(float(int(line.get("diff") or 0) * float(line.get("unit_price") or 0)) for line in diff_lines)
+        with self.conn:
+            cur = self.conn.execute(
+                """INSERT INTO stock_audit_reports
+                   (created_at,reason,diff_count,total_diff,total_value,bucket_key)
+                   VALUES(?,?,?,?,?,?)""",
+                (now_iso(), reason, len(diff_lines), int(total_diff), float(total_value), bucket_key),
+            )
+            report_id = int(cur.lastrowid)
+            self._insert_stock_audit_report_lines(report_id, diff_lines)
+        return report_id
+
+    def append_stock_audit_report_bucket(self, lines: Sequence[Dict[str, Any]], reason: str = "auto-equalization", bucket_key: Optional[str] = None) -> Optional[int]:
+        diff_lines = [dict(line) for line in lines if int(line.get("diff") or 0) != 0]
+        if not diff_lines:
+            return None
+        bucket = (bucket_key or now_iso()[:13]).strip()
+        total_diff = sum(int(line.get("diff") or 0) for line in diff_lines)
+        total_value = sum(float(int(line.get("diff") or 0) * float(line.get("unit_price") or 0)) for line in diff_lines)
+        with self.conn:
+            row = self.conn.execute(
+                """SELECT id FROM stock_audit_reports
+                   WHERE reason=? AND bucket_key=?
+                   ORDER BY id DESC LIMIT 1""",
+                (reason, bucket),
+            ).fetchone()
+            if row:
+                report_id = int(row["id"])
+                self.conn.execute(
+                    """UPDATE stock_audit_reports
+                       SET created_at=?, diff_count=diff_count+?, total_diff=total_diff+?, total_value=total_value+?
+                       WHERE id=?""",
+                    (now_iso(), len(diff_lines), int(total_diff), float(total_value), report_id),
+                )
+            else:
+                cur = self.conn.execute(
+                    """INSERT INTO stock_audit_reports
+                       (created_at,reason,diff_count,total_diff,total_value,bucket_key)
+                       VALUES(?,?,?,?,?,?)""",
+                    (now_iso(), reason, len(diff_lines), int(total_diff), float(total_value), bucket),
+                )
+                report_id = int(cur.lastrowid)
+            self._insert_stock_audit_report_lines(report_id, diff_lines)
+        return report_id
+
+    def normalize_auto_stock_audit_reports_by_hour(self) -> None:
+        rows = self.conn.execute(
+            """SELECT id, created_at FROM stock_audit_reports
+               WHERE reason='auto-equalization'
+               ORDER BY created_at ASC, id ASC"""
+        ).fetchall()
+        grouped: Dict[str, List[int]] = {}
+        for r in rows:
+            created = str(r["created_at"] or "")
+            bucket = created[:13] if len(created) >= 13 else now_iso()[:13]
+            grouped.setdefault(bucket, []).append(int(r["id"]))
+        with self.conn:
+            for bucket, ids in grouped.items():
+                keep = ids[0]
+                self.conn.execute("UPDATE stock_audit_reports SET bucket_key=? WHERE id=?", (bucket, keep))
+                for old_id in ids[1:]:
+                    self.conn.execute(
+                        "UPDATE stock_audit_report_lines SET report_id=? WHERE report_id=?",
+                        (keep, old_id),
+                    )
+                    self.conn.execute("DELETE FROM stock_audit_reports WHERE id=?", (old_id,))
+                totals = self.conn.execute(
+                    """SELECT COUNT(*) AS c, COALESCE(SUM(diff),0) AS d, COALESCE(SUM(diff_value),0) AS v
+                       FROM stock_audit_report_lines WHERE report_id=?""",
+                    (keep,),
+                ).fetchone()
+                self.conn.execute(
+                    "UPDATE stock_audit_reports SET diff_count=?, total_diff=?, total_value=? WHERE id=?",
+                    (int(totals["c"] or 0), int(totals["d"] or 0), float(totals["v"] or 0), keep),
+                )
+
+    def list_stock_audit_reports(self) -> List[Dict[str, Any]]:
+        try:
+            self.normalize_auto_stock_audit_reports_by_hour()
+        except Exception:
+            pass
+        rows = self.conn.execute(
+            """SELECT id,created_at,reason,diff_count,total_diff,total_value,bucket_key
+               FROM stock_audit_reports
+               ORDER BY created_at DESC, id DESC"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_stock_audit_report(self, report_id: int) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        report = self.conn.execute(
+            """SELECT id,created_at,reason,diff_count,total_diff,total_value,bucket_key
+               FROM stock_audit_reports WHERE id=?""",
+            (int(report_id),),
+        ).fetchone()
+        if not report:
+            return None, []
+        lines = self.conn.execute(
+            """SELECT id,report_id,stock_id,item_type,school,color,size,expected,actual,diff,unit_price,diff_value
+               FROM stock_audit_report_lines
+               WHERE report_id=?
+               ORDER BY item_type, school, color,
+                   CASE WHEN TRIM(size) NOT GLOB '*[^0-9]*' THEN 0 ELSE 1 END,
+                   CASE WHEN TRIM(size) NOT GLOB '*[^0-9]*' THEN CAST(size AS INTEGER) ELSE NULL END,
+                   CASE UPPER(TRIM(size))
+                       WHEN 'XXS' THEN 1 WHEN 'XS' THEN 2 WHEN 'S' THEN 3 WHEN 'M' THEN 4
+                       WHEN 'L' THEN 5 WHEN 'XL' THEN 6 WHEN '2XL' THEN 7 WHEN '3XL' THEN 8
+                       WHEN '4XL' THEN 9 WHEN '5XL' THEN 10 ELSE 99 END""",
+            (int(report_id),),
+        ).fetchall()
+        return dict(report), [dict(r) for r in lines]
+
+    def stock_audit_touched_keys(self) -> Set[Tuple[str, str, str, str]]:
+        touched: Set[Tuple[str, str, str, str]] = set()
+        for r in self.conn.execute("SELECT DISTINCT item_type,school,color,size FROM stock_audit_report_lines").fetchall():
+            touched.add((
+                str(r["item_type"] or "").strip().lower(),
+                str(r["school"] or "").strip().lower(),
+                str(r["color"] or "").strip().lower(),
+                _normalize_size_label(str(r["size"] or "")).lower(),
+            ))
+        for r in self.conn.execute(
+            """SELECT DISTINCT item_type,school,color,size FROM movements
+               WHERE direction IN ('ADJUST_IN','ADJUST_OUT')
+                 AND (note LIKE 'Physical count adjustment%' OR note LIKE 'POS stock audit%')"""
+        ).fetchall():
+            touched.add((
+                str(r["item_type"] or "").strip().lower(),
+                str(r["school"] or "").strip().lower(),
+                str(r["color"] or "").strip().lower(),
+                _normalize_size_label(str(r["size"] or "")).lower(),
+            ))
+        return touched
+
+    def apply_stock_adjustments(self, adjustments: Sequence[Dict[str, Any]], note: str = "Physical count adjustment") -> int:
+        self._require_shift()
+        applied = 0
+        with self.conn:
+            for adj in adjustments:
+                diff = int(adj.get("diff") or 0)
+                if diff == 0:
+                    continue
+                stock_id = adj.get("stock_id")
+                row = None
+                if stock_id not in (None, "", 0, "0"):
+                    row = self.conn.execute("SELECT * FROM stocks WHERE id=?", (int(stock_id),)).fetchone()
+                if row is None:
+                    item_type = str(adj.get("item_type") or "").strip()
+                    school = str(adj.get("school") or "").strip()
+                    color = str(adj.get("color") or "").strip()
+                    size = _normalize_size_label(str(adj.get("size") or "").strip())
+                    price = float(adj.get("unit_price") or self.get_effective_price(item_type, school, color, size) or 0)
+                    row = self.conn.execute(
+                        """SELECT * FROM stocks
+                           WHERE LOWER(TRIM(item_type))=LOWER(TRIM(?))
+                             AND LOWER(TRIM(school))=LOWER(TRIM(?))
+                             AND LOWER(TRIM(color))=LOWER(TRIM(?))
+                             AND LOWER(TRIM(size))=LOWER(TRIM(?))
+                             AND unit_price=?
+                           ORDER BY id ASC LIMIT 1""",
+                        (item_type, school, color, size, price),
+                    ).fetchone()
+                    if row:
+                        stock_id = int(row["id"])
+                    else:
+                        cur = self.conn.execute(
+                            """INSERT INTO stocks(item_type,school,color,size,unit_price,count)
+                               VALUES(?,?,?,?,?,0)""",
+                            (item_type, school, color, size, float(price)),
+                        )
+                        stock_id = int(cur.lastrowid)
+                        row = self.conn.execute("SELECT * FROM stocks WHERE id=?", (stock_id,)).fetchone()
+                        self._upsert_history({"item_type": item_type, "school": school, "color": color, "size": size})
+                direction = "ADJUST_IN" if diff > 0 else "ADJUST_OUT"
+                qty = abs(diff)
+                movement_ts = now_iso()
+                if diff > 0:
+                    affected_rows = [(row, qty)]
+                    self.conn.execute("UPDATE stocks SET count = count + ? WHERE id = ?", (int(qty), int(stock_id)))
+                else:
+                    affected_rows = []
+                    remaining = int(qty)
+                    candidates = self.conn.execute(
+                        """SELECT * FROM stocks
+                           WHERE LOWER(TRIM(item_type))=LOWER(TRIM(?))
+                             AND LOWER(TRIM(school))=LOWER(TRIM(?))
+                             AND LOWER(TRIM(color))=LOWER(TRIM(?))
+                             AND LOWER(TRIM(size))=LOWER(TRIM(?))
+                             AND unit_price=?
+                             AND count > 0
+                           ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END, id ASC""",
+                        (
+                            row["item_type"], row["school"], row["color"], row["size"],
+                            float(row["unit_price"]), int(stock_id),
+                        ),
+                    ).fetchall()
+                    for candidate in candidates:
+                        if remaining <= 0:
+                            break
+                        take = min(int(candidate["count"] or 0), remaining)
+                        if take <= 0:
+                            continue
+                        self.conn.execute("UPDATE stocks SET count = count - ? WHERE id = ?", (int(take), int(candidate["id"])))
+                        affected_rows.append((candidate, take))
+                        remaining -= take
+                    if remaining > 0:
+                        raise ValueError("لا يمكن تطبيق التسوية لأن الكمية المتاحة أقل من الفرق المطلوب.")
+
+                for affected, take_qty in affected_rows:
+                    self.conn.execute(
+                        """INSERT INTO movements
+                           (ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,unit_price)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            movement_ts, direction, int(affected["id"]), int(take_qty), note, None,
+                            affected["item_type"], affected["school"], affected["color"], affected["size"], float(affected["unit_price"]),
+                        ),
+                    )
+                    self._record_sync_event("STOCK_ADJUST", {
+                        "stock_id": int(affected["id"]),
+                        "direction": "IN" if diff > 0 else "OUT",
+                        "qty": int(take_qty),
+                        "note": note,
+                        "item_type": affected["item_type"],
+                        "school": affected["school"],
+                        "color": affected["color"],
+                        "size": affected["size"],
+                        "unit_price": float(affected["unit_price"]),
+                    })
+                applied += 1
+        return applied
 
     def list_movements(self, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
         where = ["1=1"]
@@ -4248,7 +5461,7 @@ class DateField(ttk.Frame):
         self.var = tk.StringVar()
         self.entry = ttk.Entry(row, textvariable=self.var, width=14)
         self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.btn = ttk.Button(row, text="📅", width=3, command=self._open)
+        self.btn = ttk.Button(row, text="...", width=3, command=self._open)
         self.btn.pack(side=tk.LEFT, padx=(4,0))
         self._popup: Optional[tk.Toplevel] = None
         self.entry.bind("<Return>", lambda e: self._validate())
@@ -4689,7 +5902,7 @@ class DashboardFrame(ttk.Frame):
         cards = ttk.Frame(self)
         cards.pack(fill=tk.X, pady=(0, 12))
 
-        self._today_sales = tk.StringVar(value="0.00")
+        self._today_sales = tk.StringVar(value="0")
         self._today_bills = tk.StringVar(value="0")
         self._today_reservations = tk.StringVar(value="0")
         self._pending_reservations = tk.StringVar(value="0")
@@ -4748,7 +5961,7 @@ class DashboardFrame(ttk.Frame):
         today = date.today().isoformat()
         try:
             stats = self.db.get_sales_stats(date_from=today, date_to=today)
-            self._today_sales.set(f"{stats['sales_total']:.2f}")
+            self._today_sales.set(f"{format_money(stats['sales_total'])}")
             self._today_bills.set(str(stats["sales_count"]))
             self._today_reservations.set(str(stats["res_count"]))
         except Exception:
@@ -4763,7 +5976,7 @@ class DashboardFrame(ttk.Frame):
             for b in self.db.list_bills()[:10]:
                 self._recent_tbl.insert("", tk.END, values=(
                     b["id"], fmt_local_ts(b["created_at"], ""),
-                    b.get("customer", ""), f"{float(b['total']):.2f}"))
+                    b.get("customer", ""), f"{format_money(float(b['total']))}"))
             _apply_zebra_tags(self._recent_tbl)
         except Exception:
             pass
@@ -4946,7 +6159,7 @@ class IncomeFrame(ttk.Frame):
         tot_row = ttk.Frame(right)
         tot_row.pack(fill=tk.X, padx=4, pady=2)
         ttk.Label(tot_row, text="الإجمالي:").pack(side=tk.RIGHT)
-        self._staging_total_var = tk.StringVar(value="0.00")
+        self._staging_total_var = tk.StringVar(value="0")
         ttk.Label(tot_row, textvariable=self._staging_total_var, font=("Segoe UI", 12, "bold")).pack(side=tk.RIGHT, padx=(0, 6))
 
         self._staging_qty_var = tk.StringVar(value="0")
@@ -5153,9 +6366,9 @@ class IncomeFrame(ttk.Frame):
             self._staging_table.insert(
                 "", tk.END, iid=str(idx),
                 values=(ln["item_type"], ln["school"], ln["color"], ln["size"],
-                        f"{float(ln['unit_price']):.2f}", ln["qty"], f"{line_total:.2f}")
+                        f"{format_money(float(ln['unit_price']))}", ln["qty"], f"{format_money(line_total)}")
             )
-        self._staging_total_var.set(f"{total_value:.2f}")
+        self._staging_total_var.set(f"{format_money(total_value)}")
         self._staging_qty_var.set(str(total_qty))
         _apply_zebra_tags(self._staging_table)
 
@@ -5214,6 +6427,7 @@ class POSFrame(ttk.Frame):
         # In-memory bill state
         self.bills = {1: [], 2: [], 3: [], 4: [], 5: [], 6: []}
         self.customers = {1: "", 2: "", 3: "", 4: "", 5: "", 6: ""}
+        self.customer_phones = {1: "", 2: "", 3: "", 4: "", 5: "", 6: ""}
         self.active_bill = 1
         self._exchange_mode = "return"  # "return" or "take" — for bill 6
 
@@ -5391,11 +6605,15 @@ class POSFrame(ttk.Frame):
 
         # Customer field
         self._customer_var = tk.StringVar()
+        self._customer_phone_var = tk.StringVar()
         cust_row = ttk.Frame(right)
         cust_row.pack(fill=tk.X, padx=4, pady=(2, 2))
         ttk.Label(cust_row, text="العميل:").pack(side=tk.LEFT)
         self._cust_entry = ttk.Entry(cust_row, textvariable=self._customer_var)
         self._cust_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
+        ttk.Label(cust_row, text="رقم:").pack(side=tk.LEFT, padx=(6, 0))
+        self._cust_phone_entry = ttk.Entry(cust_row, textvariable=self._customer_phone_var, width=16)
+        self._cust_phone_entry.pack(side=tk.LEFT, padx=(4, 0))
         _wh_btn = ttk.Button(
             cust_row,
             text=WAREHOUSE_RETURN_LABEL,
@@ -5414,6 +6632,8 @@ class POSFrame(ttk.Frame):
         ToolTip(_branch_btn, "سجّل طلب تحويل إلى فرع آخر. التنفيذ الفعلي يتم من خلال المخزن فقط")
         self._cust_entry.bind("<FocusOut>", lambda e: self._save_customer(), add="+")
         self._cust_entry.bind("<KeyRelease>", lambda e: self._autocomplete_customer(), add="+")
+        self._cust_phone_entry.bind("<FocusOut>", lambda e: self._save_customer(), add="+")
+        self._cust_phone_entry.bind("<KeyRelease>", lambda e: self._save_customer(), add="+")
         self._cust_listbox = None
 
         # Bill items treeview
@@ -5454,7 +6674,7 @@ class POSFrame(ttk.Frame):
         tot_row = ttk.Frame(right)
         tot_row.pack(fill=tk.X, padx=4, pady=(2, 2))
         ttk.Label(tot_row, text="الإجمالي:").pack(side=tk.RIGHT)
-        self.total_var = tk.StringVar(value="0.00")
+        self.total_var = tk.StringVar(value="0")
         ttk.Label(tot_row, textvariable=self.total_var, font=("Segoe UI", 12, "bold")).pack(side=tk.RIGHT, padx=(0, 6))
 
         # Reservation extras (only visible for bill 5)
@@ -5476,15 +6696,15 @@ class POSFrame(ttk.Frame):
         # Exchange extras (only visible for bill 6)
         self._exchange_frame = ttk.LabelFrame(right, text="بيانات الاستبدال")
         ex_mode_row = ttk.Frame(self._exchange_frame)
-        ex_mode_row.pack(fill=tk.X, padx=8, pady=4)
+        ex_mode_row.pack(fill=tk.X, padx=10, pady=(8, 4))
         self._exchange_mode_var = tk.StringVar(value="return")
         ttk.Radiobutton(ex_mode_row, text="↩ إضافة مرتجع", variable=self._exchange_mode_var,
-                        value="return", command=self._on_exchange_mode_changed).pack(side=tk.LEFT, padx=(0, 12))
+                        value="return", command=self._on_exchange_mode_changed).pack(side=tk.LEFT, padx=(0, 18), pady=2)
         ttk.Radiobutton(ex_mode_row, text="↪ إضافة مأخوذ", variable=self._exchange_mode_var,
-                        value="take", command=self._on_exchange_mode_changed).pack(side=tk.LEFT)
-        self._exchange_diff_var = tk.StringVar(value="فرق السعر: 0.00")
+                        value="take", command=self._on_exchange_mode_changed).pack(side=tk.LEFT, pady=2)
+        self._exchange_diff_var = tk.StringVar(value="فرق السعر: 0")
         ttk.Label(self._exchange_frame, textvariable=self._exchange_diff_var,
-                  font=("Segoe UI", 10, "bold")).pack(padx=8, pady=(0, 4), anchor="w")
+                  font=("Segoe UI", 11, "bold")).pack(fill=tk.X, padx=10, pady=(2, 8), anchor="w")
 
         # Finalize button with shortcut hint
         ttk.Button(right, text="تأكيد الفاتورة / الحجز (F8)", command=self._finalize,
@@ -5614,7 +6834,74 @@ class POSFrame(ttk.Frame):
         return (a or "").strip().casefold() == (b or "").strip().casefold()
 
     def _pending_out_qty_for_specs(self, school: str, item: str, color: str, size: str) -> int:
-        """Qty on the active bill that will deduct shop stock when finalized (not yet in DB)."""
+        """Qty on open bills that will deduct shop stock when finalized (not yet in DB)."""
+        total = 0
+        for b, lines in (self.bills or {}).items():
+            if b in (1, 2, 3, 5):
+                for ln in lines or []:
+                    if not self._spec_match(ln.get("school"), school):
+                        continue
+                    if not self._spec_match(ln.get("item_type"), item):
+                        continue
+                    if not self._spec_match(ln.get("color"), color):
+                        continue
+                    if not self._spec_match(ln.get("size"), size):
+                        continue
+                    try:
+                        total += int(ln.get("qty") or 0)
+                    except Exception:
+                        pass
+            elif b == 6:
+                for ln in lines or []:
+                    if ln.get("direction") != "take":
+                        continue
+                    if not self._spec_match(ln.get("school"), school):
+                        continue
+                    if not self._spec_match(ln.get("item_type"), item):
+                        continue
+                    if not self._spec_match(ln.get("color"), color):
+                        continue
+                    if not self._spec_match(ln.get("size"), size):
+                        continue
+                    try:
+                        total += int(ln.get("qty") or 0)
+                    except Exception:
+                        pass
+        return total
+
+    def _active_add_requires_stock(self) -> bool:
+        return self.active_bill in (1, 2, 3)
+
+    def _available_qty_for_active_add(self, size: str) -> int:
+        return self._available_qty_for_specs(
+            self._sel_school or "", self._sel_item or "", self._sel_color or "", str(size or ""))
+
+    def _available_qty_for_specs(self, school: str, item: str, color: str, size: str) -> int:
+        try:
+            rows = self.db.current_inventory({
+                "school": school,
+                "item_type": item,
+                "color": color,
+                "size": size,
+            })
+            on_hand = sum(int(r.get("count") or 0) for r in rows)
+        except Exception:
+            on_hand = 0
+        pending = self._pending_out_qty_for_specs(school, item, color, str(size or ""))
+        return max(0, int(on_hand) - int(pending))
+
+    def _line_requires_stock(self, bill_no: int, line: Dict[str, Any]) -> bool:
+        return bill_no in (1, 2, 3)
+
+    def _warn_unavailable_add(self, size: str, requested: int, available: int) -> None:
+        messagebox.showwarning(
+            "كمية غير متاحة",
+            f"لا يمكن إضافة هذا المقاس إلى الفاتورة.\nالمطلوب: {requested}\nالمتاح: {available}",
+            parent=self,
+        )
+
+    def _legacy_pending_out_qty_for_specs_active_only(self, school: str, item: str, color: str, size: str) -> int:
+        """Kept unused for reference during the POS stock guard transition."""
         b = self.active_bill
         lines = self.bills.get(b) or []
         total = 0
@@ -5750,6 +7037,19 @@ class POSFrame(ttk.Frame):
         if not all([self._sel_school, self._sel_item, self._sel_color]):
             messagebox.showwarning("اختر أولاً", "اختر المدرسة والنوع واللون أولاً.")
             return
+        try:
+            qty = int(qty)
+        except Exception:
+            qty = 0
+        if qty <= 0:
+            messagebox.showwarning("كمية غير صالحة", "الكمية يجب أن تكون أكبر من صفر.", parent=self)
+            return
+        if self._active_add_requires_stock():
+            available = self._available_qty_for_active_add(size)
+            if available <= 0 or qty > available:
+                self._warn_unavailable_add(size, qty, available)
+                self._refresh_size_grid_if_current(preserve_size=size)
+                return
 
         # Find price
         price = self._compute_price_for_size(size)
@@ -5861,7 +7161,8 @@ class POSFrame(ttk.Frame):
             )
             if has_alpha:
                 sizes.extend(ALPHA_SIZES)
-            return sizes
+            if sizes:
+                return sizes
 
         try:
             rows = self.db.current_inventory({"school": school, "item_type": item, "color": color})
@@ -6045,9 +7346,11 @@ class POSFrame(ttk.Frame):
     def _switch_bill(self, n: int):
         # Save current customer
         self.customers[self.active_bill] = self._customer_var.get()
+        self.customer_phones[self.active_bill] = _normalize_customer_phone(self._customer_phone_var.get())
         self.active_bill = n
         # Restore customer for this bill
         self._customer_var.set(self.customers[n])
+        self._customer_phone_var.set(self.customer_phones[n])
         self._update_bill_btn_styles()
         self._sync_bill_table()
         self._update_res_frame_visibility()
@@ -6068,6 +7371,7 @@ class POSFrame(ttk.Frame):
 
     def _save_customer(self):
         self.customers[self.active_bill] = self._customer_var.get()
+        self.customer_phones[self.active_bill] = _normalize_customer_phone(self._customer_phone_var.get())
 
     def _choose_branch_target(self):
         current_device = (self.db.conn.execute(
@@ -6093,6 +7397,7 @@ class POSFrame(ttk.Frame):
             dev = ui_to_dev.get(picked, picked)
             if dev:
                 self._customer_var.set(f"{BRANCH_TARGET_PREFIX}{_branch_display_name(dev)}")
+                self._save_customer()
             dlg.destroy()
 
         btns = ttk.Frame(frm)
@@ -6145,7 +7450,30 @@ class POSFrame(ttk.Frame):
             def _select(event=None):
                 sel = lb.curselection()
                 if sel:
-                    self._customer_var.set(lb.get(sel[0]))
+                    picked = lb.get(sel[0])
+                    self._customer_var.set(picked)
+                    try:
+                        row = self.db.conn.execute(
+                            """
+                            SELECT customer_phone FROM (
+                                SELECT customer_phone, created_at FROM bills
+                                WHERE LOWER(TRIM(customer)) = LOWER(TRIM(?))
+                                  AND COALESCE(TRIM(customer_phone), '') <> ''
+                                UNION ALL
+                                SELECT customer_phone, created_at FROM reservations
+                                WHERE LOWER(TRIM(customer)) = LOWER(TRIM(?))
+                                  AND COALESCE(TRIM(customer_phone), '') <> ''
+                            )
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                            """,
+                            (picked, picked),
+                        ).fetchone()
+                        if row:
+                            self._customer_phone_var.set(row["customer_phone"] or "")
+                    except Exception:
+                        pass
+                    self._save_customer()
                 lb.destroy()
                 self._cust_listbox = None
 
@@ -6208,21 +7536,21 @@ class POSFrame(ttk.Frame):
             self.bill_table.insert(
                 "", tk.END, iid=str(idx),
                 values=(display_type, ln["school"], ln["color"], ln["size"],
-                        f"{float(ln['unit_price']):.2f}", ln["qty"], f"{line_total:.2f}")
+                        f"{format_money(float(ln['unit_price']))}", ln["qty"], f"{format_money(line_total)}")
             )
 
         if is_exchange:
             diff = take_total - return_total
             if diff > 0:
-                diff_text = f"فرق السعر: {diff:.2f} (يدفع العميل)"
+                diff_text = f"فرق السعر: {format_money(diff)} (يدفع العميل)"
             elif diff < 0:
-                diff_text = f"فرق السعر: {abs(diff):.2f} (يسترد العميل)"
+                diff_text = f"فرق السعر: {format_money(abs(diff))} (يسترد العميل)"
             else:
-                diff_text = "فرق السعر: 0.00 (متساوي)"
+                diff_text = "فرق السعر: 0 (متساوي)"
             self._exchange_diff_var.set(diff_text)
-            self.total_var.set(f"{diff:.2f}")
+            self.total_var.set(f"{format_money(diff)}")
         else:
-            self.total_var.set(f"{total:.2f}")
+            self.total_var.set(f"{format_money(total)}")
 
         _apply_zebra_tags(self.bill_table)
 
@@ -6233,6 +7561,18 @@ class POSFrame(ttk.Frame):
         idx = int(sel[0])
         lines = self.bills[self.active_bill]
         if 0 <= idx < len(lines):
+            line = lines[idx]
+            if self._line_requires_stock(self.active_bill, line):
+                available = self._available_qty_for_specs(
+                    line.get("school") or "",
+                    line.get("item_type") or "",
+                    line.get("color") or "",
+                    line.get("size") or "",
+                )
+                if available <= 0:
+                    self._warn_unavailable_add(str(line.get("size") or ""), 1, available)
+                    self._refresh_size_grid_if_current(preserve_size=self._sel_size)
+                    return
             lines[idx]["qty"] = int(lines[idx]["qty"]) + 1
             self._sync_bill_table()
             self.bill_table.selection_set(str(idx))
@@ -6277,6 +7617,7 @@ class POSFrame(ttk.Frame):
 
         self._save_customer()
         customer = (self.customers[self.active_bill] or "").strip()
+        customer_phone = _normalize_customer_phone(self.customer_phones.get(self.active_bill, ""))
         total_qty = sum(int(ln["qty"]) for ln in lines)
         is_reservation = self.active_bill == 5
         is_return = self.active_bill == 4
@@ -6288,7 +7629,7 @@ class POSFrame(ttk.Frame):
             overlay_title = "تأكيد المرتجع"
             review_title = "مراجعة المرتجع"
             total = sum(float(ln["unit_price"]) * int(ln["qty"]) for ln in lines)
-            total_label = f"مبلغ الاسترداد: {total:.2f}"
+            total_label = f"مبلغ الاسترداد: {format_money(total)}"
         elif is_exchange:
             overlay_title = "تأكيد الاستبدال"
             review_title = "مراجعة الاستبدال"
@@ -6301,31 +7642,33 @@ class POSFrame(ttk.Frame):
             take_total = sum(float(ln["unit_price"]) * int(ln["qty"]) for ln in take_lines)
             total = take_total - ret_total
             if total > 0:
-                total_label = f"يدفع العميل: {total:.2f}"
+                total_label = f"يدفع العميل: {format_money(total)}"
             elif total < 0:
-                total_label = f"يسترد العميل: {abs(total):.2f}"
+                total_label = f"يسترد العميل: {format_money(abs(total))}"
             else:
                 total_label = "متساوي - لا فرق في السعر"
         elif is_reservation:
             overlay_title = "تأكيد الحجز"
             review_title = "مراجعة الحجز"
             total = sum(float(ln["unit_price"]) * int(ln["qty"]) for ln in lines)
-            total_label = f"الإجمالي: {total:.2f}"
+            total_label = f"الإجمالي: {format_money(total)}"
         elif warehouse_target:
             overlay_title = f"تأكيد {WAREHOUSE_RETURN_LABEL}"
             review_title = f"مراجعة {WAREHOUSE_RETURN_LABEL}"
             total = sum(float(ln["unit_price"]) * int(ln["qty"]) for ln in lines)
-            total_label = f"قيمة المرجع: {total:.2f}"
-        elif branch_target := _extract_branch_target(customer):
-            overlay_title = "تأكيد تحويل إلى فرع"
-            review_title = f"مراجعة تحويل إلى {branch_target}"
-            total = sum(float(ln["unit_price"]) * int(ln["qty"]) for ln in lines)
-            total_label = f"قيمة التحويل: {total:.2f}"
+            total_label = f"قيمة المرجع: {format_money(total)}"
         else:
-            overlay_title = "تأكيد الفاتورة"
-            review_title = "مراجعة الفاتورة"
-            total = sum(float(ln["unit_price"]) * int(ln["qty"]) for ln in lines)
-            total_label = f"الإجمالي: {total:.2f}"
+            branch_target = _extract_branch_target(customer)
+            if branch_target:
+                overlay_title = "تأكيد تحويل إلى فرع"
+                review_title = f"مراجعة تحويل إلى {branch_target}"
+                total = sum(float(ln["unit_price"]) * int(ln["qty"]) for ln in lines)
+                total_label = f"قيمة التحويل: {format_money(total)}"
+            else:
+                overlay_title = "تأكيد الفاتورة"
+                review_title = "مراجعة الفاتورة"
+                total = sum(float(ln["unit_price"]) * int(ln["qty"]) for ln in lines)
+                total_label = f"الإجمالي: {format_money(total)}"
 
         # Show confirmation overlay
         overlay = tk.Toplevel(self)
@@ -6341,6 +7684,8 @@ class POSFrame(ttk.Frame):
 
         if customer:
             ttk.Label(frm, text=f"العميل: {customer}").pack(anchor="w")
+        if customer_phone:
+            ttk.Label(frm, text=f"رقم العميل: {customer_phone}").pack(anchor="w")
 
         ttk.Label(frm, text=f"عدد الأصناف: {len(lines)}   |   عدد القطع: {total_qty}",
                   font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 4))
@@ -6364,7 +7709,7 @@ class POSFrame(ttk.Frame):
                 spec = f"{ln['item_type']} - {ln['school']} ({ln['color']}/{ln['size']})"
                 lt = float(ln['unit_price']) * int(ln['qty'])
                 d = "\u21a9" if ln.get("direction") == "return" else "\u21aa"
-                summary_tree.insert("", tk.END, values=(d, spec, ln['qty'], f"{lt:.2f}"))
+                summary_tree.insert("", tk.END, values=(d, spec, ln['qty'], f"{format_money(lt)}"))
         else:
             summary_tree = ttk.Treeview(cols_frm, columns=("spec", "qty", "total"),
                                          show="headings", height=min(len(lines), 6))
@@ -6378,7 +7723,7 @@ class POSFrame(ttk.Frame):
                 prefix = "\u21a9 " if is_return else ""
                 spec = f"{prefix}{ln['item_type']} - {ln['school']} ({ln['color']}/{ln['size']})"
                 lt = float(ln['unit_price']) * int(ln['qty'])
-                summary_tree.insert("", tk.END, values=(spec, ln['qty'], f"{lt:.2f}"))
+                summary_tree.insert("", tk.END, values=(spec, ln['qty'], f"{format_money(lt)}"))
         summary_tree.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(frm, text=total_label,
@@ -6389,21 +7734,22 @@ class POSFrame(ttk.Frame):
 
         def _do_finalize():
             overlay.destroy()
-            self._execute_finalize(lines, customer, is_reservation, total)
+            self._execute_finalize(lines, customer, is_reservation, total, customer_phone)
 
         ttk.Button(btn_row, text="تأكيد", command=_do_finalize,
                    style="Success.TButton").pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(btn_row, text="إلغاء", command=overlay.destroy,
                    style="Secondary.TButton").pack(side=tk.LEFT)
 
-    def _execute_finalize(self, lines, customer, is_reservation, total):
+    def _execute_finalize(self, lines, customer, is_reservation, total, customer_phone=""):
         """Execute the actual finalize after confirmation."""
         is_return = self.active_bill == 4
         is_exchange = self.active_bill == 6
+        customer_phone = _normalize_customer_phone(customer_phone)
 
         if is_return:
             try:
-                bill_id = self.db.create_return_bill(customer, lines)
+                bill_id = self.db.create_return_bill(customer, lines, customer_phone=customer_phone)
             except Exception as ex:
                 messagebox.showerror("فشل المرتجع", str(ex), parent=self)
                 return
@@ -6411,9 +7757,8 @@ class POSFrame(ttk.Frame):
             self._sync_bill_table()
             self._refresh_size_grid_if_current(preserve_size=self._sel_size)
             ToastNotification.show(self.winfo_toplevel(),
-                                   f"تم إنشاء فاتورة مرتجع #{bill_id} (استرداد: {total:.2f})", toast_type="success")
-            if messagebox.askyesno("طباعة", f"طباعة فاتورة المرتجع #{bill_id}؟"):
-                self._print_return_bill(bill_id, total)
+                                   f"تم إنشاء فاتورة مرتجع #{bill_id} (استرداد: {format_money(total)})", toast_type="success")
+            self._print_return_bill(bill_id, total)
 
         elif is_exchange:
             # Copy lines before clearing since lines is a reference to self.bills[6]
@@ -6421,20 +7766,19 @@ class POSFrame(ttk.Frame):
             ret_lines = [ln for ln in lines_copy if ln.get("direction") == "return"]
             take_lines = [ln for ln in lines_copy if ln.get("direction") == "take"]
             try:
-                bill_id = self.db.create_exchange_bill(customer, ret_lines, take_lines)
+                bill_id = self.db.create_exchange_bill(customer, ret_lines, take_lines, customer_phone=customer_phone)
             except Exception as ex:
                 messagebox.showerror("فشل الاستبدال", str(ex), parent=self)
                 return
             self.bills[6].clear()
             self._exchange_mode = "return"
             self._exchange_mode_var.set("return")
-            self._exchange_diff_var.set("فرق السعر: 0.00")
+            self._exchange_diff_var.set("فرق السعر: 0")
             self._sync_bill_table()
             self._refresh_size_grid_if_current(preserve_size=self._sel_size)
             ToastNotification.show(self.winfo_toplevel(),
                                    f"تم إنشاء فاتورة استبدال #{bill_id}", toast_type="success")
-            if messagebox.askyesno("طباعة", f"طباعة فاتورة الاستبدال #{bill_id}؟"):
-                self._print_exchange_bill(bill_id, lines_copy, total)
+            self._print_exchange_bill(bill_id, lines_copy, total)
 
         elif is_reservation:
             try:
@@ -6445,8 +7789,8 @@ class POSFrame(ttk.Frame):
             for ln in lines:
                 ln["note"] = note
             try:
-                ids = self.db.create_reservation(customer, lines, paid_amount=paid)
-                self._print_reservation_receipt(ids, lines, customer, paid, total)
+                ids = self.db.create_reservation(customer, lines, paid_amount=paid, customer_phone=customer_phone)
+                self._print_reservation_receipt(ids, lines, customer, paid, total, customer_phone)
                 ToastNotification.show(self.winfo_toplevel(),
                                        f"تم إنشاء {len(ids)} حجز/حجوزات بنجاح", toast_type="success")
                 self.bills[5].clear()
@@ -6461,7 +7805,7 @@ class POSFrame(ttk.Frame):
             if not payment_method:
                 return
             try:
-                bill_id = self.db.create_bill(customer, lines, payment_method=payment_method)
+                bill_id = self.db.create_bill(customer, lines, payment_method=payment_method, customer_phone=customer_phone)
             except Exception as ex:
                 messagebox.showerror("فشل الحفظ", str(ex), parent=self)
                 return
@@ -6483,8 +7827,6 @@ class POSFrame(ttk.Frame):
                     sync_ui.run_sync_now(self.winfo_toplevel(), self.db.conn, reason=WAREHOUSE_RETURN_LABEL)
                 except Exception:
                     pass
-                print_title = "طباعة مستند الإرجاع"
-                print_body = f"طباعة مستند {WAREHOUSE_RETURN_LABEL} #{bill_id}؟"
             elif branch_target:
                 ToastNotification.show(
                     self.winfo_toplevel(),
@@ -6496,19 +7838,14 @@ class POSFrame(ttk.Frame):
                     sync_ui.run_sync_now(self.winfo_toplevel(), self.db.conn, reason=f"تحويل إلى {branch_target}")
                 except Exception:
                     pass
-                print_title = "طباعة مستند التحويل"
-                print_body = f"طباعة مستند التحويل إلى {branch_target} #{bill_id}؟"
             else:
                 ToastNotification.show(
                     self.winfo_toplevel(),
-                    f"تم إنشاء الفاتورة #{bill_id} (الإجمالي: {total:.2f})",
+                    f"تم إنشاء الفاتورة #{bill_id} (الإجمالي: {format_money(total)})",
                     toast_type="success",
                 )
-                print_title = "طباعة الفاتورة"
-                print_body = f"طباعة الفاتورة #{bill_id}؟"
 
-            if messagebox.askyesno(print_title, print_body):
-                self._direct_print_bill(bill_id)
+            self._direct_print_bill(bill_id)
 
     def _choose_sale_payment_method(self, total: float) -> Optional[str]:
         dlg = tk.Toplevel(self)
@@ -6521,7 +7858,7 @@ class POSFrame(ttk.Frame):
         frm.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(frm, text="اختر طريقة الدفع قبل إتمام الفاتورة:", font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        ttk.Label(frm, text=f"إجمالي الفاتورة: {float(total):.2f}").pack(anchor="w", pady=(4, 10))
+        ttk.Label(frm, text=f"إجمالي الفاتورة: {format_money(float(total))}").pack(anchor="w", pady=(4, 10))
 
         method_var = tk.StringVar(value=PAYMENT_METHOD_CASH)
         ttk.Radiobutton(frm, text="كاش", variable=method_var, value=PAYMENT_METHOD_CASH).pack(anchor="w", pady=2)
@@ -6549,153 +7886,130 @@ class POSFrame(ttk.Frame):
         except StopIteration:
             messagebox.showerror("فشل الطباعة", "لم يتم العثور على الفاتورة.")
             return
-        tmp_dir = tempfile.gettempdir()
-        path = os.path.join(tmp_dir, f"bill_{bill_id}.html")
-        save_bill_as_html(path, bill, items)
-        _print_html_auto(path, copies=max(1, int(copies)), parent=self)
+        self._print_bill_receipt(bill, items, copies=max(1, int(copies)))
 
-    def _print_reservation_receipt(self, ids, lines, customer, paid, total):
+    def _print_bill_receipt(self, bill: Dict[str, Any], items: List[Dict[str, Any]], copies: int = 1):
+        tmp_dir = tempfile.gettempdir()
+        bill_id = int(bill["id"])
+        html_path = os.path.join(tmp_dir, "bill_%s.html" % bill_id)
+        pos_name, support_call, support_whatsapp = _lookup_receipt_branding(self.db.conn)
+        save_bill_as_html(
+            html_path,
+            bill,
+            items,
+            pos_name=pos_name,
+            support_call=support_call,
+            support_whatsapp=support_whatsapp,
+            shift_id=getattr(self.db, "active_shift_id", "") or "",
+        )
+        _print_html_auto(html_path, copies=max(1, int(copies)), parent=self)
+
+    def _print_reservation_receipt(self, ids, lines, customer, paid, total, customer_phone=""):
         """Auto-print a receipt for a newly created reservation."""
         res_nums = ", ".join(str(i) for i in ids)
-        rows_html = ""
-        for ln in lines:
-            line_total = float(ln["unit_price"]) * int(ln["qty"])
-            rows_html += (
-                f'<tr><td>{_html(ln["item_type"])} - {_html(ln["school"])}'
-                f'<br><small>{_html(ln["color"])} / {_html(ln["size"])}</small></td>'
-                f'<td style="text-align:center">{ln["qty"]}</td>'
-                f'<td style="text-align:left">{float(ln["unit_price"]):.2f}</td>'
-                f'<td style="text-align:left">{line_total:.2f}</td></tr>\n'
-            )
-        customer_line = f"<div>العميل: {_html(customer)}</div>" if customer else ""
+        customer_phone = _normalize_customer_phone(customer_phone)
         remaining = total - paid
-        html = f"""<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head><meta charset="utf-8"><title>حجز #{res_nums}</title>
-<style>
-  @page {{ size: 80mm auto; margin: 2mm; }}
-  * {{ box-sizing: border-box; }}
-  body {{ font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 11px; margin: 0; padding: 0; width: 76mm; direction: rtl; }}
-  .receipt {{ padding: 2mm; }}
-  .center {{ text-align: center; }}
-  .sep {{ border: none; border-top: 1px dashed #000; margin: 4px 0; }}
-  h2 {{ font-size: 14px; margin: 4px 0; text-align: center; }}
-  .info {{ font-size: 11px; margin: 2px 0; }}
-  table {{ border-collapse: collapse; width: 100%; font-size: 10px; }}
-  th {{ border-bottom: 1px solid #000; padding: 3px 2px; text-align: right; }}
-  td {{ padding: 3px 2px; vertical-align: top; border-bottom: 1px dotted #ccc; }}
-  .total-row {{ font-size: 13px; font-weight: bold; text-align: center; margin: 4px 0; }}
-  .footer {{ text-align: center; font-size: 10px; margin-top: 6px; }}
-</style></head>
-<body><div class="receipt">
-  <h2>حجز #{res_nums}</h2>
-  <hr class="sep">
-  <div class="info">التاريخ: {now_iso()[:16].replace("T", " ")}</div>
-  {customer_line}
-  <hr class="sep">
-  <table><thead><tr><th>الصنف</th><th>الكمية</th><th>السعر</th><th>المجموع</th></tr></thead>
-  <tbody>{rows_html}</tbody></table>
-  <hr class="sep">
-  <div class="total-row">الإجمالي: {total:.2f}</div>
-  <div class="info" style="text-align:center">المدفوع: {paid:.2f}</div>
-  <div class="info" style="text-align:center;font-weight:bold">المتبقي: {remaining:.2f}</div>
-  <hr class="sep">
-  <div class="footer">شكراً لتعاملكم معنا</div>
-</div></body></html>"""
         path = os.path.join(tempfile.gettempdir(), f"reservation_{res_nums}.html")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(html)
+        pos_name, support_call, support_whatsapp = _lookup_receipt_branding(self.db.conn)
+        receipt_items = []
+        for ln in lines:
+            qty = int(ln.get("qty") or 0)
+            price = float(ln.get("unit_price") or 0)
+            receipt_items.append({
+                "item_type": ln.get("item_type") or "",
+                "school": ln.get("school") or "",
+                "color": ln.get("color") or "",
+                "size": ln.get("size") or "",
+                "qty": qty,
+                "unit_price": price,
+                "line_total": price * qty,
+            })
+        save_bill_as_html(
+            path,
+            {
+                "id": res_nums,
+                "created_at": now_iso(),
+                "total": float(total),
+                "bill_type": "RESERVATION",
+                "customer": customer,
+                "customer_phone": customer_phone,
+            },
+            receipt_items,
+            pos_name=pos_name,
+            support_call=support_call,
+            support_whatsapp=support_whatsapp,
+            extra_summary_rows=[("المدفوع", paid), ("المتبقي", remaining)],
+        )
         _print_html_auto(path, copies=2, parent=self)
 
     def _print_return_bill(self, bill_id: int, total: float):
         items = self.db.list_bill_items(bill_id)
-        rows_html = ""
-        for it in items:
-            rows_html += (
-                f'<tr><td>{_html(it["item_type"])} - {_html(it["school"])}'
-                f'<br><small>{_html(it["color"])} / {_html(it["size"])}</small></td>'
-                f'<td style="text-align:center">{it["qty"]}</td>'
-                f'<td style="text-align:left">{float(it["unit_price"]):.2f}</td>'
-                f'<td style="text-align:left">{float(it["line_total"]):.2f}</td></tr>\n'
-            )
-        html = f"""<!DOCTYPE html>
-<html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>مرتجع #{bill_id}</title>
-<style>
-@page {{ size: 80mm auto; margin: 2mm; }}
-body {{ font-family: "Segoe UI", Tahoma, sans-serif; font-size: 11px; width: 76mm; direction: rtl; margin:0; padding:2mm; }}
-h2 {{ font-size: 14px; text-align: center; margin: 4px 0; }}
-.sep {{ border:none; border-top:1px dashed #000; margin:4px 0; }}
-table {{ border-collapse: collapse; width: 100%; font-size: 10px; }}
-th {{ border-bottom: 1px solid #000; padding: 3px 2px; text-align: right; }}
-td {{ padding: 3px 2px; border-bottom: 1px dotted #ccc; }}
-.total {{ font-size: 13px; font-weight: bold; text-align: center; margin: 6px 0; }}
-</style></head><body>
-<h2>فاتورة مرتجع #{bill_id}</h2>
-<hr class="sep">
-<div>التاريخ: {now_iso()[:16].replace("T"," ")}</div>
-<hr class="sep">
-<table><thead><tr><th>الصنف</th><th>الكمية</th><th>السعر</th><th>المجموع</th></tr></thead>
-<tbody>{rows_html}</tbody></table>
-<hr class="sep">
-<div class="total">مبلغ الاسترداد: {total:.2f}</div>
-</body></html>"""
         path = os.path.join(tempfile.gettempdir(), f"return_{bill_id}.html")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(html)
+        try:
+            bill = next(b for b in self.db.list_bills() if int(b["id"]) == int(bill_id))
+        except StopIteration:
+            bill = {"id": bill_id, "created_at": now_iso(), "total": total, "bill_type": "RETURN"}
+        pos_name, support_call, support_whatsapp = _lookup_receipt_branding(self.db.conn)
+        save_bill_as_html(
+            path,
+            bill,
+            items,
+            pos_name=pos_name,
+            support_call=support_call,
+            support_whatsapp=support_whatsapp,
+        )
         _print_html_auto(path, copies=2, parent=self)
 
     def _print_exchange_bill(self, bill_id: int, lines: list, diff: float):
-        ret_rows = ""
-        take_rows = ""
-        for ln in lines:
-            lt = float(ln["unit_price"]) * int(ln["qty"])
-            row = (
-                f'<tr><td>{_html(ln["item_type"])} - {_html(ln["school"])}'
-                f'<br><small>{_html(ln["color"])} / {_html(ln["size"])}</small></td>'
-                f'<td style="text-align:center">{ln["qty"]}</td>'
-                f'<td style="text-align:left">{float(ln["unit_price"]):.2f}</td>'
-                f'<td style="text-align:left">{lt:.2f}</td></tr>\n'
-            )
-            if ln.get("direction") == "return":
-                ret_rows += row
-            else:
-                take_rows += row
         if diff > 0:
-            diff_text = f"يدفع العميل: {diff:.2f}"
+            diff_label = "يدفع العميل"
+            diff_value = diff
         elif diff < 0:
-            diff_text = f"يسترد العميل: {abs(diff):.2f}"
+            diff_label = "يسترد العميل"
+            diff_value = abs(diff)
         else:
-            diff_text = "لا فرق في السعر"
-        html = f"""<!DOCTYPE html>
-<html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>استبدال #{bill_id}</title>
-<style>
-@page {{ size: 80mm auto; margin: 2mm; }}
-body {{ font-family: "Segoe UI", Tahoma, sans-serif; font-size: 11px; width: 76mm; direction: rtl; margin:0; padding:2mm; }}
-h2 {{ font-size: 14px; text-align: center; margin: 4px 0; }}
-h3 {{ font-size: 12px; margin: 4px 0; }}
-.sep {{ border:none; border-top:1px dashed #000; margin:4px 0; }}
-table {{ border-collapse: collapse; width: 100%; font-size: 10px; }}
-th {{ border-bottom: 1px solid #000; padding: 3px 2px; text-align: right; }}
-td {{ padding: 3px 2px; border-bottom: 1px dotted #ccc; }}
-.total {{ font-size: 13px; font-weight: bold; text-align: center; margin: 6px 0; }}
-</style></head><body>
-<h2>فاتورة استبدال #{bill_id}</h2>
-<hr class="sep">
-<div>التاريخ: {now_iso()[:16].replace("T"," ")}</div>
-<hr class="sep">
-<h3>الأصناف المرتجعة</h3>
-<table><thead><tr><th>الصنف</th><th>الكمية</th><th>السعر</th><th>المجموع</th></tr></thead>
-<tbody>{ret_rows if ret_rows else "<tr><td colspan='4' style='text-align:center'>-</td></tr>"}</tbody></table>
-<hr class="sep">
-<h3>الأصناف المأخوذة</h3>
-<table><thead><tr><th>الصنف</th><th>الكمية</th><th>السعر</th><th>المجموع</th></tr></thead>
-<tbody>{take_rows if take_rows else "<tr><td colspan='4' style='text-align:center'>-</td></tr>"}</tbody></table>
-<hr class="sep">
-<div class="total">{diff_text}</div>
-</body></html>"""
+            diff_label = "فرق السعر"
+            diff_value = 0
         path = os.path.join(tempfile.gettempdir(), f"exchange_{bill_id}.html")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(html)
+        try:
+            bill = next(b for b in self.db.list_bills() if int(b["id"]) == int(bill_id))
+            items = self.db.list_bill_items(bill_id)
+        except StopIteration:
+            bill = {"id": bill_id, "created_at": now_iso(), "total": diff, "bill_type": "EXCHANGE"}
+            items = []
+        receipt_items = []
+        source_items = items or lines
+        for ln in source_items:
+            origin = str(ln.get("origin") or "").upper()
+            direction = str(ln.get("direction") or "").lower()
+            if origin == "RETURN" or direction == "return":
+                prefix = "مرتجع: "
+            else:
+                prefix = "بديل: "
+            qty = int(ln.get("qty") or 0)
+            price = float(ln.get("unit_price") or 0)
+            line_total = ln.get("line_total")
+            if line_total is None:
+                line_total = price * qty
+            receipt_items.append({
+                "item_type": prefix + str(ln.get("item_type") or ""),
+                "school": ln.get("school") or "",
+                "color": ln.get("color") or "",
+                "size": ln.get("size") or "",
+                "qty": qty,
+                "unit_price": price,
+                "line_total": float(line_total or 0),
+            })
+        pos_name, support_call, support_whatsapp = _lookup_receipt_branding(self.db.conn)
+        save_bill_as_html(
+            path,
+            bill,
+            receipt_items,
+            pos_name=pos_name,
+            support_call=support_call,
+            support_whatsapp=support_whatsapp,
+            extra_summary_rows=[(diff_label, diff_value)],
+        )
         _print_html_auto(path, copies=2, parent=self)
 
 
@@ -6757,7 +8071,7 @@ class FactoryItemDialog(tk.Toplevel):
         try:
             p = self.db.last_price_for_specs(it, sc, cl, sz)
             if p is not None:
-                self.pv.set(f"{p:.2f}")
+                self.pv.set(f"{format_money(p)}")
         except Exception:
             pass
 
@@ -6845,10 +8159,10 @@ class StatisticsFrame(ttk.Frame):
         mf.pack(fill=tk.X, padx=4, pady=(0, 8))
 
         self._sales_count_var = tk.StringVar(value="0")
-        self._sales_total_var = tk.StringVar(value="0.00")
+        self._sales_total_var = tk.StringVar(value="0")
         self._res_count_var   = tk.StringVar(value="0")
-        self._res_total_var   = tk.StringVar(value="0.00")
-        self._res_paid_var    = tk.StringVar(value="0.00")
+        self._res_total_var   = tk.StringVar(value="0")
+        self._res_paid_var    = tk.StringVar(value="0")
 
         r1 = ttk.Frame(mf); r1.pack(fill=tk.X, padx=8, pady=4)
         ttk.Label(r1, text="عدد الفواتير:").pack(side=tk.LEFT)
@@ -6920,7 +8234,7 @@ class StatisticsFrame(ttk.Frame):
 
         self._income_count_var = tk.StringVar(value="0")
         self._income_qty_var = tk.StringVar(value="0")
-        self._income_total_var = tk.StringVar(value="0.00")
+        self._income_total_var = tk.StringVar(value="0")
 
         ir1 = ttk.Frame(income_frame)
         ir1.pack(fill=tk.X, padx=8, pady=4)
@@ -6952,10 +8266,10 @@ class StatisticsFrame(ttk.Frame):
         try:
             stats = self.db.get_sales_stats(df, dt, school=school, item_type=item_type, color=color)
             self._sales_count_var.set(str(stats["sales_count"]))
-            self._sales_total_var.set(f"{stats['sales_total']:.2f}")
+            self._sales_total_var.set(f"{format_money(stats['sales_total'])}")
             self._res_count_var.set(str(stats["res_count"]))
-            self._res_total_var.set(f"{stats['res_total']:.2f}")
-            self._res_paid_var.set(f"{stats['res_paid']:.2f}")
+            self._res_total_var.set(f"{format_money(stats['res_total'])}")
+            self._res_paid_var.set(f"{format_money(stats['res_paid'])}")
         except Exception:
             pass
 
@@ -6993,7 +8307,7 @@ class StatisticsFrame(ttk.Frame):
             inc = self.db.get_income_stats(date_from=df, date_to=dt, school=school, item_type=item_type, color=color)
             self._income_count_var.set(str(inc["bill_count"]))
             self._income_qty_var.set(str(inc["total_qty"]))
-            self._income_total_var.set(f"{inc['total_value']:.2f}")
+            self._income_total_var.set(f"{format_money(inc['total_value'])}")
         except Exception:
             pass
 
@@ -7046,16 +8360,15 @@ class StatisticsFrame(ttk.Frame):
 <h2>التدفق المالي {period}</h2>
 <table><thead><tr><th>البيان</th><th>القيمة</th></tr></thead><tbody>
 <tr><td>عدد الفواتير</td><td>{stats['sales_count']}</td></tr>
-<tr><td>إجمالي المبيعات</td><td>{stats['sales_total']:.2f}</td></tr>
+<tr><td>إجمالي المبيعات</td><td>{format_money(stats['sales_total'])}</td></tr>
 <tr><td>عدد الحجوزات</td><td>{stats['res_count']}</td></tr>
-<tr><td>إجمالي الحجوزات</td><td>{stats['res_total']:.2f}</td></tr>
-<tr><td>المبلغ المدفوع من الحجوزات</td><td>{stats['res_paid']:.2f}</td></tr>
+<tr><td>إجمالي الحجوزات</td><td>{format_money(stats['res_total'])}</td></tr>
+<tr><td>المبلغ المدفوع من الحجوزات</td><td>{format_money(stats['res_paid'])}</td></tr>
 </tbody></table>
 </body></html>"""
             import tempfile, os
             path = os.path.join(tempfile.gettempdir(), "money_flow.html")
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(html)
+            _write_html_file(path, html)
             _print_html_auto(path, copies=1, parent=self)
         except Exception as ex:
             messagebox.showerror("خطأ", str(ex), parent=self)
@@ -7077,8 +8390,7 @@ class StatisticsFrame(ttk.Frame):
 </body></html>"""
             import tempfile, os
             path = os.path.join(tempfile.gettempdir(), "item_movements.html")
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(html)
+            _write_html_file(path, html)
             _print_html_auto(path, copies=1, parent=self)
         except Exception as ex:
             messagebox.showerror("خطأ", str(ex), parent=self)
@@ -7086,8 +8398,8 @@ class StatisticsFrame(ttk.Frame):
     def _print_income(self):
         html = f"""<!DOCTYPE html>
 <html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>إحصائيات الوارد</title>
-<style>@page {{ size: 80mm auto; margin: 2mm; }}
-body {{ font-family: "Segoe UI", Tahoma, sans-serif; font-size: 11px; width: 76mm; direction: rtl; margin:0; padding:2mm; }}
+<style>{_receipt_font_face_css()}@page {{ size: 80mm auto; margin: 2mm; }}
+body {{ font-family: {RECEIPT_FONT_STACK}; font-size: 11px; width: 76mm; direction: rtl; margin:0; padding:2mm; }}
 h2 {{ font-size: 14px; text-align: center; margin: 4px 0; }}
 .sep {{ border:none; border-top:1px dashed #000; margin:4px 0; }}
 .row {{ margin: 3px 0; }}
@@ -7099,8 +8411,7 @@ h2 {{ font-size: 14px; text-align: center; margin: 4px 0; }}
 <div class="row">إجمالي قيمة الوارد: {self._income_total_var.get()}</div>
 </body></html>"""
         tmp = os.path.join(tempfile.gettempdir(), "income_stats.html")
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(html)
+        _write_html_file(tmp, html)
         _print_html_auto(tmp, copies=1, parent=self)
 
 
@@ -7141,7 +8452,7 @@ class SchoolAccountsFrame(ttk.Frame):
         summary.pack(fill=tk.X, pady=(0, 8))
         self._sum_school_count = tk.StringVar(value="0")
         self._sum_qty = tk.StringVar(value="0")
-        self._sum_sales = tk.StringVar(value="0.00")
+        self._sum_sales = tk.StringVar(value="0")
         for i, (label, var) in enumerate([
             ("عدد المدارس:", self._sum_school_count),
             ("إجمالي الكمية:", self._sum_qty),
@@ -7214,14 +8525,14 @@ class SchoolAccountsFrame(ttk.Frame):
                     row.get("color") or "",
                     row.get("size") or "",
                     qty,
-                    f"{sales_total:.2f}",
+                    f"{format_money(sales_total)}",
                 ),
             )
         _apply_zebra_tags(self._tree)
         self._update_selected_schools_label()
         self._sum_school_count.set(str(len(schools_seen)))
         self._sum_qty.set(str(total_qty))
-        self._sum_sales.set(f"{total_sales:.2f}")
+        self._sum_sales.set(f"{format_money(total_sales)}")
 
 
 # ------------------- Shifts Summary Frame -------------------
@@ -7345,9 +8656,9 @@ class ShiftsSummaryFrame(ttk.Frame):
         totals_row.pack(fill=tk.X, padx=8, pady=4)
 
         self._tot_shifts_var = tk.StringVar(value="0")
-        self._tot_sales_var = tk.StringVar(value="0.00")
-        self._tot_cash_var = tk.StringVar(value="0.00")
-        self._tot_visa_var = tk.StringVar(value="0.00")
+        self._tot_sales_var = tk.StringVar(value="0")
+        self._tot_cash_var = tk.StringVar(value="0")
+        self._tot_visa_var = tk.StringVar(value="0")
 
         ttk.Label(totals_row, text="عدد الورديات:").pack(side=tk.LEFT)
         ttk.Label(totals_row, textvariable=self._tot_shifts_var, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(4, 20))
@@ -7379,12 +8690,12 @@ class ShiftsSummaryFrame(ttk.Frame):
             status = "مفتوحة" if s["status"] == "OPEN" else "مغلقة"
             self._tree.insert("", tk.END, values=(
                 s["id"], started, ended, status,
-                s["sales_count"], f"{s['sales_total']:.2f}",
-                s["res_count"], f"{s['res_paid']:.2f}",
-                f"{s['deliver_total']:.2f}",
+                s["sales_count"], f"{format_money(s['sales_total'])}",
+                s["res_count"], f"{format_money(s['res_paid'])}",
+                f"{format_money(s['deliver_total'])}",
                 s["inflow_total_qty"],
-                f"{s['cash_collected']:.2f}",
-                f"{s.get('visa_collected', 0.0):.2f}",
+                f"{format_money(s['cash_collected'])}",
+                f"{format_money(s.get('visa_collected', 0.0))}",
             ))
             total_sales += s["sales_total"]
             total_cash += s["cash_collected"]
@@ -7392,9 +8703,9 @@ class ShiftsSummaryFrame(ttk.Frame):
         _apply_zebra_tags(self._tree)
 
         self._tot_shifts_var.set(str(len(self._shifts_data)))
-        self._tot_sales_var.set(f"{total_sales:.2f}")
-        self._tot_cash_var.set(f"{total_cash:.2f}")
-        self._tot_visa_var.set(f"{total_visa:.2f}")
+        self._tot_sales_var.set(f"{format_money(total_sales)}")
+        self._tot_cash_var.set(f"{format_money(total_cash)}")
+        self._tot_visa_var.set(f"{format_money(total_visa)}")
 
         # Clear detail
         self._det_id_var.set("-")
@@ -7426,14 +8737,14 @@ class ShiftsSummaryFrame(ttk.Frame):
         self._det_id_var.set(f"#{s['id']}")
         self._det_period_var.set(f"{started}  →  {ended}")
         self._det_status_var.set(status)
-        self._det_sales_var.set(f"{s['sales_count']} فاتورة - {s['sales_total']:.2f}")
-        self._det_res_var.set(f"{s['res_count']} حجز - مدفوع {s['res_paid']:.2f} من {s['res_total']:.2f}")
-        self._det_deliver_var.set(f"{s['deliver_count']} عملية - {s['deliver_total']:.2f}")
+        self._det_sales_var.set(f"{s['sales_count']} فاتورة - {format_money(s['sales_total'])}")
+        self._det_res_var.set(f"{s['res_count']} حجز - مدفوع {format_money(s['res_paid'])} من {format_money(s['res_total'])}")
+        self._det_deliver_var.set(f"{s['deliver_count']} عملية - {format_money(s['deliver_total'])}")
         self._det_inflow_var.set(f"{s['inflow_count']} عملية - {s['inflow_total_qty']} قطعة")
-        self._det_return_var.set(f"{s.get('return_count', 0)} فاتورة - {s.get('return_total', 0.0):.2f}")
-        self._det_exchange_var.set(f"{s.get('exchange_count', 0)} فاتورة - صافي {s.get('exchange_total', 0.0):.2f}")
-        self._det_cash_var.set(f"{s['cash_collected']:.2f}")
-        self._det_visa_var.set(f"{float(s.get('visa_collected', 0.0)):.2f}")
+        self._det_return_var.set(f"{s.get('return_count', 0)} فاتورة - {format_money(s.get('return_total', 0.0))}")
+        self._det_exchange_var.set(f"{s.get('exchange_count', 0)} فاتورة - صافي {format_money(s.get('exchange_total', 0.0))}")
+        self._det_cash_var.set(f"{format_money(s['cash_collected'])}")
+        self._det_visa_var.set(f"{format_money(float(s.get('visa_collected', 0.0)))}")
 
     def _clear_filters(self):
         self._df.set("")
@@ -7456,33 +8767,35 @@ class ShiftsSummaryFrame(ttk.Frame):
         ended = s["ended_at"][:16].replace("T", " ") if s["ended_at"] else "الآن"
         status = "مفتوحة" if s["status"] == "OPEN" else "مغلقة"
         html = f"""<!DOCTYPE html>
-<html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>ملخص وردية</title>
+<html lang="ar" dir="ltr"><head><meta charset="utf-8"><title>ملخص وردية</title>
 <style>
+{_receipt_font_face_css()}
 @page {{ size: 80mm auto; margin: 2mm; }}
-body {{ font-family: "Segoe UI", Tahoma, sans-serif; font-size: 11px; width: 76mm; direction: rtl; margin:0; padding:2mm; }}
+body {{ font-family: {RECEIPT_FONT_STACK}; font-size: 11px; width: 76mm; direction: ltr; margin:0; padding:2mm; }}
+.receipt {{ direction: rtl; unicode-bidi: isolate; }}
+.digits {{ direction: ltr; unicode-bidi: isolate; font-family: Tahoma, Arial, "Segoe UI", sans-serif; }}
 h2 {{ font-size: 14px; text-align: center; margin: 4px 0; }}
 .sep {{ border:none; border-top:1px dashed #000; margin:4px 0; }}
 .total {{ font-size: 13px; font-weight: bold; text-align: center; margin: 6px 0; }}
-</style></head><body>
-<h2>ملخص الوردية #{s['id']}</h2>
+</style></head><body><div class="receipt">
+<h2>ملخص الوردية #{_num_html(s['id'])}</h2>
 <hr class="sep">
-<div>الحالة: {status}</div>
-<div>بداية: {started}</div>
-<div>نهاية: {ended}</div>
+<div>الحالة: {_html(status)}</div>
+<div>بداية: {_num_html(started)}</div>
+<div>نهاية: {_num_html(ended)}</div>
 <hr class="sep">
-<div><b>المبيعات:</b> {s['sales_count']} فاتورة - {s['sales_total']:.2f}</div>
+<div><b>المبيعات:</b> {_num_html(s['sales_count'])} فاتورة - {_money_html(s['sales_total'])}</div>
 <hr class="sep">
-<div><b>الحجوزات:</b> {s['res_count']} - إجمالي {s['res_total']:.2f} - مدفوع {s['res_paid']:.2f}</div>
+<div><b>الحجوزات:</b> {_num_html(s['res_count'])} - إجمالي {_money_html(s['res_total'])} - مدفوع {_money_html(s['res_paid'])}</div>
 <hr class="sep">
-<div><b>التسليمات:</b> {s['deliver_count']} عملية - {s['deliver_total']:.2f}</div>
+<div><b>التسليمات:</b> {_num_html(s['deliver_count'])} عملية - {_money_html(s['deliver_total'])}</div>
 <hr class="sep">
-<div><b>الوارد:</b> {s['inflow_count']} عملية - {s['inflow_total_qty']} قطعة</div>
+<div><b>الوارد:</b> {_num_html(s['inflow_count'])} عملية - {_num_html(s['inflow_total_qty'])} قطعة</div>
 <hr class="sep">
-<div class="total">الكاش: {s['cash_collected']:.2f} | الفيزا: {float(s.get('visa_collected', 0.0)):.2f}</div>
-</body></html>"""
+<div class="total">الكاش: {_money_html(s['cash_collected'])} | الفيزا: {_money_html(float(s.get('visa_collected', 0.0)))}</div>
+</div></body></html>"""
         tmp = os.path.join(tempfile.gettempdir(), f"shift_summary_{s['id']}.html")
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(html)
+        _write_html_file(tmp, html)
         _print_html_auto(tmp, copies=1, parent=self)
 
     def _print_all_shifts(self):
@@ -7497,24 +8810,27 @@ h2 {{ font-size: 14px; text-align: center; margin: 4px 0; }}
             started = s["started_at"][:16].replace("T", " ")
             ended = s["ended_at"][:16].replace("T", " ") if s["ended_at"] else "-"
             status = "مفتوحة" if s["status"] == "OPEN" else "مغلقة"
-            rows_html += f"<tr><td>{s['id']}</td><td>{started}</td><td>{ended}</td><td>{status}</td>"
-            rows_html += f"<td>{s['sales_count']}</td><td>{s['sales_total']:.2f}</td>"
-            rows_html += f"<td>{s['res_paid']:.2f}</td><td>{s['deliver_total']:.2f}</td>"
-            rows_html += f"<td>{s['inflow_total_qty']}</td><td>{s['cash_collected']:.2f}</td><td>{float(s.get('visa_collected', 0.0)):.2f}</td></tr>\n"
+            rows_html += f"<tr><td>{_num_html(s['id'])}</td><td>{_num_html(started)}</td><td>{_num_html(ended)}</td><td>{_html(status)}</td>"
+            rows_html += f"<td>{_num_html(s['sales_count'])}</td><td>{_money_html(s['sales_total'])}</td>"
+            rows_html += f"<td>{_money_html(s['res_paid'])}</td><td>{_money_html(s['deliver_total'])}</td>"
+            rows_html += f"<td>{_num_html(s['inflow_total_qty'])}</td><td>{_money_html(s['cash_collected'])}</td><td>{_money_html(float(s.get('visa_collected', 0.0)))}</td></tr>\n"
             total_sales += s["sales_total"]
             total_cash += s["cash_collected"]
             total_visa += float(s.get("visa_collected", 0.0))
         html = f"""<!DOCTYPE html>
-<html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>ملخص الورديات</title>
+<html lang="ar" dir="ltr"><head><meta charset="utf-8"><title>ملخص الورديات</title>
 <style>
-body {{ font-family: Tahoma, Arial; margin: 20px; direction: rtl; }}
+{_receipt_font_face_css()}
+body {{ font-family: {RECEIPT_FONT_STACK}; margin: 20px; direction: ltr; }}
+.report {{ direction: rtl; unicode-bidi: isolate; }}
+.digits {{ direction: ltr; unicode-bidi: isolate; font-family: Tahoma, Arial, "Segoe UI", sans-serif; }}
 h2 {{ text-align: center; }}
 table {{ border-collapse: collapse; width: 100%; font-size: 11px; }}
 th {{ border-bottom: 2px solid #000; padding: 6px; text-align: center; background: #f0f0f0; }}
 td {{ padding: 5px; border-bottom: 1px solid #ccc; text-align: center; }}
 .totals {{ font-weight: bold; font-size: 13px; margin-top: 12px; }}
-</style></head><body>
-<h2>ملخص جميع الورديات ({len(self._shifts_data)} وردية)</h2>
+</style></head><body><div class="report">
+<h2>ملخص جميع الورديات ({_num_html(len(self._shifts_data))} وردية)</h2>
 <table><thead><tr>
 <th>#</th><th>البداية</th><th>النهاية</th><th>الحالة</th>
 <th>فواتير</th><th>مبيعات</th><th>مدفوع حجز</th><th>تسليمات</th>
@@ -7522,11 +8838,10 @@ td {{ padding: 5px; border-bottom: 1px solid #ccc; text-align: center; }}
 </tr></thead><tbody>
 {rows_html}
 </tbody></table>
-<div class="totals">إجمالي المبيعات: {total_sales:.2f} | إجمالي الكاش: {total_cash:.2f} | إجمالي الفيزا: {total_visa:.2f}</div>
-</body></html>"""
+<div class="totals">إجمالي المبيعات: {_money_html(total_sales)} | إجمالي الكاش: {_money_html(total_cash)} | إجمالي الفيزا: {_money_html(total_visa)}</div>
+</div></body></html>"""
         tmp = os.path.join(tempfile.gettempdir(), "all_shifts_summary.html")
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(html)
+        _write_html_file(tmp, html)
         _print_html_auto(tmp, copies=1, parent=self)
 
 
@@ -7580,13 +8895,14 @@ class ReservationsFrame(ttk.Frame):
 
         self._res_table = ttk.Treeview(
             tbl_wrap,
-            columns=("bill", "id", "created", "customer", "item", "school", "color", "size", "qty", "total", "paid", "status"),
+            columns=("bill", "id", "created", "customer", "phone", "item", "school", "color", "size", "qty", "total", "paid", "status"),
             show="headings",
             height=12,
         )
         for col, txt, w in [
             ("bill", "الفاتورة", 88),
             ("id", "رقم", 40), ("created", "التاريخ", 100), ("customer", "العميل", 100),
+            ("phone", "رقم العميل", 110),
             ("item", "النوع", 90), ("school", "المدرسة", 110), ("color", "اللون", 70),
             ("size", "المقاس", 55), ("qty", "الكمية", 55), ("total", "الإجمالي", 80),
             ("paid", "المدفوع", 80), ("status", "الحالة", 80),
@@ -7656,9 +8972,10 @@ class ReservationsFrame(ttk.Frame):
                 bill_code = grp[:8] if grp else f"legacy-{int(r['id'])}"
                 self._res_table.insert("", tk.END, values=(
                     bill_code, r["id"], fmt_local_ts(r["created_at"], "")[:10], r.get("customer", ""),
+                    r.get("customer_phone", "") or "",
                     r["item_type"], r["school"], r["color"], r["size"],
-                    r["qty"], f"{float(r['total_amount']):.2f}",
-                    f"{float(r['paid_amount']):.2f}", r["status"]
+                    r["qty"], f"{format_money(float(r['total_amount']))}",
+                    f"{format_money(float(r['paid_amount']))}", r["status"]
                 ))
             _apply_zebra_tags(self._res_table)
         except Exception:
@@ -7671,13 +8988,13 @@ class ReservationsFrame(ttk.Frame):
             messagebox.showwarning("تنبيه", "اختر حجزاً من الجدول أولاً.", parent=self)
             return
         vals = self._res_table.item(sel[0], "values")
-        res_id = int(vals[0])
-        status = vals[10]
+        res_id = int(vals[1])
+        status = vals[12]
         if status == "تم التسليم":
             messagebox.showinfo("تنبيه", "تم تسليم هذا الحجز مسبقاً.", parent=self)
             return
-        total = float(vals[8])
-        paid = float(vals[9])
+        total = float(vals[10])
+        paid = float(vals[11])
         remaining = total - paid
 
         dlg = tk.Toplevel(self)
@@ -7690,12 +9007,12 @@ class ReservationsFrame(ttk.Frame):
         frm.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(frm, text=f"حجز رقم: {res_id}", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 4))
-        ttk.Label(frm, text=f"الإجمالي: {total:.2f}").pack(anchor="w")
-        ttk.Label(frm, text=f"المدفوع سابقاً: {paid:.2f}").pack(anchor="w")
-        ttk.Label(frm, text=f"المتبقي: {remaining:.2f}", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
+        ttk.Label(frm, text=f"الإجمالي: {format_money(total)}").pack(anchor="w")
+        ttk.Label(frm, text=f"المدفوع سابقاً: {format_money(paid)}").pack(anchor="w")
+        ttk.Label(frm, text=f"المتبقي: {format_money(remaining)}", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
 
         ttk.Label(frm, text="المبلغ المحصّل الآن:").pack(anchor="w")
-        collect_var = tk.StringVar(value=f"{remaining:.2f}" if remaining > 0 else "0")
+        collect_var = tk.StringVar(value=f"{format_money(remaining)}" if remaining > 0 else "0")
         ttk.Entry(frm, textvariable=collect_var, width=15).pack(anchor="w", pady=(0, 8))
 
         def _confirm():
@@ -7728,7 +9045,7 @@ class ReservationsFrame(ttk.Frame):
             return
         vals = self._res_table.item(sel[0], "values")
         res_id = int(vals[1])
-        status = vals[11]
+        status = vals[12]
         if status == "تم التسليم":
             messagebox.showinfo("تنبيه", "هذا السطر تم تسليمه مسبقاً.", parent=self)
             return
@@ -7757,9 +9074,18 @@ class ReservationsFrame(ttk.Frame):
         frm = ttk.Frame(dlg, padding=12)
         frm.pack(fill=tk.BOTH, expand=True)
         ttk.Label(frm, text=f"فاتورة الحجز: {group_code}", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 4))
+        customer_name = str(group_items[0].get("customer") or "").strip()
+        customer_phone = _normalize_customer_phone(group_items[0].get("customer_phone") or "")
+        if customer_name or customer_phone:
+            details = []
+            if customer_name:
+                details.append(f"العميل: {customer_name}")
+            if customer_phone:
+                details.append(f"رقم العميل: {customer_phone}")
+            ttk.Label(frm, text=" | ".join(details), font=("Segoe UI", 10)).pack(anchor="w", pady=(0, 4))
         ttk.Label(frm, text="اختر العناصر التي تم تسليمها الآن (تسليم جزئي افتراضياً)").pack(anchor="w")
         ttk.Label(frm, text="مهم: في التسليم الجزئي يجب تحصيل قيمة العناصر المسلمة بالكامل، والعربون يبقى للعناصر المعلقة.", foreground="#7a3e00").pack(anchor="w")
-        ttk.Label(frm, text=f"المتبقي للعناصر غير المسلمة: {remaining:.2f}", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
+        ttk.Label(frm, text=f"المتبقي للعناصر غير المسلمة: {format_money(remaining)}", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
 
         table_wrap = ttk.Frame(frm)
         table_wrap.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
@@ -7772,11 +9098,11 @@ class ReservationsFrame(ttk.Frame):
         tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         ysb.pack(side=tk.RIGHT, fill=tk.Y)
 
-        selected_ids: set[int] = set()
+        selected_ids: Set[int] = set()
         for r in pending_items:
             rid = int(r["id"])
             rem = max(0.0, float(r.get("total_amount") or 0.0) - float(r.get("paid_amount") or 0.0))
-            tv.insert("", tk.END, iid=str(rid), values=("☐", rid, r.get("item_type", ""), r.get("school", ""), r.get("color", ""), r.get("size", ""), int(r.get("qty") or 0), f"{rem:.2f}"))
+            tv.insert("", tk.END, iid=str(rid), values=("☐", rid, r.get("item_type", ""), r.get("school", ""), r.get("color", ""), r.get("size", ""), int(r.get("qty") or 0), f"{format_money(rem)}"))
 
         def _toggle_selected(_e=None):
             cur = tv.focus() or (tv.selection()[0] if tv.selection() else None)
@@ -7836,16 +9162,507 @@ class ReservationsFrame(ttk.Frame):
 <style>body{{font-family:Tahoma,Arial;margin:20px}} table{{border-collapse:collapse;width:100%}} th,td{{border:1px solid #777;padding:6px;text-align:center}}</style>
 </head><body>
 <h2>الحجوزات</h2>
-<table><thead><tr><th>رقم</th><th>التاريخ</th><th>العميل</th><th>النوع</th><th>المدرسة</th><th>اللون</th><th>المقاس</th><th>الكمية</th><th>الإجمالي</th><th>المدفوع</th><th>الحالة</th></tr></thead>
+<table><thead><tr><th>الفاتورة</th><th>رقم</th><th>التاريخ</th><th>العميل</th><th>رقم العميل</th><th>النوع</th><th>المدرسة</th><th>اللون</th><th>المقاس</th><th>الكمية</th><th>الإجمالي</th><th>المدفوع</th><th>الحالة</th></tr></thead>
 <tbody>{rows_html}</tbody></table>
 </body></html>"""
             import tempfile, os
             path = os.path.join(tempfile.gettempdir(), "reservations.html")
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(html)
+            _write_html_file(path, html)
             _print_html_auto(path, copies=1, parent=self)
         except Exception as ex:
             messagebox.showerror("خطأ", str(ex), parent=self)
+
+
+# ------------------- Stock Audit Window -------------------
+
+def _audit_key(row: Dict[str, Any]) -> Tuple[str, str, str, str]:
+    return (
+        str(row.get("item_type") or "").strip().lower(),
+        str(row.get("school") or "").strip().lower(),
+        str(row.get("color") or "").strip().lower(),
+        _normalize_size_label(str(row.get("size") or "")).lower(),
+    )
+
+
+def _audit_rows_to_export(lines: Sequence[Dict[str, Any]]) -> List[List[Any]]:
+    return [[
+        r.get("item_type", ""),
+        r.get("school", ""),
+        r.get("color", ""),
+        r.get("size", ""),
+        int(r.get("expected") or 0),
+        int(r.get("actual") or 0),
+        int(r.get("diff") or 0),
+        float(r.get("unit_price") or 0),
+        float(r.get("diff_value", int(r.get("diff") or 0) * float(r.get("unit_price") or 0)) or 0),
+    ] for r in lines]
+
+
+def _stock_audit_report_html(report: Dict[str, Any], lines: Sequence[Dict[str, Any]]) -> str:
+    total_value = float(report.get("total_value") or sum(float(r.get("diff_value") or 0) for r in lines))
+    total_diff = int(report.get("total_diff") or sum(int(r.get("diff") or 0) for r in lines))
+    body = []
+    for r in lines:
+        diff = int(r.get("diff") or 0)
+        cls = "plus" if diff > 0 else "minus" if diff < 0 else ""
+        body.append(
+            "<tr class='%s'><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+            "<td>%s</td><td>%s</td><td>%+d</td><td>%s</td><td>%s</td></tr>" % (
+                cls,
+                _html(r.get("item_type", "")),
+                _html(r.get("school", "")),
+                _html(r.get("color", "")),
+                _html(r.get("size", "")),
+                int(r.get("expected") or 0),
+                int(r.get("actual") or 0),
+                diff,
+                _html(format_money(float(r.get("unit_price") or 0))),
+                _html(format_money(float(r.get("diff_value") or 0))),
+            )
+        )
+    return """<!DOCTYPE html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>تقرير فروق الجرد</title>
+<style>@page{size:A4;margin:12mm}body{font-family:'Segoe UI',Tahoma,Arial,sans-serif;direction:rtl}
+h1{font-size:18px;margin:0 0 8px}.meta{display:flex;gap:24px;margin-bottom:12px;font-weight:600}
+table{width:100%;border-collapse:collapse}th,td{border:1px solid #777;padding:5px;text-align:center}
+th{background:#eee}.plus{background:#dcfce7}.minus{background:#fee2e2}.total{margin-top:12px;font-weight:700}</style></head>
+<body><h1>تقرير فروق الجرد - POS</h1>
+<div class="meta"><span>رقم التقرير: %s</span><span>التاريخ: %s</span><span>السبب: %s</span></div>
+<table><thead><tr><th>النوع</th><th>المدرسة</th><th>اللون</th><th>المقاس</th><th>المتوقع</th><th>الفعلي</th><th>الفرق</th><th>السعر</th><th>قيمة الفرق</th></tr></thead>
+<tbody>%s</tbody></table>
+<div class="total">إجمالي الفرق: %+d &nbsp;&nbsp; إجمالي القيمة: %s</div>
+<script>window.onload=function(){try{window.print();}catch(e){}}</script></body></html>""" % (
+        _html(report.get("id", "")),
+        _html(report.get("created_at", "")),
+        _html(report.get("reason", "")),
+        "".join(body),
+        total_diff,
+        _html(format_money(total_value)),
+    )
+
+
+class StockAuditWindow(tk.Toplevel):
+    def __init__(self, master, db: SqliteDatabase):
+        super().__init__(master)
+        self.db = db
+        self.title("جرد المخزون - POS")
+        self.geometry("1220x680")
+        self._rows: List[Dict[str, Any]] = []
+        self._touched_keys: Set[Tuple[str, str, str, str]] = set()
+        self._recent_keys: Set[Tuple[str, str, str, str]] = set()
+        self._build()
+
+    def _build(self):
+        filters = ttk.LabelFrame(self, text="تصفية الجرد")
+        filters.pack(fill=tk.X, padx=8, pady=8)
+
+        self.f_type = LabeledCombobox(filters, "النوع", self.db, "item_type")
+        self.f_school = LabeledCombobox(filters, "المدرسة", self.db, "school")
+        self.f_color = LabeledCombobox(filters, "اللون", self.db, "color")
+
+        def _constraints(exclude=None):
+            d = {"item_type": self.f_type.get(), "school": self.f_school.get(), "color": self.f_color.get()}
+            if exclude:
+                d.pop(exclude, None)
+            return d
+
+        self.f_type.set_supplier(lambda: self.db.get_distinct_filtered("item_type", _constraints("item_type")))
+        self.f_school.set_supplier(lambda: self.db.get_distinct_filtered("school", _constraints("school")))
+        self.f_color.set_supplier(lambda: self.db.get_distinct_filtered("color", _constraints("color")))
+
+        for i, w in enumerate((self.f_type, self.f_school, self.f_color)):
+            w.grid(row=0, column=i, sticky="ew", padx=6, pady=6)
+            filters.columnconfigure(i, weight=1)
+            for ev in ("<KeyRelease>", "<<ComboboxSelected>>"):
+                w.cb.bind(ev, lambda e: (self._refresh_filter_values(), self._schedule_refresh()), add="+")
+
+        ttk.Button(filters, text="تحميل المخزون", command=self._refresh).grid(row=0, column=3, padx=8, pady=6)
+        ttk.Button(filters, text="سجل تقارير الجرد", command=self._open_history).grid(row=0, column=4, padx=8, pady=6)
+
+        wrap = ttk.Frame(self)
+        wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+        self.table = ttk.Treeview(
+            wrap,
+            columns=("id", "type", "school", "color", "size", "expected", "actual", "diff", "price", "value"),
+            show="headings",
+            selectmode="browse",
+        )
+        for col, txt, w in [
+            ("id", "ID", 70), ("type", "النوع", 150), ("school", "المدرسة", 150),
+            ("color", "اللون", 140), ("size", "المقاس", 80), ("expected", "الكمية المتوقعة", 120),
+            ("actual", "الكمية الفعلية", 120), ("diff", "الفرق", 90), ("price", "السعر", 100), ("value", "قيمة الفرق", 120),
+        ]:
+            self.table.heading(col, text=txt)
+            self.table.column(col, width=w, anchor="center")
+        ysb = ttk.Scrollbar(wrap, orient="vertical", command=self.table.yview)
+        xsb = ttk.Scrollbar(wrap, orient="horizontal", command=self.table.xview)
+        self.table.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+        self.table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ysb.pack(side=tk.RIGHT, fill=tk.Y)
+        xsb.pack(side=tk.BOTTOM, fill=tk.X)
+        _bind_mousewheel(self.table)
+        _add_context_menu(self.table, self)
+        self.table.tag_configure("surplus", background="#dcfce7")
+        self.table.tag_configure("deficit", background="#fee2e2")
+        self.table.tag_configure("current_touched", background="#fef3c7")
+        self.table.tag_configure("history_touched", background="#dbeafe")
+        self.table.bind("<Double-1>", lambda e: self._edit_actual(), add="+")
+
+        bar = ttk.Frame(self)
+        bar.pack(fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Label(bar, text="الكمية الفعلية للبند المحدد:").pack(side=tk.LEFT)
+        self.actual_var = tk.StringVar(value="")
+        ttk.Entry(bar, textvariable=self.actual_var, width=10).pack(side=tk.LEFT, padx=6)
+        ttk.Button(bar, text="تعيين", command=self._assign_selected_actual).pack(side=tk.LEFT, padx=4)
+        ttk.Button(bar, text="تطبيق التسويات", command=self._apply_all_mismatches).pack(side=tk.LEFT, padx=4)
+        ttk.Button(bar, text="تصدير تقرير الفروق", command=self._export_current_report).pack(side=tk.LEFT, padx=12)
+        ttk.Button(bar, text="طباعة تقرير الفروق", command=self._print_current_report).pack(side=tk.LEFT, padx=4)
+        self.summary_var = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self.summary_var, font=("Segoe UI", 10, "bold")).pack(side=tk.RIGHT)
+
+        self._refresh()
+
+    def _refresh_filter_values(self):
+        for w in (self.f_type, self.f_school, self.f_color):
+            w.refresh_values()
+
+    def _schedule_refresh(self, delay_ms: int = 250):
+        if hasattr(self, "_audit_job") and self._audit_job:
+            self.after_cancel(self._audit_job)
+        self._audit_job = self.after(delay_ms, self._refresh)
+
+    def _filters(self) -> Dict[str, Any]:
+        return {
+            "item_type": self.f_type.get() or None,
+            "school": self.f_school.get() or None,
+            "color": self.f_color.get() or None,
+        }
+
+    def _size_labels_for_group(self, item_type: str, school: str, color: str, existing_sizes: Sequence[str]) -> List[str]:
+        labels: List[str] = []
+        profile = self.db.get_size_profile(item_type, school, color)
+        if profile:
+            r1s, r1e, r2s, r2e, has_alpha = profile
+            labels.extend(merged_numeric_size_labels_from_profile(r1s, r1e, r2s, r2e))
+            if has_alpha:
+                labels.extend(ALPHA_SIZES[:])
+        norm_existing = [_normalize_size_label(s) for s in existing_sizes if str(s or "").strip()]
+        if any(s.upper() in ALPHA_SIZES for s in norm_existing):
+            for s in ALPHA_SIZES:
+                if s not in labels:
+                    labels.append(s)
+        for s in norm_existing:
+            if s not in labels:
+                labels.append(s)
+
+        def sort_key(s):
+            if str(s).isdigit():
+                return (0, int(s))
+            try:
+                return (1, ALPHA_SIZES.index(str(s).upper()))
+            except ValueError:
+                return (2, str(s).lower())
+        return sorted(labels, key=sort_key)
+
+    def _expanded_rows(self) -> List[Dict[str, Any]]:
+        stock_rows = self.db.current_inventory(self._filters())
+        groups: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        for r in stock_rows:
+            item_type = str(r.get("item_type") or "").strip()
+            school = str(r.get("school") or "").strip()
+            color = str(r.get("color") or "").strip()
+            if not (item_type and school and color):
+                continue
+            key = (item_type, school, color)
+            g = groups.setdefault(key, {"rows": {}, "price": float(r.get("unit_price") or 0)})
+            size = _normalize_size_label(r.get("size") or "")
+            if not size:
+                continue
+            g["rows"][size] = dict(r, size=size)
+            if float(r.get("unit_price") or 0) > 0:
+                g["price"] = float(r.get("unit_price") or 0)
+        filters = self._filters()
+        if filters.get("item_type") and filters.get("school") and filters.get("color"):
+            groups.setdefault((filters["item_type"], filters["school"], filters["color"]), {"rows": {}, "price": 0.0})
+
+        out: List[Dict[str, Any]] = []
+        for (item_type, school, color), data in sorted(groups.items(), key=lambda x: tuple(str(v).lower() for v in x[0])):
+            labels = self._size_labels_for_group(item_type, school, color, list(data["rows"].keys()))
+            if not labels:
+                labels = list(data["rows"].keys())
+            for size in labels:
+                row = data["rows"].get(size)
+                expected = int(row.get("count") or 0) if row else 0
+                price = float(row.get("unit_price") or data.get("price") or self.db.get_effective_price(item_type, school, color, size) or 0)
+                out.append({
+                    "stock_id": row.get("id") if row else None,
+                    "item_type": item_type,
+                    "school": school,
+                    "color": color,
+                    "size": size,
+                    "expected": expected,
+                    "actual": expected,
+                    "diff": 0,
+                    "unit_price": price,
+                    "diff_value": 0.0,
+                })
+        return out
+
+    def _refresh(self):
+        try:
+            self._touched_keys = self.db.stock_audit_touched_keys()
+            self._rows = self._expanded_rows()
+        except Exception as ex:
+            messagebox.showerror("فشل تحميل الجرد", str(ex), parent=self)
+            return
+        self._render()
+
+    def _render(self):
+        self.table.delete(*self.table.get_children())
+        total_diff = 0
+        total_value = 0.0
+        for idx, r in enumerate(self._rows):
+            diff = int(r.get("diff") or 0)
+            value = float(diff * float(r.get("unit_price") or 0))
+            r["diff_value"] = value
+            total_diff += diff
+            total_value += value
+            tags = []
+            if diff > 0:
+                tags.append("surplus")
+            elif diff < 0:
+                tags.append("deficit")
+            elif _audit_key(r) in self._recent_keys:
+                tags.append("current_touched")
+            elif _audit_key(r) in self._touched_keys:
+                tags.append("history_touched")
+            self.table.insert(
+                "", tk.END, iid=str(idx),
+                values=(
+                    r.get("stock_id") or "",
+                    r["item_type"], r["school"], r["color"], r["size"],
+                    int(r["expected"]), int(r["actual"]), f"{diff:+d}",
+                    format_money(float(r["unit_price"])), format_money(value),
+                ),
+                tags=tuple(tags),
+            )
+        self.summary_var.set(f"إجمالي الفرق: {total_diff:+d} | إجمالي القيمة: {format_money(total_value)}")
+        _apply_zebra_tags(self.table)
+
+    def _selected_index(self) -> Optional[int]:
+        sel = self.table.selection()
+        if not sel:
+            return None
+        return int(sel[0])
+
+    def _edit_actual(self):
+        idx = self._selected_index()
+        if idx is None:
+            return
+        current = int(self._rows[idx].get("actual") or 0)
+        val = simpledialog.askinteger("الكمية الفعلية", "أدخل الكمية الفعلية:", initialvalue=current, minvalue=0, parent=self)
+        if val is None:
+            return
+        self.actual_var.set(str(val))
+        self._assign_selected_actual()
+
+    def _assign_selected_actual(self):
+        idx = self._selected_index()
+        if idx is None:
+            messagebox.showwarning("لم يتم التحديد", "اختر بندا من الجدول أولا.", parent=self)
+            return
+        try:
+            actual = int(western_digits(self.actual_var.get()).strip())
+        except Exception:
+            messagebox.showerror("قيمة غير صالحة", "أدخل رقما صحيحا للكمية الفعلية.", parent=self)
+            return
+        row = self._rows[idx]
+        row["actual"] = actual
+        row["diff"] = int(actual) - int(row.get("expected") or 0)
+        if int(row["diff"]) != 0:
+            try:
+                self._recent_keys.add(_audit_key(row))
+                self.db.append_stock_audit_report_bucket([row], reason="auto-equalization", bucket_key=now_iso()[:13])
+                self.db.apply_stock_adjustments([row], note="POS stock audit auto-equalization")
+                ToastNotification.show(self.winfo_toplevel(), "تم حفظ التسوية في تقرير الساعة وتطبيقها.", toast_type="success")
+                self._refresh()
+                return
+            except Exception as ex:
+                messagebox.showerror("فشل تطبيق التسوية", str(ex), parent=self)
+                return
+        self._render()
+
+    def _mismatch_rows(self) -> List[Dict[str, Any]]:
+        return [dict(r) for r in self._rows if int(r.get("diff") or 0) != 0]
+
+    def _apply_all_mismatches(self):
+        rows = self._mismatch_rows()
+        if not rows:
+            messagebox.showinfo("لا توجد فروق", "لا توجد فروق لتطبيقها.", parent=self)
+            return
+        if not messagebox.askyesno("تطبيق التسويات", f"سيتم تطبيق {len(rows)} فرق وحفظ تقرير. هل تريد المتابعة؟", parent=self):
+            return
+        try:
+            self.db.create_stock_audit_report(rows, reason="manual")
+            self.db.apply_stock_adjustments(rows, note="POS stock audit manual equalization")
+            self._recent_keys.update(_audit_key(r) for r in rows)
+            ToastNotification.show(self.winfo_toplevel(), "تم حفظ التقرير وتطبيق التسويات.", toast_type="success")
+            self._refresh()
+        except Exception as ex:
+            messagebox.showerror("فشل تطبيق التسويات", str(ex), parent=self)
+
+    def _current_report_payload(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        rows = self._mismatch_rows()
+        report = {
+            "id": "غير محفوظ",
+            "created_at": now_iso(),
+            "reason": "current",
+            "total_diff": sum(int(r.get("diff") or 0) for r in rows),
+            "total_value": sum(float(r.get("diff_value") or 0) for r in rows),
+        }
+        return report, rows
+
+    def _export_current_report(self):
+        report, rows = self._current_report_payload()
+        if not rows:
+            messagebox.showinfo("لا توجد فروق", "لا توجد فروق للتصدير.", parent=self)
+            return
+        path = filedialog.asksaveasfilename(
+            title="تصدير تقرير فروق الجرد",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Workbook", "*.xlsx"), ("Excel 97-2003 XML", "*.xls"), ("All files", "*.*")],
+            initialfile=f"pos_stock_audit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            parent=self,
+        )
+        if not path:
+            return
+        export_to_excel(path, ["النوع", "المدرسة", "اللون", "المقاس", "المتوقع", "الفعلي", "الفرق", "السعر", "قيمة الفرق"], _audit_rows_to_export(rows))
+        ToastNotification.show(self.winfo_toplevel(), f"تم تصدير التقرير إلى: {path}", toast_type="success")
+
+    def _print_current_report(self):
+        report, rows = self._current_report_payload()
+        if not rows:
+            messagebox.showinfo("لا توجد فروق", "لا توجد فروق للطباعة.", parent=self)
+            return
+        path = os.path.join(tempfile.gettempdir(), f"pos_stock_audit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html")
+        _write_html_file(path, _stock_audit_report_html(report, rows))
+        _print_html_auto(path, copies=1, parent=self)
+
+    def _open_history(self):
+        StockAuditReportHistoryWindow(self, self.db)
+
+
+class StockAuditReportHistoryWindow(tk.Toplevel):
+    def __init__(self, master, db: SqliteDatabase):
+        super().__init__(master)
+        self.db = db
+        self.title("سجل تقارير الجرد - POS")
+        self.geometry("1180x640")
+        self._build()
+
+    def _build(self):
+        top = ttk.Frame(self)
+        top.pack(fill=tk.X, padx=8, pady=8)
+        ttk.Button(top, text="تحديث", command=self._refresh).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="طباعة المحدد", command=self._print_selected).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="تصدير المحدد", command=self._export_selected).pack(side=tk.LEFT, padx=4)
+
+        self.reports = ttk.Treeview(
+            self,
+            columns=("id", "created", "reason", "count", "diff", "value"),
+            show="headings",
+            height=12,
+        )
+        for col, txt, w in [
+            ("id", "رقم التقرير", 100), ("created", "التاريخ", 180), ("reason", "السبب", 160),
+            ("count", "عدد الفروق", 120), ("diff", "إجمالي الفرق", 140), ("value", "إجمالي القيمة", 160),
+        ]:
+            self.reports.heading(col, text=txt)
+            self.reports.column(col, width=w, anchor="center")
+        self.reports.pack(fill=tk.BOTH, expand=True, padx=8)
+        self.reports.bind("<<TreeviewSelect>>", lambda e: self._load_details(), add="+")
+
+        ttk.Label(self, text="تفاصيل التقرير المحدد").pack(fill=tk.X, padx=8, pady=(8, 0), anchor="w")
+        self.lines = ttk.Treeview(
+            self,
+            columns=("type", "school", "color", "size", "expected", "actual", "diff", "price", "value"),
+            show="headings",
+            height=8,
+        )
+        for col, txt, w in [
+            ("type", "النوع", 150), ("school", "المدرسة", 150), ("color", "اللون", 140),
+            ("size", "المقاس", 80), ("expected", "المتوقع", 100), ("actual", "الفعلي", 100),
+            ("diff", "الفرق", 90), ("price", "السعر", 100), ("value", "قيمة الفرق", 120),
+        ]:
+            self.lines.heading(col, text=txt)
+            self.lines.column(col, width=w, anchor="center")
+        self.lines.tag_configure("surplus", background="#dcfce7")
+        self.lines.tag_configure("deficit", background="#fee2e2")
+        self.lines.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        self._refresh()
+
+    def _refresh(self):
+        self.reports.delete(*self.reports.get_children())
+        for r in self.db.list_stock_audit_reports():
+            self.reports.insert(
+                "", tk.END, iid=str(r["id"]),
+                values=(r["id"], r["created_at"], r.get("reason") or "", r["diff_count"], f"{int(r['total_diff'] or 0):+d}", format_money(float(r["total_value"] or 0))),
+            )
+        _apply_zebra_tags(self.reports)
+        self._load_details()
+
+    def _selected_report_id(self) -> Optional[int]:
+        sel = self.reports.selection()
+        if not sel:
+            return None
+        return int(sel[0])
+
+    def _load_details(self):
+        self.lines.delete(*self.lines.get_children())
+        rid = self._selected_report_id()
+        if rid is None:
+            return
+        _report, lines = self.db.get_stock_audit_report(rid)
+        for idx, r in enumerate(lines):
+            diff = int(r.get("diff") or 0)
+            tags = ("surplus",) if diff > 0 else ("deficit",) if diff < 0 else ()
+            self.lines.insert(
+                "", tk.END, iid=str(idx),
+                values=(r["item_type"], r["school"], r["color"], r["size"], int(r["expected"]), int(r["actual"]), f"{diff:+d}", format_money(float(r["unit_price"] or 0)), format_money(float(r["diff_value"] or 0))),
+                tags=tags,
+            )
+        _apply_zebra_tags(self.lines)
+
+    def _selected_payload(self) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        rid = self._selected_report_id()
+        if rid is None:
+            messagebox.showwarning("لم يتم التحديد", "اختر تقريرا أولا.", parent=self)
+            return None, []
+        return self.db.get_stock_audit_report(rid)
+
+    def _export_selected(self):
+        report, lines = self._selected_payload()
+        if not report:
+            return
+        path = filedialog.asksaveasfilename(
+            title="تصدير تقرير الجرد",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Workbook", "*.xlsx"), ("Excel 97-2003 XML", "*.xls"), ("All files", "*.*")],
+            initialfile=f"pos_stock_audit_report_{report['id']}.xlsx",
+            parent=self,
+        )
+        if not path:
+            return
+        export_to_excel(path, ["النوع", "المدرسة", "اللون", "المقاس", "المتوقع", "الفعلي", "الفرق", "السعر", "قيمة الفرق"], _audit_rows_to_export(lines))
+        ToastNotification.show(self.winfo_toplevel(), f"تم تصدير التقرير إلى: {path}", toast_type="success")
+
+    def _print_selected(self):
+        report, lines = self._selected_payload()
+        if not report:
+            return
+        path = os.path.join(tempfile.gettempdir(), f"pos_stock_audit_report_{report['id']}.html")
+        _write_html_file(path, _stock_audit_report_html(report, lines))
+        _print_html_auto(path, copies=1, parent=self)
 
 
 # ------------------- Inventory Window -------------------
@@ -7863,6 +9680,7 @@ class InventoryWindow(tk.Toplevel):
 
         self._multi_btns: Dict[str, ttk.Button] = {}
         self._field_widgets: Dict[str, tk.Widget] = {}
+        self.show_zero_var = tk.BooleanVar(value=True)
 
         self._build()
 
@@ -7957,6 +9775,9 @@ class InventoryWindow(tk.Toplevel):
         size_ranges_btn.pack(side=tk.LEFT, padx=8)
         if not self.db.is_manager_feature_enabled("allow_size_profile_edit"):
             size_ranges_btn.configure(state="disabled")
+        show_zero_cb = ttk.Checkbutton(btns, text="إظهار الكميات الصفرية", variable=self.show_zero_var, command=self._refresh)
+        show_zero_cb.pack(side=tk.LEFT, padx=8)
+        _add_tooltip(show_zero_cb, "إظهار أو إخفاء الأصناف التي كميتها صفر")
 
         table_wrap = ttk.Frame(self)
         table_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
@@ -7973,6 +9794,7 @@ class InventoryWindow(tk.Toplevel):
         ]:
             self.table.heading(col, text=txt)
             self.table.column(col, width=w, anchor="center")
+        self.table.tag_configure("zero_stock", background="#f3f4f6", foreground="#6b7280")
         ysb = ttk.Scrollbar(table_wrap, orient="vertical", command=self.table.yview)
         xsb = ttk.Scrollbar(table_wrap, orient="horizontal", command=self.table.xview)
         self.table.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
@@ -7987,7 +9809,7 @@ class InventoryWindow(tk.Toplevel):
         bar = ttk.Frame(self)
         bar.pack(fill=tk.X, padx=8, pady=(0, 8))
         self.sum_qty = tk.StringVar(value="0")
-        self.sum_val = tk.StringVar(value="0.00")
+        self.sum_val = tk.StringVar(value="0")
         ttk.Label(bar, text="إجمالي الكمية:").pack(side=tk.LEFT)
         ttk.Label(bar, textvariable=self.sum_qty, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(4, 12))
         ttk.Label(bar, text="إجمالي القيمة:").pack(side=tk.LEFT)
@@ -8246,8 +10068,7 @@ class InventoryWindow(tk.Toplevel):
 
         import tempfile, os
         path = os.path.join(tempfile.gettempdir(), f"size_sheets_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(html)
+        _write_html_file(path, html)
         _print_html_auto(path, copies=1, parent=self)
 
     def _schedule_refresh(self, delay_ms: int = 250):
@@ -8263,6 +10084,7 @@ class InventoryWindow(tk.Toplevel):
                 "item_type": None, "school": None, "color": None, "size": None,
             }
             f[fld] = self.multi[fld][:]
+            f["hide_zero"] = not bool(self.show_zero_var.get())
             return f
 
         return {
@@ -8270,6 +10092,7 @@ class InventoryWindow(tk.Toplevel):
             "school": self.f_school.get() or None,
             "color": self.f_color.get() or None,
             "size": self.f_size.get() or None,
+            "hide_zero": not bool(self.show_zero_var.get()),
         }
 
     def _refresh(self):
@@ -8283,16 +10106,18 @@ class InventoryWindow(tk.Toplevel):
         total_qty = 0
         total_value = 0.0
         for r in rows:
+            tags = ("zero_stock",) if int(r.get("count") or 0) == 0 else ()
             self.table.insert(
                 "", tk.END,
                 values=(r["id"], r["item_type"], r["school"], r["color"], r["size"],
-                        f"{float(r['unit_price']):.2f}",
-                        r["count"], f"{float(r['value']):.2f}")
+                        f"{format_money(float(r['unit_price']))}",
+                        r["count"], f"{format_money(float(r['value']))}"),
+                tags=tags,
             )
             total_qty += int(r["count"])
             total_value += float(r["value"])
         self.sum_qty.set(str(total_qty))
-        self.sum_val.set(f"{total_value:.2f}")
+        self.sum_val.set(f"{format_money(total_value)}")
         _apply_zebra_tags(self.table)
 
     def _clear_all(self):
@@ -8514,12 +10339,12 @@ class InventoryWindow(tk.Toplevel):
             ttk.Label(frm, text=f"الصنف: {first[1]} / {first[2]} / {first[3]} / {first[4]}")\
                 .grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6))
             row += 1
-            ttk.Label(frm, text=f"السعر الحالي: {current_price:.2f}")\
+            ttk.Label(frm, text=f"السعر الحالي: {format_money(current_price)}")\
                 .grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
             row += 1
 
         ttk.Label(frm, text="السعر الجديد:").grid(row=row, column=0, sticky="e", padx=4, pady=6)
-        price_var = tk.StringVar(value=f"{current_price:.2f}")
+        price_var = tk.StringVar(value=f"{format_money(current_price)}")
         ttk.Entry(frm, textvariable=price_var, width=16).grid(row=row, column=1, sticky="w", padx=4, pady=6)
         row += 1
 
@@ -8757,7 +10582,8 @@ class BillsHistoryWindow(tk.Toplevel):
         top.pack(fill=tk.X, padx=8, pady=8)
         ttk.Label(top, text="سجل الفواتير", font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT)
         ttk.Button(top, text="تحديث", command=self._refresh).pack(side=tk.RIGHT)
-        ttk.Button(top, text="فتح", command=self._print_selected).pack(side=tk.RIGHT, padx=8)
+        ttk.Button(top, text="طباعة", command=self._print_selected).pack(side=tk.RIGHT, padx=8)
+        ttk.Button(top, text="معاينة", command=self._preview_selected).pack(side=tk.RIGHT)
         ttk.Button(top, text="تصدير المحدد إلى إكسل", command=self._export_selected).pack(side=tk.RIGHT)
         ttk.Button(top, text="VOID مع سبب", command=self._void_selected).pack(side=tk.RIGHT, padx=8)
         ttk.Label(top, text="نوع الفاتورة:").pack(side=tk.RIGHT, padx=(16, 4))
@@ -8774,7 +10600,7 @@ class BillsHistoryWindow(tk.Toplevel):
         bills_wrap.pack(fill=tk.BOTH, expand=False, padx=8, pady=(0, 6))
         self.bills_table = ttk.Treeview(
             bills_wrap,
-            columns=("id", "created_at", "bill_type", "customer", "total", "status"),
+            columns=("id", "created_at", "bill_type", "customer", "phone", "total", "status"),
             show="headings",
             height=10,
         )
@@ -8783,6 +10609,7 @@ class BillsHistoryWindow(tk.Toplevel):
             ("created_at", "التاريخ", 160),
             ("bill_type", "النوع", 90),
             ("customer", "العميل", 200),
+            ("phone", "رقم العميل", 120),
             ("total", "الإجمالي", 100),
             ("status", "الحالة", 100),
         ]:
@@ -8852,13 +10679,7 @@ class BillsHistoryWindow(tk.Toplevel):
 
     @staticmethod
     def _bill_type_ar(bt: Optional[str]) -> str:
-        u = str(bt or "SALE").upper()
-        return {
-            "SALE": "بيع",
-            "RETURN": "مرتجع",
-            "EXCHANGE": "استبدال",
-            "WAREHOUSE_RETURN": "إلى المصنع",
-        }.get(u, u)
+        return _receipt_bill_type_label(bt)
 
     def _selected_bill_type_code(self) -> str:
         m = {
@@ -8885,7 +10706,8 @@ class BillsHistoryWindow(tk.Toplevel):
                     fmt_local_ts(b["created_at"], ""),
                     self._bill_type_ar(b.get("bill_type")),
                     b.get("customer") or "",
-                    f"{float(b['total']):.2f}",
+                    b.get("customer_phone") or "",
+                    f"{format_money(float(b['total']))}",
                     status_text,
                 ),
             )
@@ -8909,8 +10731,8 @@ class BillsHistoryWindow(tk.Toplevel):
             self.items_table.insert(
                 "", tk.END,
                 values=(ln["item_type"], ln["school"], ln["color"], ln["size"], origin_txt,
-                        f"{float(ln['unit_price']):.2f}",
-                        ln["qty"], f"{float(ln['line_total']):.2f}")
+                        f"{format_money(float(ln['unit_price']))}",
+                        ln["qty"], f"{format_money(float(ln['line_total']))}")
             )
         _apply_zebra_tags(self.items_table)
 
@@ -8959,10 +10781,49 @@ class BillsHistoryWindow(tk.Toplevel):
         except StopIteration:
             messagebox.showerror("فشل الطباعة", "لم يتم العثور على الفاتورة.")
             return
-        tmp_dir = tempfile.gettempdir()
-        path = os.path.join(tmp_dir, f"bill_{bill_id}.html")
-        save_bill_as_html(path, bill, items)
-        _print_html_auto(path, copies=1, parent=self)
+        try:
+            tmp_dir = tempfile.gettempdir()
+            path = os.path.join(tmp_dir, "bill_%s.html" % bill_id)
+            pos_name, support_call, support_whatsapp = _lookup_receipt_branding(self.db.conn)
+            save_bill_as_html(
+                path,
+                bill,
+                items,
+                pos_name=pos_name,
+                support_call=support_call,
+                support_whatsapp=support_whatsapp,
+                shift_id=getattr(self.db, "active_shift_id", "") or "",
+            )
+            _print_html_auto(path, copies=1, parent=self)
+        except Exception as ex:
+            messagebox.showerror("فشل الطباعة", str(ex), parent=self)
+
+    def _preview_selected(self):
+        bill_id = self._get_selected_bill_id()
+        if bill_id is None:
+            messagebox.showwarning("لم يتم التحديد", "اختر فاتورة أولاً.", parent=self)
+            return
+        try:
+            bill = next(b for b in self.db.list_bills() if int(b["id"]) == bill_id)
+            items = self.db.list_bill_items(bill_id)
+        except StopIteration:
+            messagebox.showerror("فشل المعاينة", "لم يتم العثور على الفاتورة.", parent=self)
+            return
+        try:
+            tmp_dir = tempfile.gettempdir()
+            path = os.path.join(tmp_dir, "bill_preview_%s.html" % bill_id)
+            pos_name, support_call, support_whatsapp = _lookup_receipt_branding(self.db.conn)
+            save_bill_as_html(
+                path,
+                bill,
+                items,
+                pos_name=pos_name,
+                support_call=support_call,
+                support_whatsapp=support_whatsapp,
+            )
+            webbrowser.open_new_tab(_file_url(path))
+        except Exception as ex:
+            messagebox.showerror("فشل المعاينة", str(ex), parent=self)
 
     def _void_selected(self):
         bill_id = self._get_selected_bill_id()
@@ -9149,9 +11010,9 @@ class MovementsWindow(tk.Toplevel):
             f"تسويات سلبية (كمية): {s['qty_adj_out']}  |  "
             f"مرتجعات واردة (كمية): {s['qty_return_in']}  |  "
             f"حجوزات (كمية): {s['qty_reserve']}\n"
-            f"قيمة المنصرف (كمية×سعر الحركة): {s['val_out']:.2f}  |  "
-            f"تحصيل تسليم حجوزات: {s['deliver_cash']:.2f}  |  "
-            f"إجمالي الدخل (منصرف + تحصيل تسليم): {s['income_moves']:.2f}"
+            f"قيمة المنصرف (كمية×سعر الحركة): {format_money(s['val_out'])}  |  "
+            f"تحصيل تسليم حجوزات: {format_money(s['deliver_cash'])}  |  "
+            f"إجمالي الدخل (منصرف + تحصيل تسليم): {format_money(s['income_moves'])}"
         )
 
     def _clear(self):
@@ -9200,7 +11061,7 @@ class AdminWindow(tk.Toplevel):
         super().__init__(master)
         self.db = db
         self.title("الإعدادات والإدارة")
-        self.geometry("520x520")
+        self.geometry("560x620")
         self.resizable(True, True)
         self.transient(master)
         self.grab_set()
@@ -9260,6 +11121,7 @@ class AdminWindow(tk.Toplevel):
             ("allow_inventory_price_edit", "السماح بتعديل الأسعار من نافذة المخزون"),
             ("allow_inventory_specs_edit", "السماح بتعديل المواصفات من نافذة المخزون"),
             ("allow_size_profile_edit", "السماح بتعديل نطاقات المقاسات"),
+            ("allow_stock_audit", "السماح بفتح نافذة الجرد"),
         ]
         for row_idx, (key, label) in enumerate(feature_rows, start=2):
             var = tk.BooleanVar(value=self.db.is_manager_feature_enabled(key))
@@ -9281,6 +11143,36 @@ class AdminWindow(tk.Toplevel):
         ttk.Button(perms_btns, text="حفظ الصلاحيات", command=self._save_feature_permissions).pack(side=tk.RIGHT, padx=6)
 
         # ---- Tab 3: Import ----
+        receipt_tab = ttk.Frame(nb, padding=12)
+        nb.add(receipt_tab, text="إيصال الطباعة")
+
+        ttk.Label(receipt_tab, text="بيانات الفاتورة المطبوعة", font=("Segoe UI", 11, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+        ttk.Label(
+            receipt_tab,
+            text="اسم نقطة البيع يتم أخذه تلقائيا من اسم الجهاز الحالي.",
+            justify="right",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
+        ttk.Label(receipt_tab, text="رقم الاتصال:").grid(row=2, column=0, sticky="e", padx=6, pady=4)
+        self._receipt_call_var = tk.StringVar()
+        ttk.Entry(receipt_tab, textvariable=self._receipt_call_var, width=28).grid(
+            row=2, column=1, sticky="ew", padx=6, pady=4
+        )
+
+        ttk.Label(receipt_tab, text="رقم واتساب:").grid(row=3, column=0, sticky="e", padx=6, pady=4)
+        self._receipt_whatsapp_var = tk.StringVar()
+        ttk.Entry(receipt_tab, textvariable=self._receipt_whatsapp_var, width=28).grid(
+            row=3, column=1, sticky="ew", padx=6, pady=4
+        )
+        receipt_tab.columnconfigure(1, weight=1)
+
+        receipt_btns = ttk.Frame(receipt_tab)
+        receipt_btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(receipt_btns, text="تحميل الحالي", command=self._load_receipt_settings).pack(side=tk.RIGHT)
+        ttk.Button(receipt_btns, text="حفظ بيانات الإيصال", command=self._save_receipt_settings).pack(side=tk.RIGHT, padx=6)
+        self._load_receipt_settings()
+
         imp_tab = ttk.Frame(nb, padding=12)
         nb.add(imp_tab, text="استيراد")
 
@@ -9388,6 +11280,19 @@ class AdminWindow(tk.Toplevel):
         self._pw_cur.delete(0, tk.END)
         self._pw_new.delete(0, tk.END)
         self._pw_confirm.delete(0, tk.END)
+
+    def _load_receipt_settings(self):
+        self._receipt_call_var.set(self.db.get_app_setting(RECEIPT_SUPPORT_CALL_SETTING, "") or "")
+        self._receipt_whatsapp_var.set(self.db.get_app_setting(RECEIPT_SUPPORT_WHATSAPP_SETTING, "") or "")
+
+    def _save_receipt_settings(self):
+        call_number = western_digits(self._receipt_call_var.get().strip())
+        whatsapp_number = western_digits(self._receipt_whatsapp_var.get().strip())
+        self.db.set_app_setting(RECEIPT_SUPPORT_CALL_SETTING, call_number)
+        self.db.set_app_setting(RECEIPT_SUPPORT_WHATSAPP_SETTING, whatsapp_number)
+        self._receipt_call_var.set(call_number)
+        self._receipt_whatsapp_var.set(whatsapp_number)
+        ToastNotification.show(self.winfo_toplevel(), "تم حفظ بيانات الإيصال بنجاح", toast_type="success")
 
     def _browse_import(self):
         path = filedialog.askopenfilename(
@@ -9578,13 +11483,13 @@ class ShiftSummaryDialog(tk.Toplevel):
         sal = ttk.LabelFrame(main, text="المبيعات")
         sal.pack(fill=tk.X, pady=4)
         ttk.Label(sal, text=f"عدد الفواتير: {summary['sales_count']}").pack(anchor="w", padx=8, pady=2)
-        ttk.Label(sal, text=f"إجمالي المبيعات: {summary['sales_total']:.2f}").pack(anchor="w", padx=8, pady=2)
+        ttk.Label(sal, text=f"إجمالي المبيعات: {format_money(summary['sales_total'])}").pack(anchor="w", padx=8, pady=2)
 
         res = ttk.LabelFrame(main, text="الحجوزات")
         res.pack(fill=tk.X, pady=4)
         ttk.Label(res, text=f"عدد الحجوزات: {summary['res_count']}").pack(anchor="w", padx=8, pady=2)
-        ttk.Label(res, text=f"إجمالي الحجوزات: {summary['res_total']:.2f}").pack(anchor="w", padx=8, pady=2)
-        ttk.Label(res, text=f"المدفوع من الحجوزات: {summary['res_paid']:.2f}").pack(anchor="w", padx=8, pady=2)
+        ttk.Label(res, text=f"إجمالي الحجوزات: {format_money(summary['res_total'])}").pack(anchor="w", padx=8, pady=2)
+        ttk.Label(res, text=f"المدفوع من الحجوزات: {format_money(summary['res_paid'])}").pack(anchor="w", padx=8, pady=2)
 
         deliver_count = summary.get("deliver_count", 0)
         deliver_total = summary.get("deliver_total", 0.0)
@@ -9592,7 +11497,7 @@ class ShiftSummaryDialog(tk.Toplevel):
             dlv = ttk.LabelFrame(main, text="تسليم الحجوزات")
             dlv.pack(fill=tk.X, pady=4)
             ttk.Label(dlv, text=f"عدد عمليات التسليم: {deliver_count}").pack(anchor="w", padx=8, pady=2)
-            ttk.Label(dlv, text=f"إجمالي المحصّل عند التسليم: {deliver_total:.2f}").pack(anchor="w", padx=8, pady=2)
+            ttk.Label(dlv, text=f"إجمالي المحصّل عند التسليم: {format_money(deliver_total)}").pack(anchor="w", padx=8, pady=2)
 
         return_count = summary.get("return_count", 0)
         return_total = summary.get("return_total", 0.0)
@@ -9600,7 +11505,7 @@ class ShiftSummaryDialog(tk.Toplevel):
             ret = ttk.LabelFrame(main, text="المرتجعات")
             ret.pack(fill=tk.X, pady=4)
             ttk.Label(ret, text=f"عدد فواتير المرتجع: {return_count}").pack(anchor="w", padx=8, pady=2)
-            ttk.Label(ret, text=f"إجمالي المرتجعات: {return_total:.2f}").pack(anchor="w", padx=8, pady=2)
+            ttk.Label(ret, text=f"إجمالي المرتجعات: {format_money(return_total)}").pack(anchor="w", padx=8, pady=2)
 
         exchange_count = summary.get("exchange_count", 0)
         exchange_total = summary.get("exchange_total", 0.0)
@@ -9609,13 +11514,13 @@ class ShiftSummaryDialog(tk.Toplevel):
             exc.pack(fill=tk.X, pady=4)
             ttk.Label(exc, text=f"عدد فواتير الاستبدال: {exchange_count}").pack(anchor="w", padx=8, pady=2)
             if exchange_total >= 0:
-                ttk.Label(exc, text=f"صافي الاستبدال (محصّل): {exchange_total:.2f}").pack(anchor="w", padx=8, pady=2)
+                ttk.Label(exc, text=f"صافي الاستبدال (محصّل): {format_money(exchange_total)}").pack(anchor="w", padx=8, pady=2)
             else:
-                ttk.Label(exc, text=f"صافي الاستبدال (مسترد): {abs(exchange_total):.2f}").pack(anchor="w", padx=8, pady=2)
+                ttk.Label(exc, text=f"صافي الاستبدال (مسترد): {format_money(abs(exchange_total))}").pack(anchor="w", padx=8, pady=2)
 
         grand = summary["sales_total"] + summary["res_paid"] + deliver_total - return_total + exchange_total
         visa_total = float(summary.get("visa_collected", 0.0))
-        ttk.Label(main, text=f"إجمالي الكاش: {grand:.2f} | إجمالي الفيزا: {visa_total:.2f}", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=8)
+        ttk.Label(main, text=f"إجمالي الكاش: {format_money(grand)} | إجمالي الفيزا: {format_money(visa_total)}", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=8)
 
         btns = ttk.Frame(main)
         btns.pack(fill=tk.X, pady=(4, 0))
@@ -9647,41 +11552,51 @@ class ShiftSummaryDialog(tk.Toplevel):
         visa_total = float(summary.get("visa_collected", 0.0))
         inflow_rows = ""
         for it in summary.get("inflow_items", []):
-            inflow_rows += f"<tr><td>{it['item_type']}</td><td>{it['school']}</td><td>{it['color']}</td><td>{it['size']}</td><td>{it['qty']}</td></tr>\n"
-        deliver_html = f'<div><b>تسليم حجوزات:</b> {deliver_count} عملية - محصّل {deliver_total:.2f}</div>\n<hr class="sep">' if deliver_count > 0 else ""
-        return_html = f'<div><b>مرتجعات:</b> {return_count} فاتورة - {return_total:.2f}</div>\n<hr class="sep">' if return_count > 0 else ""
-        exchange_html = f'<div><b>استبدالات:</b> {exchange_count} فاتورة - صافي {exchange_total:.2f}</div>\n<hr class="sep">' if exchange_count > 0 else ""
+            inflow_rows += (
+                "<tr>"
+                f"<td>{_html(it.get('item_type', ''))}</td>"
+                f"<td>{_html(it.get('school', ''))}</td>"
+                f"<td>{_html(it.get('color', ''))}</td>"
+                f"<td>{_html(it.get('size', ''))}</td>"
+                f"<td>{_num_html(it.get('qty', ''))}</td>"
+                "</tr>\n"
+            )
+        deliver_html = f'<div><b>تسليم حجوزات:</b> {_num_html(deliver_count)} عملية - محصّل {_money_html(deliver_total)}</div>\n<hr class="sep">' if deliver_count > 0 else ""
+        return_html = f'<div><b>مرتجعات:</b> {_num_html(return_count)} فاتورة - {_money_html(return_total)}</div>\n<hr class="sep">' if return_count > 0 else ""
+        exchange_html = f'<div><b>استبدالات:</b> {_num_html(exchange_count)} فاتورة - صافي {_money_html(exchange_total)}</div>\n<hr class="sep">' if exchange_count > 0 else ""
 
         html = f"""<!DOCTYPE html>
-<html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>ملخص الوردية</title>
+<html lang="ar" dir="ltr"><head><meta charset="utf-8"><title>ملخص الوردية</title>
 <style>
+{_receipt_font_face_css()}
 @page {{ size: 80mm auto; margin: 2mm; }}
-body {{ font-family: "Segoe UI", Tahoma, sans-serif; font-size: 11px; width: 76mm; direction: rtl; margin: 0; padding: 2mm; }}
+body {{ font-family: {RECEIPT_FONT_STACK}; font-size: 11px; width: 76mm; direction: ltr; margin: 0; padding: 2mm; }}
+.receipt {{ direction: rtl; unicode-bidi: isolate; }}
+.digits {{ direction: ltr; unicode-bidi: isolate; font-family: Tahoma, Arial, "Segoe UI", sans-serif; }}
 h2 {{ font-size: 14px; text-align: center; margin: 4px 0; }}
 .sep {{ border: none; border-top: 1px dashed #000; margin: 4px 0; }}
 table {{ border-collapse: collapse; width: 100%; font-size: 10px; }}
 th {{ border-bottom: 1px solid #000; padding: 2px; text-align: right; }}
 td {{ padding: 2px; border-bottom: 1px dotted #ccc; }}
 .total {{ font-size: 13px; font-weight: bold; text-align: center; margin: 6px 0; }}
-</style></head><body>
-<h2>ملخص الوردية #{summary['shift_id']}</h2>
+</style></head><body><div class="receipt">
+<h2>ملخص الوردية #{_num_html(summary['shift_id'])}</h2>
 <hr class="sep">
-<div>بداية: {started}</div>
+<div>بداية: {_num_html(started)}</div>
 <div>نهاية: الآن</div>
 <hr class="sep">
-<div><b>الوارد:</b> {summary['inflow_count']} عملية - {summary['inflow_total_qty']} قطعة</div>
+<div><b>الوارد:</b> {_num_html(summary['inflow_count'])} عملية - {_num_html(summary['inflow_total_qty'])} قطعة</div>
 {"<table><thead><tr><th>النوع</th><th>المدرسة</th><th>اللون</th><th>المقاس</th><th>الكمية</th></tr></thead><tbody>" + inflow_rows + "</tbody></table>" if inflow_rows else ""}
 <hr class="sep">
-<div><b>المبيعات:</b> {summary['sales_count']} فاتورة - {summary['sales_total']:.2f}</div>
+<div><b>المبيعات:</b> {_num_html(summary['sales_count'])} فاتورة - {_money_html(summary['sales_total'])}</div>
 <hr class="sep">
-<div><b>الحجوزات:</b> {summary['res_count']} - إجمالي {summary['res_total']:.2f} - مدفوع {summary['res_paid']:.2f}</div>
+<div><b>الحجوزات:</b> {_num_html(summary['res_count'])} - إجمالي {_money_html(summary['res_total'])} - مدفوع {_money_html(summary['res_paid'])}</div>
 <hr class="sep">
-{deliver_html}{return_html}{exchange_html}<div class="total">الكاش: {grand:.2f} | الفيزا: {visa_total:.2f}</div>
-</body></html>"""
+{deliver_html}{return_html}{exchange_html}<div class="total">الكاش: {_money_html(grand)} | الفيزا: {_money_html(visa_total)}</div>
+</div></body></html>"""
 
         tmp = os.path.join(tempfile.gettempdir(), f"shift_{summary['shift_id']}.html")
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(html)
+        _write_html_file(tmp, html)
         _print_html_auto(tmp, copies=1, parent=self)
 
 
@@ -9895,7 +11810,7 @@ class WarehouseApp:
         self.root = root
         self.db = db
         self._current_shift_id: Optional[int] = None
-        self._open_incoming_shipments: set[str] = set()
+        self._open_incoming_shipments: Set[str] = set()
         self.root._app_controller = self
         root.title("\u0625\u062F\u0627\u0631\u0629 \u0627\u0644\u0645\u062E\u0627\u0632\u0646 \u0648\u0627\u0644\u0645\u0628\u064A\u0639\u0627\u062A")
         root.geometry("1280x760")
@@ -9944,6 +11859,8 @@ class WarehouseApp:
         # Old fully-disabled toolbar buttons were commented during the first lockdown pass.
         self._inventory_btn = ttk.Button(self._toolbar, text="\u0627\u0644\u0645\u062E\u0632\u0648\u0646", command=self._open_inventory)
         self._inventory_btn.pack(side=tk.LEFT, padx=2)
+        self._stock_audit_btn = ttk.Button(self._toolbar, text="جرد", command=self._open_stock_audit)
+        self._stock_audit_btn.pack(side=tk.LEFT, padx=2)
         ttk.Button(self._toolbar, text="\u0633\u062C\u0644 \u0627\u0644\u0641\u0648\u0627\u062A\u064A\u0631", command=self._open_bills_history).pack(side=tk.LEFT, padx=2)
         ttk.Button(self._toolbar, text="\u0633\u062C\u0644 \u0627\u0644\u062D\u0631\u0643\u0627\u062A", command=self._open_movements).pack(side=tk.LEFT, padx=2)
         self._bulk_price_btn = ttk.Button(self._toolbar, text="\u062A\u0639\u062F\u064A\u0644 \u0627\u0644\u0623\u0633\u0639\u0627\u0631", command=self._open_bulk_price)
@@ -10091,7 +12008,7 @@ class WarehouseApp:
 
     def _open_incoming_shipment_checklist(self, alert: Dict[str, Any]) -> bool:
         shipment_uuid = str(alert.get("shipment_uuid") or "").strip()
-        rows = self.db.list_pending_shipment_items(shipment_uuid)
+        rows = self.db.list_grouped_pending_shipment_items(shipment_uuid)
         if not shipment_uuid or not rows:
             return False
         self._open_incoming_shipments.add(shipment_uuid)
@@ -10106,13 +12023,9 @@ class WarehouseApp:
         def _dismiss_receipt():
             self._open_incoming_shipments.discard(shipment_uuid)
             if not confirmed:
-                try:
-                    self.db.reset_incoming_shipment_alert_shown(int(alert["id"]))
-                except Exception:
-                    pass
                 ToastNotification.show(
                     self.root,
-                    "لم يتم تأكيد الشحنة بعد. ستظهر مرة أخرى حتى يتم استلامها.",
+                    "لم يتم تأكيد الشحنة بعد. ستظل موجودة في تبويب شحنات غير مؤكدة ويمكن فتحها لاحقاً.",
                     toast_type="warning",
                 )
             try:
@@ -10155,7 +12068,7 @@ class WarehouseApp:
 
         received_map: Dict[int, int] = {}
         for r in rows:
-            idx = int(r["line_index"])
+            idx = int(r["group_key"])
             exp = int(r["expected_qty"] or 0)
             received_map[idx] = exp
             tv.insert("", tk.END, iid=str(idx), values=(idx + 1, r["item_type"], r["school"], r["color"], r["size"], exp, exp))
@@ -10184,9 +12097,9 @@ class WarehouseApp:
 
         def _confirm_receipt():
             nonlocal confirmed
-            payload = [{"line_index": int(r["line_index"]), "received_qty": int(received_map.get(int(r["line_index"]), 0))} for r in rows]
+            payload = [{"line_indexes": [int(x) for x in (r.get("line_indexes") or [])], "received_qty": int(received_map.get(int(r["group_key"]), 0))} for r in rows]
             try:
-                out = self.db.confirm_incoming_shipment(shipment_uuid, payload, note_var.get())
+                out = self.db.confirm_grouped_incoming_shipment(shipment_uuid, payload, note_var.get())
                 confirmed = True
                 self._open_incoming_shipments.discard(shipment_uuid)
                 dlg.destroy()
@@ -10202,7 +12115,10 @@ class WarehouseApp:
             except Exception as ex:
                 messagebox.showerror("خطأ", str(ex), parent=dlg)
 
-        ttk.Button(frm, text="تأكيد الاستلام", command=_confirm_receipt).pack(anchor="e", pady=(8, 0))
+        btn_row = ttk.Frame(frm)
+        btn_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(btn_row, text="فتح لاحقاً", command=_dismiss_receipt).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="تأكيد الاستلام", command=_confirm_receipt).pack(side=tk.RIGHT)
 
         return True
 
@@ -10313,6 +12229,15 @@ class WarehouseApp:
         except Exception as ex:
             messagebox.showerror("خطأ", str(ex))
 
+    def _open_stock_audit(self):
+        if not self.db.is_manager_feature_enabled("allow_stock_audit"):
+            messagebox.showwarning("مقيد", _feature_restricted_message("نافذة الجرد مقيدة حاليا في نقطة البيع."), parent=self.root)
+            return
+        try:
+            StockAuditWindow(self.root, self.db)
+        except Exception as ex:
+            messagebox.showerror("خطأ", str(ex))
+
     def _open_bills_history(self):
         try:
             BillsHistoryWindow(self.root, self.db)
@@ -10354,6 +12279,12 @@ class WarehouseApp:
         try:
             self._inventory_btn.configure(
                 state=("normal" if self.db.is_manager_feature_enabled("allow_inventory_window") else "disabled")
+            )
+        except Exception:
+            pass
+        try:
+            self._stock_audit_btn.configure(
+                state=("normal" if self.db.is_manager_feature_enabled("allow_stock_audit") else "disabled")
             )
         except Exception:
             pass

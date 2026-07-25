@@ -213,6 +213,36 @@ class SyncError(Exception):
     """Any recoverable client-side sync failure. Carries a short reason."""
 
 
+def _format_url_error_reason(reason: Any) -> str:
+    text = str(reason or "").strip()
+    lower = text.lower()
+    errno_value = getattr(reason, "errno", None)
+    if errno_value == 11001 or "getaddrinfo failed" in lower:
+        return "DNS lookup failed for the sync server host. Check internet, DNS, or the saved server URL."
+    if "timed out" in lower or "timeout" in lower:
+        return "connection timed out"
+    return text or "network request failed"
+
+
+def is_transient_network_error_message(err_text: Any) -> bool:
+    lower = str(err_text or "").strip().lower()
+    transient_bits = (
+        "network error:",
+        "timeout",
+        "timed out",
+        "getaddrinfo failed",
+        "temporary failure",
+        "name or service not known",
+        "no address associated with hostname",
+        "connection reset",
+        "connection aborted",
+        "connection refused",
+        "remote end closed connection",
+        "ssl:",
+    )
+    return any(bit in lower for bit in transient_bits)
+
+
 def _build_ssl_ctx(verify: bool) -> Optional[ssl.SSLContext]:
     if verify:
         return ssl.create_default_context()
@@ -260,7 +290,7 @@ def _http_request(
             if attempt < HTTP_RETRY_ATTEMPTS:
                 time.sleep((0.35 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.25))
                 continue
-            raise SyncError(f"network error: {e.reason}")
+            raise SyncError("network error: %s" % _format_url_error_reason(e.reason))
         except TimeoutError:
             if attempt < HTTP_RETRY_ATTEMPTS:
                 time.sleep((0.35 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.25))

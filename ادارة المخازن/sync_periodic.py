@@ -93,10 +93,13 @@ class PeriodicSyncController:
                     except Exception:
                         pass
                 elif kind == "failure":
+                    err_text = str(msg[1])
+                    if sync_client.is_transient_network_error_message(err_text):
+                        continue
                     try:
                         import sync_ui
 
-                        sync_ui.present_sync_cycle_failure(self.root, str(msg[1]))
+                        sync_ui.present_sync_cycle_failure(self.root, err_text)
                     except Exception:
                         pass
         except queue.Empty:

@@ -1,9 +1,23 @@
 Build this folder’s POS Windows .exe from PowerShell (use Set-Location to this directory first):
 
-python -m pip install --upgrade pyinstaller
+python -m pip install --upgrade pyinstaller certifi
 python -m PyInstaller --noconfirm HosnyPOS.spec
 
 Output: dist\HosnyPOS.exe
+
+Copy both files to the cashier PC:
+
+dist\HosnyPOS.exe
+dist\cacert.pem
+
+Windows 7 32-bit build:
+
+Install Python 3.7.3 Windows x86, then run:
+
+build_pos_win7_x86.bat
+
+This uses HosnyPOS-win7-x86.spec and pinned dependencies from requirements-win7-x86.txt.
+Copy both dist\HosnyPOS.exe and dist\cacert.pem to the cashier PC.
 
 Legacy one-file command (still works):
 

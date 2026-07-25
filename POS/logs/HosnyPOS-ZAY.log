@@ -194,3 +194,71 @@ NameError: name 'add_context_menu' is not defined. Did you mean: '_add_context_m
 2026-06-14 16:02:29 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=14540, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
 2026-06-14 19:02:03 INFO hosny: ============================================================
 2026-06-14 19:02:03 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=26072, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-29 21:40:30 INFO hosny: ============================================================
+2026-06-29 21:40:30 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=42996, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-29 22:17:37 INFO hosny: ============================================================
+2026-06-29 22:17:37 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=37488, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-29 22:24:36 INFO hosny: ============================================================
+2026-06-29 22:24:36 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=36600, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-29 23:00:09 INFO hosny: ============================================================
+2026-06-29 23:00:09 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=34396, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-29 23:07:57 INFO hosny: ============================================================
+2026-06-29 23:07:57 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=42920, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-29 23:09:49 INFO hosny: ============================================================
+2026-06-29 23:09:49 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=39628, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-19 20:16:34 INFO hosny: ============================================================
+2026-07-19 20:16:34 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=14184, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-19 20:38:43 INFO hosny: ============================================================
+2026-07-19 20:38:43 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=17224, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-19 20:38:44 INFO hosny: font-face= True
+2026-07-19 20:38:44 INFO hosny: font-file= True
+2026-07-19 20:38:44 INFO hosny: C:\Users\LENOVO\AppData\Local\Temp\hosny_font_smoke.html
+2026-07-19 20:38:54 INFO hosny: ============================================================
+2026-07-19 20:38:54 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=13884, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-19 20:38:54 INFO hosny: True True C:\Users\LENOVO\AppData\Local\Temp\hosny_font_smoke.html
+2026-07-19 20:39:07 INFO hosny: ============================================================
+2026-07-19 20:39:07 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=13724, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-19 20:41:42 INFO hosny: ============================================================
+2026-07-19 20:41:42 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=4744, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-19 20:43:54 INFO hosny: ============================================================
+2026-07-19 20:43:54 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=15040, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-19 20:45:27 INFO hosny: ============================================================
+2026-07-19 20:45:27 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=7748, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-19 20:46:50 INFO hosny: ============================================================
+2026-07-19 20:46:50 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=11916, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-19 20:47:34 INFO hosny: ============================================================
+2026-07-19 20:47:34 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=13020, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-19 20:50:56 INFO hosny: ============================================================
+2026-07-19 20:50:56 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=2192, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-19 20:52:45 INFO hosny: ============================================================
+2026-07-19 20:52:45 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=10388, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-19 20:54:03 INFO hosny: ============================================================
+2026-07-19 20:54:03 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=13228, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-19 20:57:13 INFO hosny: ============================================================
+2026-07-19 20:57:13 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=12984, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-19 20:58:07 INFO hosny: ============================================================
+2026-07-19 20:58:07 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=18192, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-19 21:11:31 INFO hosny: ============================================================
+2026-07-19 21:11:31 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=3792, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-19 21:12:27 INFO hosny: ============================================================
+2026-07-19 21:12:27 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=12880, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-19 21:19:49 INFO hosny: ============================================================
+2026-07-19 21:19:49 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=23824, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-19 21:35:58 INFO hosny: ============================================================
+2026-07-19 21:35:58 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=20584, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-25 18:28:05 INFO hosny: ============================================================
+2026-07-25 18:28:05 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=15580, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-25 18:31:09 INFO hosny: ============================================================
+2026-07-25 18:31:09 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=19568, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-25 18:32:29 INFO hosny: ============================================================
+2026-07-25 18:32:29 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=17620, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-25 18:32:57 INFO hosny: ============================================================
+2026-07-25 18:32:57 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=2344, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-25 19:12:23 INFO hosny: ============================================================
+2026-07-25 19:12:23 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=16500, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-25 19:12:23 INFO hosny: reservation_stock_before 5
+2026-07-25 19:12:23 INFO hosny: reservation_stock_after 5
+2026-07-25 19:12:37 INFO hosny: ============================================================
+2026-07-25 19:12:37 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=10352, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-25 19:12:37 ERROR hosny: reservation_stock_before=5 after=5
+2026-07-25 19:12:37 ERROR hosny: BUG_CONFIRMED reservation delivery did not deduct stock

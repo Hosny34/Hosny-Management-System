@@ -1,0 +1,5 @@
+pyinstaller==4.10
+pyinstaller-hooks-contrib==2022.5
+certifi==2024.8.30
+openpyxl==3.1.2
+pywin32==305

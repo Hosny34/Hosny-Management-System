@@ -14,11 +14,15 @@ if errorlevel 1 (
 )
 
 echo [1/2] Installing build dependencies...
-%PY_CMD% -m pip install --upgrade pyinstaller openpyxl pywin32
+%PY_CMD% -m pip install --upgrade pyinstaller certifi openpyxl pywin32
 if errorlevel 1 goto :fail
 
 echo [2/2] Building HosnyPOS.exe...
 %PY_CMD% -m PyInstaller --clean --noconfirm "HosnyPOS.spec"
+if errorlevel 1 goto :fail
+
+echo Copying CA bundle beside HosnyPOS.exe...
+%PY_CMD% -c "import certifi,shutil,pathlib; d=pathlib.Path('dist'); d.mkdir(exist_ok=True); shutil.copyfile(certifi.where(), d / 'cacert.pem')"
 if errorlevel 1 goto :fail
 
 echo.

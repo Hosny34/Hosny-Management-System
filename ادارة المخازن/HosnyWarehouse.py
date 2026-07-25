@@ -16,13 +16,149 @@ import time
 import tempfile
 import unicodedata
 import webbrowser
+import re
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from dataclasses import dataclass
 from datetime import datetime, date   # +date for calendar
 import calendar                       # ADD
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
+
+_DIGIT_TRANSLATION = str.maketrans({
+    "\u0660": "0", "\u0661": "1", "\u0662": "2", "\u0663": "3", "\u0664": "4",
+    "\u0665": "5", "\u0666": "6", "\u0667": "7", "\u0668": "8", "\u0669": "9",
+    "\u06f0": "0", "\u06f1": "1", "\u06f2": "2", "\u06f3": "3", "\u06f4": "4",
+    "\u06f5": "5", "\u06f6": "6", "\u06f7": "7", "\u06f8": "8", "\u06f9": "9",
+})
+
+
+def western_digits(value: Any) -> str:
+    return ("" if value is None else str(value)).translate(_DIGIT_TRANSLATION)
+
+
+_LTR_MARK = "\u200e"
+_RTL_MARK = "\u200f"
+_NUMBER_RUN_RE = re.compile(r"(?<!\u200e)([0-9](?:[0-9.,:/\\\- ]*[0-9])?)(?!\u200e)")
+
+
+def _strip_digit_marks(value: Any) -> str:
+    return western_digits(value).replace(_LTR_MARK, "").replace(_RTL_MARK, "")
+
+
+def western_digits_for_display(value: Any) -> str:
+    text = _strip_digit_marks(value)
+    return _NUMBER_RUN_RE.sub(lambda m: _LTR_MARK + m.group(1) + _LTR_MARK, text)
+
+
+def _westernize_value(value: Any) -> Any:
+    if value is None:
+        return value
+    if isinstance(value, (list, tuple)):
+        return type(value)(_westernize_value(v) for v in value)
+    return western_digits_for_display(value)
+
+
+def _westernize_options(options: Dict[str, Any]) -> None:
+    for key in ("text", "value", "values"):
+        if key in options:
+            options[key] = _westernize_value(options[key])
+
+
+def _install_western_digit_tk_patch() -> None:
+    """Keep Tk widgets from showing Arabic-Indic/Persian digits."""
+    if getattr(tk, "_hosny_western_digits_patch", False):
+        return
+    tk._hosny_western_digits_patch = True
+
+    original_stringvar_set = tk.StringVar.set
+    original_stringvar_get = tk.StringVar.get
+
+    def stringvar_set(self, value):
+        return original_stringvar_set(self, _westernize_value(value))
+
+    def stringvar_get(self):
+        return _strip_digit_marks(original_stringvar_get(self))
+
+    tk.StringVar.set = stringvar_set
+    tk.StringVar.get = stringvar_get
+
+    def patch_entry_class(cls):
+        original_get = cls.get
+
+        def get(self):
+            return _strip_digit_marks(original_get(self))
+
+        cls.get = get
+
+    for entry_cls in (tk.Entry, ttk.Entry, ttk.Combobox):
+        patch_entry_class(entry_cls)
+
+    def patch_widget_class(cls):
+        original_init = cls.__init__
+        original_configure = cls.configure
+
+        def __init__(self, *args, **kwargs):
+            _westernize_options(kwargs)
+            original_init(self, *args, **kwargs)
+
+        def configure(self, cnf=None, **kwargs):
+            if isinstance(cnf, dict):
+                cnf = dict(cnf)
+                _westernize_options(cnf)
+            _westernize_options(kwargs)
+            return original_configure(self, cnf, **kwargs)
+
+        cls.__init__ = __init__
+        cls.configure = configure
+        cls.config = configure
+
+    for widget_cls in (
+        tk.Label, tk.Button, tk.LabelFrame, tk.Checkbutton, tk.Radiobutton,
+        ttk.Label, ttk.Button, ttk.LabelFrame, ttk.Checkbutton, ttk.Radiobutton,
+        ttk.Combobox,
+    ):
+        patch_widget_class(widget_cls)
+
+    original_title = tk.Wm.title
+
+    def title(self, string=None):
+        if string is not None:
+            string = western_digits(string)
+        return original_title(self, string)
+
+    tk.Wm.title = title
+
+    original_heading = ttk.Treeview.heading
+    original_insert = ttk.Treeview.insert
+    original_item = ttk.Treeview.item
+    original_set = ttk.Treeview.set
+
+    def heading(self, column, option=None, **kwargs):
+        _westernize_options(kwargs)
+        return original_heading(self, column, option, **kwargs)
+
+    def insert(self, parent, index, iid=None, **kwargs):
+        _westernize_options(kwargs)
+        return original_insert(self, parent, index, iid, **kwargs)
+
+    def item(self, item, option=None, **kwargs):
+        _westernize_options(kwargs)
+        return original_item(self, item, option, **kwargs)
+
+    def set_value(self, item, column=None, value=None):
+        if value is not None:
+            value = _westernize_value(value)
+        return original_set(self, item, column, value)
+
+    ttk.Treeview.heading = heading
+    ttk.Treeview.insert = insert
+    ttk.Treeview.item = item
+    ttk.Treeview.set = set_value
+
+
+_install_western_digit_tk_patch()
 
 DB_PATH = "warehouse_data.sqlite3"
 LEGACY_JSON_PATH = "warehouse_data.json"
@@ -38,23 +174,23 @@ DEFAULT_BRANCH_POS_NAMES = [
     "POS-CEN",
 ]
 BRANCH_UI_NAME_BY_DEVICE = {
-    "POS-ZAY": "فرع زايد",
-    "POS-OCT": "فرع اكتوبر",
-    "POS-BAH": "فرع بهتيم",
-    "POS-CEN": "فرع السنتر",
-    "POS-OBO": "فرع العبور",
-    "POS-GESR": "فرع جسر السويس",
+    "POS-ZAY": "ÙØ±Ø¹ Ø²Ø§ÙŠØ¯",
+    "POS-OCT": "ÙØ±Ø¹ Ø§ÙƒØªÙˆØ¨Ø±",
+    "POS-BAH": "ÙØ±Ø¹ Ø¨Ù‡ØªÙŠÙ…",
+    "POS-CEN": "ÙØ±Ø¹ Ø§Ù„Ø³Ù†ØªØ±",
+    "POS-OBO": "ÙØ±Ø¹ Ø§Ù„Ø¹Ø¨ÙˆØ±",
+    "POS-GESR": "ÙØ±Ø¹ Ø¬Ø³Ø± Ø§Ù„Ø³ÙˆÙŠØ³",
 }
 BRANCH_DEVICE_BY_UI_NAME = {v: k for k, v in BRANCH_UI_NAME_BY_DEVICE.items()}
 WAREHOUSE_NUMBER_VALUES = ["1", "2", "3", "4", "5", "6", "7"]
 WAREHOUSE_NUMBER_LABELS = {
-    "1": "مخزن 1",
-    "2": "مخزن 2",
-    "3": "مخزن 3",
-    "4": "مخزن 4",
-    "5": "مخزن زايد",
-    "6": "مخزن اكتوبر",
-    "7": "مخزن العبور",
+    "1": "Ù…Ø®Ø²Ù† 1",
+    "2": "Ù…Ø®Ø²Ù† 2",
+    "3": "Ù…Ø®Ø²Ù† 3",
+    "4": "Ù…Ø®Ø²Ù† 4",
+    "5": "Ù…Ø®Ø²Ù† Ø²Ø§ÙŠØ¯",
+    "6": "Ù…Ø®Ø²Ù† Ø§ÙƒØªÙˆØ¨Ø±",
+    "7": "Ù…Ø®Ø²Ù† Ø§Ù„Ø¹Ø¨ÙˆØ±",
 }
 WAREHOUSE_NUMBER_DISPLAY_VALUES = [WAREHOUSE_NUMBER_LABELS[v] for v in WAREHOUSE_NUMBER_VALUES]
 
@@ -63,7 +199,7 @@ def normalize_branch_customer_name(value: Any) -> Optional[str]:
     raw = str(value or "").strip()
     if not raw:
         return None
-    if raw.startswith("فرع:"):
+    if raw.startswith("ÙØ±Ø¹:"):
         raw = raw.split(":", 1)[1].strip()
     if raw in DEFAULT_BRANCH_POS_NAMES:
         return raw
@@ -74,7 +210,7 @@ def canonical_branch_device_name(value: Any, known_devices: Optional[Sequence[st
     """Resolve any branch-facing label to canonical POS device name.
 
     Accepts internal names (POS-*), Arabic UI names, and mixed labels like:
-    "فرع: فرع زايد (POS-ZAY)".
+    "ÙØ±Ø¹: ÙØ±Ø¹ Ø²Ø§ÙŠØ¯ (POS-ZAY)".
     """
     raw = str(value or "").strip()
     if not raw:
@@ -82,7 +218,7 @@ def canonical_branch_device_name(value: Any, known_devices: Optional[Sequence[st
     direct = normalize_branch_customer_name(raw)
     if direct:
         return direct
-    if raw.startswith("فرع:"):
+    if raw.startswith("ÙØ±Ø¹:"):
         raw = raw.split(":", 1)[1].strip()
     if "(" in raw and ")" in raw:
         inside = raw.rsplit("(", 1)[1].split(")", 1)[0].strip()
@@ -109,7 +245,7 @@ def branch_display_name(value: Any) -> str:
     return BRANCH_UI_NAME_BY_DEVICE.get(raw, raw)
 
 
-def fmt_local_ts(value: Any, empty: str = "—") -> str:
+def fmt_local_ts(value: Any, empty: str = "â€”") -> str:
     raw = str(value or "").strip()
     if not raw:
         return empty
@@ -117,19 +253,19 @@ def fmt_local_ts(value: Any, empty: str = "—") -> str:
         txt = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
         dt = datetime.fromisoformat(txt)
         if dt.tzinfo is None:
-            return dt.strftime("%Y-%m-%d %H:%M:%S")
-        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            return western_digits(dt.strftime("%Y-%m-%d %H:%M:%S"))
+        return western_digits(dt.astimezone().strftime("%Y-%m-%d %H:%M:%S"))
     except Exception:
-        return raw.replace("T", " ")
+        return western_digits(raw.replace("T", " "))
 
 
 def branch_customer_label(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
-    if raw.startswith("فرع:"):
+    if raw.startswith("ÙØ±Ø¹:"):
         raw = raw.split(":", 1)[1].strip()
-    return f"فرع: {branch_display_name(raw)}"
+    return f"ÙØ±Ø¹: {branch_display_name(raw)}"
 
 
 def warehouse_display_label(value: Any) -> str:
@@ -146,6 +282,43 @@ def warehouse_numeric_value(value: Any) -> str:
             return num
     return raw
 
+
+def format_money(value: Any) -> str:
+    raw = _strip_digit_marks(value).strip()
+    if not raw:
+        raw = "0"
+    try:
+        dec = Decimal(raw)
+    except (InvalidOperation, ValueError, TypeError):
+        try:
+            dec = Decimal(str(float(value or 0)))
+        except Exception:
+            return "0"
+    dec = dec.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return western_digits(str(int(dec)))
+
+
+def parse_float_text(value: Any, default: Optional[float] = None) -> Optional[float]:
+    raw = _strip_digit_marks(value).strip()
+    if not raw:
+        return default
+    raw = raw.replace(",", "")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_int_text(value: Any, default: Optional[int] = None) -> Optional[int]:
+    raw = _strip_digit_marks(value).strip()
+    if not raw:
+        return default
+    raw = raw.replace(",", "")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
 ALLOWED_NUMERIC_RANGES = {
     (0, 24): [str(i) for i in range(0, 26, 2)],
     (0, 16): [str(i) for i in range(0, 18, 2)],
@@ -157,10 +330,10 @@ ALLOWED_NUMERIC_RANGES = {
 
 }
 NUMERIC_RANGE_LABELS = [
-    f"{a} → {b}" for (a, b) in ALLOWED_NUMERIC_RANGES.keys()
+    f"{a} â†’ {b}" for (a, b) in ALLOWED_NUMERIC_RANGES.keys()
 ]
 DEFAULT_NUMERIC_SIZE_RANGE = (0, 24)
-DEFAULT_NUMERIC_SIZE_RANGE_LABEL = f"{DEFAULT_NUMERIC_SIZE_RANGE[0]} → {DEFAULT_NUMERIC_SIZE_RANGE[1]}"
+DEFAULT_NUMERIC_SIZE_RANGE_LABEL = f"{DEFAULT_NUMERIC_SIZE_RANGE[0]} â†’ {DEFAULT_NUMERIC_SIZE_RANGE[1]}"
 DEFAULT_SIZE_PROFILE = (
     DEFAULT_NUMERIC_SIZE_RANGE[0],
     DEFAULT_NUMERIC_SIZE_RANGE[1],
@@ -171,15 +344,27 @@ DEFAULT_SIZE_PROFILE = (
 
 ALPHA_SIZES = ["S", "M", "L", "XL", "2XL", "3XL", "4XL", "5XL"]
 PREFERRED_WAREHOUSE_ITEM_ORDER = {
-    "تيشيرت صيفي": 0,
-    "تيشيرت خريفي": 1,
-    "شروال": 2,
-    "جاكيت": 3,
+    "ØªÙŠØ´ÙŠØ±Øª ØµÙŠÙÙŠ": 0,
+    "ØªÙŠØ´ÙŠØ±Øª Ø®Ø±ÙŠÙÙŠ": 1,
+    "ØªÙŠØ´ÙŠØ±Øª Ø´ØªÙˆÙŠ": 2,
+    "Ø´Ø±ÙˆØ§Ù„": 3,
+    "Ø¬Ø§ÙƒÙŠØª": 4,
+    "ØªÙŠØ´ÙŠØ±Øª Ø±ÙŠØ§Ø¶ÙŠ": 5,
+    "ØªÙŠØ´ÙŠØ±Øª Ø±ÙŠØ§Ø¶ÙŠ ÙƒÙ…": 6,
+    "ØªÙŠØ´ÙŠØ±Øª Ø±ÙŠØ§Ø¶ÙŠ Ø´ØªÙˆÙŠ": 7,
+    "Ø´Ø±ÙˆØ§Ù„ Ø±ÙŠØ§Ø¶ÙŠ": 8,
+    "Ø¬Ø§ÙƒÙŠØª Ø±ÙŠØ§Ø¶ÙŠ": 9,
 }
 
 
+def _normalize_item_order_label(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "").strip())
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    return " ".join(text.split())
+
+
 def warehouse_item_priority(item_type: Any) -> int:
-    item_clean = str(item_type or "").strip()
+    item_clean = _normalize_item_order_label(item_type)
     return PREFERRED_WAREHOUSE_ITEM_ORDER.get(
         item_clean,
         len(PREFERRED_WAREHOUSE_ITEM_ORDER),
@@ -187,7 +372,7 @@ def warehouse_item_priority(item_type: Any) -> int:
 
 
 def warehouse_item_sort_key(item_type: Any, color: Any = "") -> Tuple[Any, ...]:
-    item_clean = str(item_type or "").strip()
+    item_clean = _normalize_item_order_label(item_type)
     color_clean = str(color or "").strip()
     return (
         warehouse_item_priority(item_clean),
@@ -213,7 +398,7 @@ def format_weight_kg(grams: Any) -> str:
     text = f"{kg_val:.3f}".rstrip("0").rstrip(".")
     if not text:
         text = "0"
-    return f"{text} كجم"
+    return f"{text} ÙƒØ¬Ù…"
 
 
 def merged_numeric_size_labels_from_profile(
@@ -224,7 +409,7 @@ def merged_numeric_size_labels_from_profile(
 ) -> List[str]:
     """Union of predefined numeric columns for range 1 and range 2 (no duplicate sizes).
 
-    Overlapping presets such as (6→22) and (14→28) become one sorted list 6…28.
+    Overlapping presets such as (6â†’22) and (14â†’28) become one sorted list 6â€¦28.
     """
     chunks: List[List[str]] = []
     if r1s is not None and r1e is not None:
@@ -255,7 +440,7 @@ def merged_numeric_size_labels_from_profile(
 
 
 def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return western_digits(datetime.now().isoformat(timespec="seconds"))
 
 
 @dataclass
@@ -400,19 +585,19 @@ def _print_html_auto(path: str, copies: int = 1, parent: Optional[tk.Widget] = N
             time.sleep(0.05)
 
         if parent is not None:
-            show_toast(parent, f"تم فتح الفاتورة للطباعة — عدد النسخ: {copies}")
+            show_toast(parent, f"ØªÙ… ÙØªØ­ Ø§Ù„ÙØ§ØªÙˆØ±Ø© Ù„Ù„Ø·Ø¨Ø§Ø¹Ø© â€” Ø¹Ø¯Ø¯ Ø§Ù„Ù†Ø³Ø®: {copies}")
     except Exception as ex:
         if parent is not None:
-            messagebox.showerror("فشل الطباعة", f"{ex}", parent=parent)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø·Ø¨Ø§Ø¹Ø©", f"{ex}", parent=parent)
 
 def save_bill_as_html(path: str, bill: Dict[str, Any], items: List[Dict[str, Any]]) -> None:
     """Generate a single HTML with 2 pages: customer copy + warehouse copy."""
 
     def _fmtf(x: Any) -> str:
         try:
-            return f"{float(x):.2f}"
+            return f"{format_money(float(x))}"
         except Exception:
-            return "0.00"
+            return "0"
 
     def _wh(v):
         if v in (None, "", 0, "0"):
@@ -451,13 +636,13 @@ def save_bill_as_html(path: str, bill: Dict[str, Any], items: List[Dict[str, Any
 
     customer_name = _html(bill.get('customer') or '')
     bill_date = bill['created_at']
-    bill_total = f"{float(bill['total']):.2f}"
+    bill_total = f"{format_money(float(bill['total']))}"
 
     html = f"""<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8">
-<title>فاتورة #{bill['id']}</title>
+<title>ÙØ§ØªÙˆØ±Ø© #{bill['id']}</title>
 <style>
   @page {{ size: auto; margin: 14mm; }}
   body {{ font-family: "Segoe UI", Tahoma, Arial, "Noto Sans Arabic", sans-serif; margin: 0; }}
@@ -475,15 +660,15 @@ def save_bill_as_html(path: str, bill: Dict[str, Any], items: List[Dict[str, Any
 
 <!-- ===== PAGE 1: Customer Copy ===== -->
 <div class="page">
-  <span class="copy-label">نسخة العميل</span>
-  <h1>فاتورة رقم: {bill['id']}</h1>
-  <div>العميل: {customer_name}</div>
-  <div>التاريخ: {bill_date}</div>
-  <div>الإجمالي: {bill_total}</div>
+  <span class="copy-label">Ù†Ø³Ø®Ø© Ø§Ù„Ø¹Ù…ÙŠÙ„</span>
+  <h1>ÙØ§ØªÙˆØ±Ø© Ø±Ù‚Ù…: {bill['id']}</h1>
+  <div>Ø§Ù„Ø¹Ù…ÙŠÙ„: {customer_name}</div>
+  <div>Ø§Ù„ØªØ§Ø±ÙŠØ®: {bill_date}</div>
+  <div>Ø§Ù„Ø¥Ø¬Ù…Ø§Ù„ÙŠ: {bill_total}</div>
   <table>
     <thead><tr>
-      <th>النوع</th><th>المدرسة</th><th>اللون</th><th>المقاس</th>
-      <th>السعر</th><th>الكمية</th><th>الإجمالي</th>
+      <th>Ø§Ù„Ù†ÙˆØ¹</th><th>Ø§Ù„Ù…Ø¯Ø±Ø³Ø©</th><th>Ø§Ù„Ù„ÙˆÙ†</th><th>Ø§Ù„Ù…Ù‚Ø§Ø³</th>
+      <th>Ø§Ù„Ø³Ø¹Ø±</th><th>Ø§Ù„ÙƒÙ…ÙŠØ©</th><th>Ø§Ù„Ø¥Ø¬Ù…Ø§Ù„ÙŠ</th>
     </tr></thead>
     <tbody>{rows1}</tbody>
   </table>
@@ -491,16 +676,16 @@ def save_bill_as_html(path: str, bill: Dict[str, Any], items: List[Dict[str, Any
 
 <!-- ===== PAGE 2: Warehouse Copy ===== -->
 <div class="page page-break">
-  <span class="copy-label" style="background:#059669">نسخة المخزن</span>
-  <h1>فاتورة رقم: {bill['id']}</h1>
-  <div>العميل: {customer_name}</div>
-  <div>التاريخ: {bill_date}</div>
-  <div>الإجمالي: {bill_total}</div>
+  <span class="copy-label" style="background:#059669">Ù†Ø³Ø®Ø© Ø§Ù„Ù…Ø®Ø²Ù†</span>
+  <h1>ÙØ§ØªÙˆØ±Ø© Ø±Ù‚Ù…: {bill['id']}</h1>
+  <div>Ø§Ù„Ø¹Ù…ÙŠÙ„: {customer_name}</div>
+  <div>Ø§Ù„ØªØ§Ø±ÙŠØ®: {bill_date}</div>
+  <div>Ø§Ù„Ø¥Ø¬Ù…Ø§Ù„ÙŠ: {bill_total}</div>
   <table>
     <thead><tr>
-      <th>النوع</th><th>المدرسة</th><th>اللون</th><th>المقاس</th>
-      <th>رقم المخزن</th><th>رقم الطرد</th>
-      <th>السعر</th><th>الكمية</th><th>الإجمالي</th>
+      <th>Ø§Ù„Ù†ÙˆØ¹</th><th>Ø§Ù„Ù…Ø¯Ø±Ø³Ø©</th><th>Ø§Ù„Ù„ÙˆÙ†</th><th>Ø§Ù„Ù…Ù‚Ø§Ø³</th>
+      <th>Ø±Ù‚Ù… Ø§Ù„Ù…Ø®Ø²Ù†</th><th>Ø±Ù‚Ù… Ø§Ù„Ø·Ø±Ø¯</th>
+      <th>Ø§Ù„Ø³Ø¹Ø±</th><th>Ø§Ù„ÙƒÙ…ÙŠØ©</th><th>Ø§Ù„Ø¥Ø¬Ù…Ø§Ù„ÙŠ</th>
     </tr></thead>
     <tbody>{rows2}</tbody>
   </table>
@@ -513,10 +698,10 @@ def save_bill_as_html(path: str, bill: Dict[str, Any], items: List[Dict[str, Any
         f.write(html)
 
 def _html(s: str) -> str:
-    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return western_digits(s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-# Normalize size text for matching (handles Arabic digits & case)
-_AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+# Normalize size text for matching (handles Arabic/Persian digits & case)
+_AR_DIGITS = _DIGIT_TRANSLATION
 def _normalize_size_label(s: str) -> str:
     return (s or "").strip().translate(_AR_DIGITS).upper()
 
@@ -567,6 +752,133 @@ class SqliteDatabase:
         self._apply_pragmas()
         self._init_schema()
         self._migrate_from_json_if_empty(legacy_json)
+        self.repair_stock_integrity()
+
+
+    def repair_stock_integrity(self) -> Dict[str, int]:
+        """Repair unsafe stock shapes that can corrupt billing and reports."""
+        fixed_negative = 0
+        merged_rows = 0
+        with self.conn:
+            negative_rows = self.conn.execute(
+                "SELECT * FROM stocks WHERE COALESCE(count,0) < 0"
+            ).fetchall()
+            for s in negative_rows:
+                qty = abs(int(s["count"] or 0))
+                self.conn.execute("UPDATE stocks SET count=0 WHERE id=?", (int(s["id"]),))
+                self.conn.execute(
+                    """INSERT INTO movements
+                    (ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,
+                     warehouse_no,package_no,unit_price,has_badge)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        now_iso(), "ADJUST_IN", int(s["id"]), qty,
+                        "Automatic repair: negative stock clamped to zero",
+                        None, s["item_type"], s["school"], s["color"], s["size"],
+                        int(s["warehouse_no"]), int(s["package_no"]),
+                        float(s["unit_price"]), int(s["has_badge"] or 0),
+                    ),
+                )
+                fixed_negative += 1
+
+            duplicate_groups = self.conn.execute(
+                """
+                SELECT item_type,school,color,size,warehouse_no,package_no,unit_price,
+                       COALESCE(has_badge,0) AS has_badge
+                FROM stocks
+                GROUP BY item_type,school,color,size,warehouse_no,package_no,unit_price,COALESCE(has_badge,0)
+                HAVING COUNT(*) > 1
+                """
+            ).fetchall()
+            for g in duplicate_groups:
+                rows = self.conn.execute(
+                    """
+                    SELECT id,COALESCE(count,0) AS count
+                    FROM stocks
+                    WHERE item_type=? AND school=? AND color=? AND size=?
+                      AND warehouse_no=? AND package_no=? AND unit_price=? AND COALESCE(has_badge,0)=?
+                    ORDER BY id ASC
+                    """,
+                    (
+                        g["item_type"], g["school"], g["color"], g["size"],
+                        int(g["warehouse_no"]), int(g["package_no"]),
+                        float(g["unit_price"]), int(g["has_badge"] or 0),
+                    ),
+                ).fetchall()
+                if len(rows) <= 1:
+                    continue
+                keeper_id = int(rows[0]["id"])
+                duplicate_ids = [int(r["id"]) for r in rows[1:]]
+                total_count = sum(max(0, int(r["count"] or 0)) for r in rows)
+                placeholders = ",".join("?" for _ in duplicate_ids)
+                if duplicate_ids:
+                    self.conn.execute(
+                        f"UPDATE movements SET stock_id=? WHERE stock_id IN ({placeholders})",
+                        [keeper_id, *duplicate_ids],
+                    )
+                    self.conn.execute(
+                        f"DELETE FROM stocks WHERE id IN ({placeholders})",
+                        duplicate_ids,
+                    )
+                    merged_rows += len(duplicate_ids)
+                self.conn.execute(
+                    "UPDATE stocks SET count=? WHERE id=?",
+                    (int(total_count), keeper_id),
+                )
+        return {"negative_fixed": fixed_negative, "duplicates_merged": merged_rows}
+
+
+    def add_or_update_stock_row(
+        self,
+        item_type: str,
+        school: str,
+        color: str,
+        size: str,
+        warehouse_no: int,
+        package_no: int,
+        unit_price: float,
+        qty: int,
+        has_badge: int = 0,
+    ) -> int:
+        """Add stock to an exact row, creating it only when it does not exist."""
+        item_type = str(item_type or "").strip()
+        school = str(school or "").strip()
+        color = str(color or "").strip()
+        size = str(size or "").strip()
+        qty = int(qty or 0)
+        if qty < 0:
+            raise ValueError("Stock quantity cannot be negative")
+        row = self.conn.execute(
+            """
+            SELECT id,COALESCE(count,0) AS count
+            FROM stocks
+            WHERE item_type=? AND school=? AND color=? AND size=?
+              AND warehouse_no=? AND package_no=? AND unit_price=? AND COALESCE(has_badge,0)=?
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (
+                item_type, school, color, size,
+                int(warehouse_no), int(package_no), float(unit_price), int(has_badge or 0),
+            ),
+        ).fetchone()
+        if row:
+            self.conn.execute(
+                "UPDATE stocks SET count = count + ? WHERE id = ?",
+                (qty, int(row["id"])),
+            )
+            return int(row["id"])
+        cur = self.conn.execute(
+            """
+            INSERT INTO stocks(item_type,school,color,size,warehouse_no,package_no,unit_price,count,has_badge)
+            VALUES(?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                item_type, school, color, size,
+                int(warehouse_no), int(package_no), float(unit_price), qty, int(has_badge or 0),
+            ),
+        )
+        return int(cur.lastrowid)
 
 
     def _apply_pragmas(self) -> None:
@@ -587,7 +899,7 @@ class SqliteDatabase:
 
         Phase 1: events are written but never pushed. If the sync layer
         is not present or the outbox insert fails, the caller continues
-        without error — we must never break a business operation.
+        without error â€” we must never break a business operation.
 
         Returns the new event_uuid when known, otherwise None.
         """
@@ -624,7 +936,7 @@ class SqliteDatabase:
                         ),
                     )
                 except _sqlite3.OperationalError:
-                    # Legacy outbox schema (no target_scope column) — fall back
+                    # Legacy outbox schema (no target_scope column) â€” fall back
                     # to storing the scope inside the payload. The client-side
                     # push loop handles both shapes.
                     scoped_payload = dict(payload)
@@ -651,6 +963,18 @@ class SqliteDatabase:
             import traceback
             traceback.print_exc()
             return None
+
+    def _record_sync_event_or_raise(
+        self,
+        event_type: str,
+        payload: Dict[str, Any],
+        *,
+        target_scope: Optional[str] = None,
+    ) -> str:
+        event_uuid = self._record_sync_event(event_type, payload, target_scope=target_scope)
+        if not event_uuid:
+            raise RuntimeError(f"Failed to record required sync event: {event_type}")
+        return str(event_uuid)
 
     def _init_schema(self) -> None:
         cur = self.conn.cursor()
@@ -682,6 +1006,36 @@ class SqliteDatabase:
 
                 UNIQUE(item_type, school, color)
             );
+            CREATE TABLE IF NOT EXISTS price_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS price_profile_lines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id INTEGER NOT NULL,
+                item_type TEXT NOT NULL,
+                size TEXT NOT NULL,
+                price REAL NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(profile_id, item_type, size)
+            );
+            CREATE INDEX IF NOT EXISTS idx_price_profile_lines_profile
+            ON price_profile_lines(profile_id, item_type, size);
+            CREATE TABLE IF NOT EXISTS price_profile_assignments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_type TEXT NOT NULL,
+                school TEXT NOT NULL,
+                color TEXT NOT NULL,
+                profile_id INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(item_type, school, color)
+            );
+            CREATE INDEX IF NOT EXISTS idx_price_profile_assignments_specs
+            ON price_profile_assignments(item_type, school, color);
 
             CREATE TABLE IF NOT EXISTS fabric_weights (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -732,6 +1086,40 @@ class SqliteDatabase:
             CREATE INDEX IF NOT EXISTS idx_movements_ts ON movements(ts DESC);
             CREATE INDEX IF NOT EXISTS idx_movements_dir ON movements(direction);
             CREATE INDEX IF NOT EXISTS idx_movements_specs ON movements(item_type,school,color,size);
+
+            CREATE TABLE IF NOT EXISTS stock_audit_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                source TEXT,
+                note TEXT,
+                bucket_key TEXT,
+                filters_json TEXT,
+                line_count INTEGER NOT NULL DEFAULT 0,
+                total_diff INTEGER NOT NULL DEFAULT 0,
+                total_value REAL NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_stock_audit_reports_created
+            ON stock_audit_reports(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_stock_audit_reports_bucket
+            ON stock_audit_reports(source, bucket_key);
+            CREATE TABLE IF NOT EXISTS stock_audit_report_lines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                report_id INTEGER NOT NULL,
+                stock_id INTEGER,
+                item_type TEXT,
+                school TEXT,
+                color TEXT,
+                size TEXT,
+                warehouse_no TEXT,
+                package_no TEXT,
+                expected INTEGER NOT NULL,
+                actual INTEGER NOT NULL,
+                diff INTEGER NOT NULL,
+                unit_price REAL NOT NULL,
+                diff_value REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_stock_audit_report_lines_report
+            ON stock_audit_report_lines(report_id);
 
             -- Audit trail for warehouse-issued PRICE_UPDATE fan-out decisions
             CREATE TABLE IF NOT EXISTS price_sync_audit(
@@ -831,6 +1219,18 @@ class SqliteDatabase:
                 self.conn.execute(
                     "ALTER TABLE movements ADD COLUMN has_badge INTEGER"
                 )
+        except Exception:
+            pass
+
+        try:
+            cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(stock_audit_reports)")}
+            if "bucket_key" not in cols:
+                self.conn.execute(
+                    "ALTER TABLE stock_audit_reports ADD COLUMN bucket_key TEXT"
+                )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_stock_audit_reports_bucket ON stock_audit_reports(source, bucket_key)"
+            )
         except Exception:
             pass
 
@@ -1097,6 +1497,410 @@ class SqliteDatabase:
 
         self.conn.commit()
 
+    # ------------------- Price Profiles -------------------
+    def list_price_profiles(self) -> List[Dict[str, Any]]:
+        cur = self.conn.execute(
+            """
+            SELECT
+                p.id,
+                p.name,
+                p.notes,
+                p.created_at,
+                p.updated_at,
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM price_profile_assignments a
+                    WHERE a.profile_id = p.id
+                ), 0) AS assignment_count
+            FROM price_profiles p
+            ORDER BY LOWER(TRIM(p.name)), p.id
+            """
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def create_price_profile(self, name: str, notes: str = "") -> int:
+        clean_name = str(name or "").strip()
+        if not clean_name:
+            raise ValueError("Ø§Ø³Ù… Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø§Ù„Ø³Ø¹Ø± Ù…Ø·Ù„ÙˆØ¨.")
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                INSERT INTO price_profiles(name, notes, created_at, updated_at)
+                VALUES (?, ?, datetime('now'), datetime('now'))
+                """,
+                (clean_name, str(notes or "").strip() or None),
+            )
+            return int(cur.lastrowid)
+
+    def rename_price_profile(self, profile_id: int, name: str, notes: str = "") -> None:
+        clean_name = str(name or "").strip()
+        if not clean_name:
+            raise ValueError("Ø§Ø³Ù… Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø§Ù„Ø³Ø¹Ø± Ù…Ø·Ù„ÙˆØ¨.")
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                UPDATE price_profiles
+                SET name=?, notes=?, updated_at=datetime('now')
+                WHERE id=?
+                """,
+                (clean_name, str(notes or "").strip() or None, int(profile_id)),
+            )
+            if int(cur.rowcount or 0) <= 0:
+                raise ValueError("Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø§Ù„Ø³Ø¹Ø± ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯.")
+
+    def delete_price_profile(self, profile_id: int) -> None:
+        used = self.conn.execute(
+            "SELECT COUNT(*) AS c FROM price_profile_assignments WHERE profile_id=?",
+            (int(profile_id),),
+        ).fetchone()
+        if int((used["c"] if used else 0) or 0) > 0:
+            raise ValueError("Ù„Ø§ ÙŠÙ…ÙƒÙ† Ø­Ø°Ù Ø§Ù„Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ù„Ø£Ù†Ù‡ Ù…Ø³ØªØ®Ø¯Ù… ÙÙŠ Ø±Ø¨Ø· Ø£ØµÙ†Ø§Ù Ø§Ù„Ù…Ø®Ø²ÙˆÙ†.")
+        with self.conn:
+            self.conn.execute("DELETE FROM price_profile_lines WHERE profile_id=?", (int(profile_id),))
+            cur = self.conn.execute("DELETE FROM price_profiles WHERE id=?", (int(profile_id),))
+            if int(cur.rowcount or 0) <= 0:
+                raise ValueError("Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø§Ù„Ø³Ø¹Ø± ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯.")
+
+    def get_price_profile(self, profile_id: int) -> Optional[Dict[str, Any]]:
+        row = self.conn.execute(
+            "SELECT id, name, notes, created_at, updated_at FROM price_profiles WHERE id=?",
+            (int(profile_id),),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def list_price_profile_item_types(self, profile_id: int) -> List[str]:
+        cur = self.conn.execute(
+            """
+            SELECT DISTINCT TRIM(item_type) AS item_type
+            FROM price_profile_lines
+            WHERE profile_id=?
+            ORDER BY LOWER(TRIM(item_type))
+            """,
+            (int(profile_id),),
+        )
+        return [str(r["item_type"] or "").strip() for r in cur.fetchall() if str(r["item_type"] or "").strip()]
+
+    def list_sizes_for_price_profile_item(self, item_type: str) -> List[str]:
+        item = str(item_type or "").strip()
+        if not item:
+            return []
+        sizes: Dict[str, str] = {}
+        has_size_profile = False
+
+        cur = self.conn.execute(
+            """
+            SELECT num_start_1, num_end_1, num_start_2, num_end_2, has_alpha
+            FROM size_profiles
+            WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+            """,
+            (item,),
+        )
+        for row in cur.fetchall():
+            has_size_profile = True
+            sizes_from_profile = merged_numeric_size_labels_from_profile(
+                row["num_start_1"],
+                row["num_end_1"],
+                row["num_start_2"],
+                row["num_end_2"],
+            )
+            for size in sizes_from_profile:
+                sizes.setdefault(size.casefold(), size)
+            if int(row["has_alpha"] or 0):
+                for size in ALPHA_SIZES:
+                    sizes.setdefault(size.casefold(), size)
+
+        for table_name in ("stocks", "bill_items", "price_profile_lines"):
+            cur = self.conn.execute(
+                f"""
+                SELECT DISTINCT TRIM(size) AS size
+                FROM {table_name}
+                WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                  AND TRIM(size) <> ''
+                """,
+                (item,),
+            )
+            for row in cur.fetchall():
+                size = str(row["size"] or "").strip()
+                if size:
+                    sizes.setdefault(size.casefold(), size)
+
+        if not has_size_profile and any(str(size).strip().isdigit() for size in sizes.values()):
+            for size in merged_numeric_size_labels_from_profile(*DEFAULT_SIZE_PROFILE[:4]):
+                sizes.setdefault(size.casefold(), size)
+
+        if not sizes:
+            for size in merged_numeric_size_labels_from_profile(*DEFAULT_SIZE_PROFILE[:4]):
+                sizes.setdefault(size.casefold(), size)
+
+        values = list(sizes.values())
+        values.sort(key=warehouse_size_sort_key)
+        return values
+
+    def list_price_profile_lines(self, profile_id: int, item_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        where = ["profile_id=?"]
+        args: List[Any] = [int(profile_id)]
+        item = str(item_type or "").strip()
+        if item:
+            where.append("LOWER(TRIM(item_type)) = LOWER(TRIM(?))")
+            args.append(item)
+        cur = self.conn.execute(
+            f"""
+            SELECT id, profile_id, item_type, size, price, created_at, updated_at
+            FROM price_profile_lines
+            WHERE {' AND '.join(where)}
+            ORDER BY LOWER(TRIM(item_type)), LOWER(TRIM(size))
+            """,
+            tuple(args),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        rows.sort(key=lambda r: ((r.get("item_type") or "").casefold(), warehouse_size_sort_key(r.get("size"))))
+        return rows
+
+    def replace_price_profile_item_prices(
+        self,
+        profile_id: int,
+        item_type: str,
+        rows: Sequence[Dict[str, Any]],
+    ) -> None:
+        item = str(item_type or "").strip()
+        if not item:
+            raise ValueError("Ù†ÙˆØ¹ Ø§Ù„ØµÙ†Ù Ù…Ø·Ù„ÙˆØ¨ Ø¯Ø§Ø®Ù„ Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø§Ù„Ø³Ø¹Ø±.")
+        cleaned: Dict[str, float] = {}
+        for row in rows or []:
+            size = str((row or {}).get("size") or "").strip()
+            if not size:
+                continue
+            try:
+                price = float((row or {}).get("price"))
+            except (TypeError, ValueError):
+                continue
+            if price < 0:
+                raise ValueError("Ø§Ù„Ø³Ø¹Ø± ÙŠØ¬Ø¨ Ø£Ù† ÙŠÙƒÙˆÙ† ØµÙØ± Ø£Ùˆ Ø£ÙƒØ¨Ø±.")
+            cleaned[size] = float(price)
+
+        with self.conn:
+            self.conn.execute(
+                """
+                DELETE FROM price_profile_lines
+                WHERE profile_id=? AND LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                """,
+                (int(profile_id), item),
+            )
+            for size, price in cleaned.items():
+                self.conn.execute(
+                    """
+                    INSERT INTO price_profile_lines(
+                        profile_id, item_type, size, price, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
+                    """,
+                    (int(profile_id), item, size, float(price)),
+                )
+            self.conn.execute(
+                "UPDATE price_profiles SET updated_at=datetime('now') WHERE id=?",
+                (int(profile_id),),
+            )
+
+    def get_price_profile_assignment(self, item_type: str, school: str, color: str) -> Optional[Dict[str, Any]]:
+        row = self.conn.execute(
+            """
+            SELECT
+                a.id,
+                a.item_type,
+                a.school,
+                a.color,
+                a.profile_id,
+                a.updated_at,
+                p.name AS profile_name
+            FROM price_profile_assignments a
+            JOIN price_profiles p ON p.id = a.profile_id
+            WHERE LOWER(TRIM(a.item_type)) = LOWER(TRIM(?))
+              AND LOWER(TRIM(a.school)) = LOWER(TRIM(?))
+              AND LOWER(TRIM(a.color)) = LOWER(TRIM(?))
+            """,
+            (item_type, school, color),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def assign_price_profile(self, item_type: str, school: str, color: str, profile_id: int) -> None:
+        item = str(item_type or "").strip()
+        school_txt = str(school or "").strip()
+        color_txt = str(color or "").strip()
+        if not (item and school_txt and color_txt):
+            raise ValueError("Ø§Ù„Ù†ÙˆØ¹ ÙˆØ§Ù„Ù…Ø¯Ø±Ø³Ø© ÙˆØ§Ù„Ù„ÙˆÙ† Ù…Ø·Ù„ÙˆØ¨Ø© Ù„Ø±Ø¨Ø· Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø§Ù„Ø³Ø¹Ø±.")
+        if self.get_price_profile(int(profile_id)) is None:
+            raise ValueError("Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø§Ù„Ø³Ø¹Ø± ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯.")
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO price_profile_assignments(
+                    item_type, school, color, profile_id, updated_at
+                )
+                VALUES (?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(item_type, school, color)
+                DO UPDATE SET
+                    profile_id = excluded.profile_id,
+                    updated_at = datetime('now')
+                """,
+                (item, school_txt, color_txt, int(profile_id)),
+            )
+
+    def clear_price_profile_assignment(self, item_type: str, school: str, color: str) -> int:
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                DELETE FROM price_profile_assignments
+                WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                  AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                  AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                """,
+                (item_type, school, color),
+            )
+            return int(cur.rowcount or 0)
+
+    def get_price_profile_price(
+        self,
+        profile_id: int,
+        item_type: str,
+        size: str,
+    ) -> Optional[float]:
+        item_key = str(item_type or "").strip()
+        size_key = _normalize_size_label(_strip_digit_marks(size))
+        row = self.conn.execute(
+            """
+            SELECT price
+            FROM price_profile_lines
+            WHERE profile_id=?
+              AND LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+              AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+            LIMIT 1
+            """,
+            (int(profile_id), item_key, size_key),
+        ).fetchone()
+        if row is None or row["price"] is None:
+            return None
+        try:
+            return float(row["price"])
+        except (TypeError, ValueError):
+            return None
+
+    def apply_price_profile_to_stock(
+        self,
+        profile_id: int,
+        targets: Sequence[Tuple[str, str, str]],
+        *,
+        stock_ids: Optional[Sequence[int]] = None,
+        note: str = "Price profile applied",
+    ) -> Dict[str, int]:
+        clean_targets = [
+            (str(item or "").strip(), str(school or "").strip(), str(color or "").strip())
+            for item, school, color in (targets or [])
+        ]
+        clean_targets = [(item, school, color) for item, school, color in clean_targets if item and school and color]
+        if not clean_targets:
+            return {"updated": 0, "skipped": 0, "checked": 0}
+
+        where: List[str] = []
+        args: List[Any] = []
+
+        ids = [int(x) for x in (stock_ids or []) if x not in (None, "")]
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            where.append(f"id IN ({placeholders})")
+            args.extend(ids)
+
+        target_clauses: List[str] = []
+        for item, school, color in clean_targets:
+            target_clauses.append(
+                "(LOWER(TRIM(item_type)) = LOWER(?) AND LOWER(TRIM(school)) = LOWER(?) AND LOWER(TRIM(color)) = LOWER(?))"
+            )
+            args.extend([item, school, color])
+        where.append("(" + " OR ".join(target_clauses) + ")")
+
+        cur = self.conn.execute(
+            f"SELECT id, item_type, school, color, size, unit_price FROM stocks WHERE {' AND '.join(where)}",
+            tuple(args),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        updated = 0
+        skipped = 0
+        for row in rows:
+            price = self.get_price_profile_price(profile_id, row.get("item_type"), row.get("size"))
+            if price is None:
+                skipped += 1
+                continue
+            try:
+                old_price = float(row.get("unit_price") or 0.0)
+            except (TypeError, ValueError):
+                old_price = None
+            if old_price is not None and abs(old_price - float(price)) < 0.000001:
+                skipped += 1
+                continue
+            updated += self.update_prices(
+                {"id": int(row["id"])},
+                float(price),
+                note=note,
+                price_sync_mode="all-pos",
+            )
+        return {"updated": int(updated), "skipped": int(skipped), "checked": len(rows)}
+
+    def apply_price_profile_item_to_assigned_stock(
+        self,
+        profile_id: int,
+        item_type: str,
+        note: str = "Price profile prices updated",
+    ) -> Dict[str, int]:
+        item = str(item_type or "").strip()
+        if not item:
+            return {"updated": 0, "skipped": 0, "checked": 0}
+        rows = self.conn.execute(
+            """
+            SELECT item_type, school, color
+            FROM price_profile_assignments
+            WHERE profile_id=?
+              AND LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+            ORDER BY LOWER(TRIM(school)), LOWER(TRIM(color))
+            """,
+            (int(profile_id), item),
+        ).fetchall()
+        targets = [
+            (
+                str(r["item_type"] or "").strip(),
+                str(r["school"] or "").strip(),
+                str(r["color"] or "").strip(),
+            )
+            for r in rows
+        ]
+        if not targets:
+            return {"updated": 0, "skipped": 0, "checked": 0}
+        return self.apply_price_profile_to_stock(
+            int(profile_id),
+            targets,
+            note=note,
+        )
+
+    def resolve_price_profile_id(
+        self,
+        item_type: str,
+        school: str,
+        color: str,
+        preferred_profile_id: Optional[int] = None,
+    ) -> Optional[int]:
+        if preferred_profile_id not in (None, "", 0):
+            try:
+                pid = int(preferred_profile_id)
+            except (TypeError, ValueError):
+                pid = 0
+            if pid > 0 and self.get_price_profile(pid):
+                return pid
+        assignment = self.get_price_profile_assignment(item_type, school, color)
+        if assignment and assignment.get("profile_id") is not None:
+            try:
+                return int(assignment["profile_id"])
+            except (TypeError, ValueError):
+                return None
+        return None
+
     # ------------------- Fabric weights -------------------
     def list_fabric_weights(self, item_type: Optional[str] = None) -> List[Dict[str, Any]]:
         where = ["1=1"]
@@ -1137,15 +1941,15 @@ class SqliteDatabase:
         item = str(item_type or "").strip()
         size_txt = str(size or "").strip()
         if not item:
-            raise ValueError("نوع الصنف مطلوب.")
+            raise ValueError("Ù†ÙˆØ¹ Ø§Ù„ØµÙ†Ù Ù…Ø·Ù„ÙˆØ¨.")
         if not size_txt:
-            raise ValueError("المقاس مطلوب.")
+            raise ValueError("Ø§Ù„Ù…Ù‚Ø§Ø³ Ù…Ø·Ù„ÙˆØ¨.")
         try:
             weight_val = float(weight_grams)
         except (TypeError, ValueError):
-            raise ValueError("وزن القماش يجب أن يكون رقماً صالحاً.")
+            raise ValueError("ÙˆØ²Ù† Ø§Ù„Ù‚Ù…Ø§Ø´ ÙŠØ¬Ø¨ Ø£Ù† ÙŠÙƒÙˆÙ† Ø±Ù‚Ù…Ø§Ù‹ ØµØ§Ù„Ø­Ø§Ù‹.")
         if weight_val <= 0:
-            raise ValueError("وزن القماش يجب أن يكون أكبر من صفر.")
+            raise ValueError("ÙˆØ²Ù† Ø§Ù„Ù‚Ù…Ø§Ø´ ÙŠØ¬Ø¨ Ø£Ù† ÙŠÙƒÙˆÙ† Ø£ÙƒØ¨Ø± Ù…Ù† ØµÙØ±.")
         with self.conn:
             self.conn.execute(
                 """
@@ -1303,13 +2107,28 @@ class SqliteDatabase:
                 (int(warehouse_no), int(package_no)),
             )
 
-    def get_effective_price(self, item_type, school, color, size):
+    def get_effective_price(self, item_type, school, color, size, preferred_profile_id: Optional[int] = None):
         """
         Priority:
-        1) exact last price (history)
-        2) default price for item
+        1) price profile (explicit or assigned)
+        2) exact last price (history)
+        3) default price for item
         3) None if unknown
         """
+        try:
+            profile_id = self.resolve_price_profile_id(
+                item_type,
+                school,
+                color,
+                preferred_profile_id=preferred_profile_id,
+            )
+            if profile_id:
+                p = self.get_price_profile_price(profile_id, item_type, size)
+                if p is not None:
+                    return float(p)
+        except Exception:
+            pass
+
         # 1) history
         try:
             p = self.last_price_for_specs(item_type, school, color, size)
@@ -1355,7 +2174,7 @@ class SqliteDatabase:
         """
 
         if field not in ("item_type", "school", "color", "size"):
-            raise ValueError("حقل غير مدعوم")
+            raise ValueError("Ø­Ù‚Ù„ ØºÙŠØ± Ù…Ø¯Ø¹ÙˆÙ…")
 
         value = (value or "").strip()
         if not value:
@@ -1383,7 +2202,7 @@ class SqliteDatabase:
         return count
 
 
-    # AFTER (NEW) — list all schools (from stocks or history/bill_items)
+    # AFTER (NEW) â€” list all schools (from stocks or history/bill_items)
     def list_schools_all(self) -> List[str]:
         cur = self.conn.cursor()
         try:
@@ -1414,8 +2233,8 @@ class SqliteDatabase:
         where = [
             "COALESCE(b.status,'CONFIRMED')='CONFIRMED'",
             "(b.bill_type='SALE' OR b.bill_type IS NULL)",
-            "LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))",
-            "LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('الى المصنع'))",
+            "LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('ÙØ±Ø¹:%'))",
+            "LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('Ø§Ù„Ù‰ Ø§Ù„Ù…ØµÙ†Ø¹'))",
             "UPPER(TRIM(COALESCE(b.customer,''))) != 'WAREHOUSE'",
             f"LOWER(TRIM(bi.school)) IN ({placeholders})",
         ]
@@ -1449,7 +2268,7 @@ class SqliteDatabase:
         finally:
             cur.close()
 
-    # AFTER (NEW) — items for a school: distinct (item_type, color) seen anywhere
+    # AFTER (NEW) â€” items for a school: distinct (item_type, color) seen anywhere
     def list_items_for_school(self, school: str) -> List[Tuple[str, str]]:
         sc = (school or "").strip()
         if not sc:
@@ -1469,7 +2288,7 @@ class SqliteDatabase:
         finally:
             cur.close()
 
-        # AFTER (NEW) — sizes for a (school, item_type, color) with current count + last price
+        # AFTER (NEW) â€” sizes for a (school, item_type, color) with current count + last price
     def _size_row(self, school: str, item_type: str, color: str, size: str) -> Dict[str, Any]:
         """Return a dict with size, current stock count, and last known price."""
         cur = self.conn.execute(
@@ -1677,7 +2496,7 @@ class SqliteDatabase:
         """Propagate a completed spec rename from `stocks` to historical tables.
 
         For each old (item_type, school, color, size) tuple we just rewrote,
-        if no `stocks` row still references that tuple, it was a full rename —
+        if no `stocks` row still references that tuple, it was a full rename â€”
         cascade the same field changes to `movements`, `bill_items`, and
         (best-effort) the POS mirror tables so audit views stay consistent.
         """
@@ -1764,7 +2583,7 @@ class SqliteDatabase:
     ) -> int:
         w = int(warehouse_no); p = int(package_no)
         if w < 1 or p < 1:
-            raise ValueError("رقم المخزن والعبوة يجب أن يكونا >= 1.")
+            raise ValueError("Ø±Ù‚Ù… Ø§Ù„Ù…Ø®Ø²Ù† ÙˆØ§Ù„Ø¹Ø¨ÙˆØ© ÙŠØ¬Ø¨ Ø£Ù† ÙŠÙƒÙˆÙ†Ø§ >= 1.")
 
         sets = []
         args: List[Any] = []
@@ -2083,7 +2902,7 @@ class SqliteDatabase:
                 if not v_raw:
                     continue
                 if k == "size":
-                    # dual match: original text AND normalized (Arabic→Latin digits, uppercased)
+                    # dual match: original text AND normalized (Arabicâ†’Latin digits, uppercased)
                     v_norm = _normalize_size_label(v_raw)
                     if v_norm and v_norm != v_raw:
                         where.append("(LOWER(TRIM(size)) = LOWER(?) OR LOWER(TRIM(size)) = LOWER(?))")
@@ -2202,7 +3021,7 @@ class SqliteDatabase:
 
     def ensure_package_open(self, warehouse_no: int, package_no: int, note: Optional[str] = None) -> None:
         if int(package_no) < 1:
-            raise ValueError("رقم العبوة يجب أن يكون 1 أو أكبر.")
+            raise ValueError("Ø±Ù‚Ù… Ø§Ù„Ø¹Ø¨ÙˆØ© ÙŠØ¬Ø¨ Ø£Ù† ÙŠÙƒÙˆÙ† 1 Ø£Ùˆ Ø£ÙƒØ¨Ø±.")
         row = self._get_package_row(warehouse_no, package_no)
         if row is None:
             # Create as OPEN if never existed
@@ -2230,7 +3049,7 @@ class SqliteDatabase:
             return
 
         # Still has stock: keep it closed
-        raise ValueError("لا يمكن الإضافة: هذه العبوة مغلقة وبداخلها مخزون.")
+        raise ValueError("Ù„Ø§ ÙŠÙ…ÙƒÙ† Ø§Ù„Ø¥Ø¶Ø§ÙØ©: Ù‡Ø°Ù‡ Ø§Ù„Ø¹Ø¨ÙˆØ© Ù…ØºÙ„Ù‚Ø© ÙˆØ¨Ø¯Ø§Ø®Ù„Ù‡Ø§ Ù…Ø®Ø²ÙˆÙ†.")
 
 
     def close_package(self, warehouse_no: int, package_no: int, force: bool = False) -> None:
@@ -2243,7 +3062,7 @@ class SqliteDatabase:
                 )
                 return
             else:
-                raise ValueError("لا توجد حاوية بهذا الرقم لإغلاقها.")
+                raise ValueError("Ù„Ø§ ØªÙˆØ¬Ø¯ Ø­Ø§ÙˆÙŠØ© Ø¨Ù‡Ø°Ø§ Ø§Ù„Ø±Ù‚Ù… Ù„Ø¥ØºÙ„Ø§Ù‚Ù‡Ø§.")
         if (row["status"] or "").upper() == "CLOSED":
             return
         self.conn.execute(
@@ -2283,7 +3102,7 @@ class SqliteDatabase:
         """
         w = int(warehouse_no); p = int(package_no)
         if p < 1:
-            raise ValueError("رقم العبوة يجب أن يكون 1 أو أكبر.")
+            raise ValueError("Ø±Ù‚Ù… Ø§Ù„Ø¹Ø¨ÙˆØ© ÙŠØ¬Ø¨ Ø£Ù† ÙŠÙƒÙˆÙ† 1 Ø£Ùˆ Ø£ÙƒØ¨Ø±.")
 
         row = self._get_package_row(w, p)
         if row is None:
@@ -2298,7 +3117,7 @@ class SqliteDatabase:
             cur = self.conn.execute("SELECT COUNT(*) AS c FROM stocks WHERE warehouse_no=? AND package_no=?", (w, p))
             c = int(cur.fetchone()["c"] or 0)
             if c > 0:
-                raise ValueError("لا يمكن إعادة الفتح مع وجود مخزون داخل العبوة (خيار 'فارغة فقط' مفعل).")
+                raise ValueError("Ù„Ø§ ÙŠÙ…ÙƒÙ† Ø¥Ø¹Ø§Ø¯Ø© Ø§Ù„ÙØªØ­ Ù…Ø¹ ÙˆØ¬ÙˆØ¯ Ù…Ø®Ø²ÙˆÙ† Ø¯Ø§Ø®Ù„ Ø§Ù„Ø¹Ø¨ÙˆØ© (Ø®ÙŠØ§Ø± 'ÙØ§Ø±ØºØ© ÙÙ‚Ø·' Ù…ÙØ¹Ù„).")
 
         self.conn.execute(
             "UPDATE packages SET status='OPEN', closed_at=NULL, note=COALESCE(note,'') || ? WHERE warehouse_no=? AND package_no=?",
@@ -2400,7 +3219,7 @@ class SqliteDatabase:
             cur.execute(f"""
                 SELECT DISTINCT TRIM({field}) AS v
                 FROM stocks
-                WHERE count > 0
+                WHERE TRIM({field}) <> ''
                 ORDER BY LOWER(v)
             """)
             return [r["v"] for r in cur.fetchall() if r["v"]]
@@ -2432,12 +3251,12 @@ class SqliteDatabase:
         if user_provided_price:
             price = float(unit_price)
             if price < 0:
-                raise ValueError("Price must be ≥ 0")
+                raise ValueError("Price must be â‰¥ 0")
         else:
             price = self.get_effective_price(item_type, school, color, size)
 
         if price is None:
-            raise ValueError("يجب إدخال السعر مرة واحدة على الأقل لهذا الصنف.")
+            raise ValueError("ÙŠØ¬Ø¨ Ø¥Ø¯Ø®Ø§Ù„ Ø§Ù„Ø³Ø¹Ø± Ù…Ø±Ø© ÙˆØ§Ø­Ø¯Ø© Ø¹Ù„Ù‰ Ø§Ù„Ø£Ù‚Ù„ Ù„Ù‡Ø°Ø§ Ø§Ù„ØµÙ†Ù.")
 
         # Save default price ONLY if user explicitly typed it
         if user_provided_price:
@@ -2446,24 +3265,17 @@ class SqliteDatabase:
         self.ensure_package_open(warehouse_no, package_no)
 
         with self.conn:
-            cur = self.conn.execute(
-                """INSERT INTO stocks
-                (item_type,school,color,size,warehouse_no,package_no,unit_price,count,has_badge)
-                VALUES(?,?,?,?,?,?,?,?,?)""",
-                (
-                    item_type.strip(),
-                    school.strip(),
-                    color.strip(),
-                    size.strip(),
-                    int(warehouse_no),
-                    int(package_no),
-                    float(price),
-                    int(count),
-                    int(has_badge),
-                ),
+            stock_id = self.add_or_update_stock_row(
+                item_type.strip(),
+                school.strip(),
+                color.strip(),
+                size.strip(),
+                int(warehouse_no),
+                int(package_no),
+                float(price),
+                int(count),
+                int(has_badge),
             )
-
-            stock_id = cur.lastrowid
 
             self.conn.execute(
                 """INSERT INTO movements
@@ -2554,7 +3366,7 @@ class SqliteDatabase:
         multi_keys = [k for k in all_keys if isinstance(filters.get(k), list) and len(filters.get(k) or []) > 0]
         if len(multi_keys) > 1:
             # Hard guard (UI already prevents this, but keep DB side correct)
-            raise ValueError("يمكن اختيار أكثر من قيمة لحقل واحد فقط، وليس لأكثر من حقل.")
+            raise ValueError("ÙŠÙ…ÙƒÙ† Ø§Ø®ØªÙŠØ§Ø± Ø£ÙƒØ«Ø± Ù…Ù† Ù‚ÙŠÙ…Ø© Ù„Ø­Ù‚Ù„ ÙˆØ§Ø­Ø¯ ÙÙ‚Ø·ØŒ ÙˆÙ„ÙŠØ³ Ù„Ø£ÙƒØ«Ø± Ù…Ù† Ø­Ù‚Ù„.")
 
         # Apply single-value filters
         for k in candidate_keys_txt:
@@ -2609,8 +3421,76 @@ class SqliteDatabase:
         cur.close()
         return rows
 
+    def _stock_candidates_for_bill_line(self, line: Dict[str, Any]) -> List[sqlite3.Row]:
+        cur = self.conn.cursor()
+        try:
+            if line.get("stock_id"):
+                cur.execute(
+                    "SELECT * FROM stocks WHERE id=? AND count>0 ORDER BY id ASC",
+                    (int(line["stock_id"]),),
+                )
+                return cur.fetchall()
+
+            where_parts = ["count > 0"]
+            args: List[Any] = []
+            for k in ("item_type", "school", "color", "size"):
+                v = (line.get(k) or "").strip()
+                if v:
+                    where_parts.append(f"LOWER(TRIM({k})) = LOWER(?)")
+                    args.append(v)
+            for k in ("warehouse_no", "package_no"):
+                v = line.get(k)
+                if v not in (None, "", 0, "0"):
+                    where_parts.append(f"{k} = ?")
+                    args.append(int(v))
+            cur.execute(
+                f"SELECT * FROM stocks WHERE {' AND '.join(where_parts)} ORDER BY id ASC",
+                args,
+            )
+            return cur.fetchall()
+        finally:
+            cur.close()
+
+    def available_stock_qty_for_bill_line(self, line: Dict[str, Any]) -> int:
+        """Current stock available for one non-factory bill line."""
+        return sum(int(r["count"] or 0) for r in self._stock_candidates_for_bill_line(line))
+
+    def validate_stock_available_for_bill_lines(self, bill_lines: List[Dict[str, Any]]) -> None:
+        """Preflight stock deductions before a bill/draft can mutate inventory."""
+        simulated_counts: Dict[int, int] = {}
+        for line in bill_lines:
+            if bool(line.get("allow_factory_fill")) or str(line.get("origin") or "").upper() == "FACTORY":
+                continue
+            try:
+                qty_needed = int(line.get("qty") or 0)
+            except Exception:
+                raise ValueError("Qty must be > 0")
+            if qty_needed <= 0:
+                raise ValueError("Qty must be > 0")
+
+            candidates = self._stock_candidates_for_bill_line(line)
+            available_before = sum(int(r["count"] or 0) for r in candidates)
+            remaining = qty_needed
+            for s in candidates:
+                sid = int(s["id"])
+                available = simulated_counts.setdefault(sid, int(s["count"] or 0))
+                take = min(available, remaining)
+                if take > 0:
+                    simulated_counts[sid] = available - take
+                    remaining -= take
+                if remaining <= 0:
+                    break
+            if remaining > 0:
+                raise ValueError(
+                    f"Ù„Ø§ ØªÙˆØ¬Ø¯ ÙƒÙ…ÙŠØ© ÙƒØ§ÙÙŠØ© Ù„Ù„ØµÙ†Ù "
+                    f"{line.get('item_type','(Ø§Ù„Ù†ÙˆØ¹?)')} / {line.get('school','(Ø§Ù„Ù…Ø¯Ø±Ø³Ø©?)')} / "
+                    f"{line.get('color','(Ø§Ù„Ù„ÙˆÙ†?)')} / {line.get('size','(Ø§Ù„Ù…Ù‚Ø§Ø³?)')} "
+                    f"(Ø§Ù„Ù…Ø·Ù„ÙˆØ¨ {qty_needed}ØŒ Ø§Ù„Ù…ØªØ§Ø­ {qty_needed - remaining})."
+                )
+
     def current_inventory(self, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
         where, args = self._filters_where(filters, prefix="s.")
+        having_sql = "HAVING SUM(s.count) > 0" if (filters or {}).get("hide_zero") else ""
 
         cur = self.conn.cursor()
         cur.execute(
@@ -2636,6 +3516,7 @@ class SqliteDatabase:
                 s.size,
                 s.warehouse_no,
                 s.unit_price
+            {having_sql}
             ORDER BY
                 s.item_type,
                 s.school,
@@ -2685,7 +3566,7 @@ class SqliteDatabase:
                     color=r["color"],
                     size=r["size"],
                     warehouse_no=r["warehouse_no"],
-                    package_no=r["package_no"],  # ← now "93, 121, 137"
+                    package_no=r["package_no"],  # â† now "93, 121, 137"
                     unit_price=r["unit_price"],
                     count=int(r["count"]),
                     value=float(r["value"]),
@@ -2730,33 +3611,11 @@ class SqliteDatabase:
         """
         if not bill_lines:
             raise ValueError("Bill has no items")
-
-        def _candidates_for_line(line: Dict[str, Any]) -> List[sqlite3.Row]:
-            cur = self.conn.cursor()
-            try:
-                if line.get("stock_id"):
-                    cur.execute(
-                        "SELECT * FROM stocks WHERE id=? AND count>0 ORDER BY id ASC",
-                        (int(line["stock_id"]),),
-                    )
-                else:
-                    # build a flexible matcher by specs
-                    where_parts = ["count > 0"]
-                    args: List[Any] = []
-                    for k in ("item_type", "school", "color", "size"):
-                        v = (line.get(k) or "").strip()
-                        if v:
-                            where_parts.append(f"LOWER(TRIM({k})) = LOWER(?)")
-                            args.append(v)
-                    for k in ("warehouse_no", "package_no"):
-                        v = line.get(k)
-                        if v not in (None, "", 0, "0"):
-                            where_parts.append(f"{k} = ?")
-                            args.append(int(v))
-                    cur.execute(f"SELECT * FROM stocks WHERE {' AND '.join(where_parts)} ORDER BY id ASC", args)
-                return cur.fetchall()
-            finally:
-                cur.close()
+        if (target_pos or "").strip():
+            for line in bill_lines:
+                if bool(line.get("allow_factory_fill")):
+                    raise ValueError("Ù„Ø§ ÙŠÙ…ÙƒÙ† Ø´Ø­Ù† Ø¨Ù†Ø¯ Ù…Ù† Ø§Ù„Ù…ØµÙ†Ø¹ Ø¥Ù„Ù‰ ÙØ±Ø¹. Ø§Ø®ØªØ± ÙƒÙ…ÙŠØ© Ù…ØªØ§Ø­Ø© Ù…Ù† Ø§Ù„Ù…Ø®Ø²ÙˆÙ† Ø£ÙˆÙ„Ø§Ù‹.")
+        self.validate_stock_available_for_bill_lines(bill_lines)
 
         with self.conn:
             # create bill shell
@@ -2786,7 +3645,7 @@ class SqliteDatabase:
                 if allow_factory and not line.get("stock_id"):
                     cands = []
                 else:
-                    cands = _candidates_for_line(line)
+                    cands = self._stock_candidates_for_bill_line(line)
 
                 # --- Greedy take from available stock ---
                 remaining = qty_needed
@@ -2802,9 +3661,9 @@ class SqliteDatabase:
                 if remaining > 0 and not allow_factory:
                     # Friendly error in Arabic with context
                     raise ValueError(
-                        f"لا توجد كمية كافية للصنف "
-                        f"{line.get('item_type','(النوع?)')} / {line.get('school','(المدرسة?)')} / {line.get('size','(المقاس?)')} "
-                        f"(المطلوب {qty_needed}، المتاح {qty_needed-remaining})."
+                        f"Ù„Ø§ ØªÙˆØ¬Ø¯ ÙƒÙ…ÙŠØ© ÙƒØ§ÙÙŠØ© Ù„Ù„ØµÙ†Ù "
+                        f"{line.get('item_type','(Ø§Ù„Ù†ÙˆØ¹?)')} / {line.get('school','(Ø§Ù„Ù…Ø¯Ø±Ø³Ø©?)')} / {line.get('size','(Ø§Ù„Ù…Ù‚Ø§Ø³?)')} "
+                        f"(Ø§Ù„Ù…Ø·Ù„ÙˆØ¨ {qty_needed}ØŒ Ø§Ù„Ù…ØªØ§Ø­ {qty_needed-remaining})."
                     )
 
 
@@ -2967,7 +3826,7 @@ class SqliteDatabase:
                     lines=shipment_items,
                 )
             else:
-                self._record_sync_event("SALE_CREATED", {
+                self._record_sync_event_or_raise("SALE_CREATED", {
                     "bill_uuid": bill_uuid_row[0] if bill_uuid_row else None,
                     "bill_id":   bill_id,
                     "customer":  (customer or "").strip() or None,
@@ -3012,7 +3871,7 @@ class SqliteDatabase:
     def list_bill_items(self, bill_id: int) -> List[Dict[str, Any]]:
         cur = self.conn.cursor()
         cur.execute(
-            """SELECT item_type,school,color,size,warehouse_no,package_no,unit_price,qty,line_total,origin,has_badge
+            """SELECT id,item_type,school,color,size,warehouse_no,package_no,unit_price,qty,line_total,origin,has_badge
             FROM bill_items WHERE bill_id=?""",
             (int(bill_id),),
         )
@@ -3023,9 +3882,10 @@ class SqliteDatabase:
     # -------- Bill Lifecycle (Draft / Confirm / Void) --------
 
     def create_draft_bill(self, customer: str, bill_lines: List[Dict[str, Any]]) -> int:
-        """Create a DRAFT bill — saves bill data but does NOT deduct stock."""
+        """Create a DRAFT bill â€” saves bill data but does NOT deduct stock."""
         if not bill_lines:
             raise ValueError("Bill has no items")
+        self.validate_stock_available_for_bill_lines(bill_lines)
         with self.conn:
             bill_cur = self.conn.execute(
                 "INSERT INTO bills(created_at,customer,total,status) VALUES(?,?,?,?)",
@@ -3057,17 +3917,18 @@ class SqliteDatabase:
             return bill_id
 
     def confirm_draft_bill(self, bill_id: int) -> None:
-        """Confirm a DRAFT bill — deduct stock and record movements."""
+        """Confirm a DRAFT bill â€” deduct stock and record movements."""
         cur = self.conn.execute(
-            "SELECT COALESCE(status,'CONFIRMED') AS status FROM bills WHERE id=?", (int(bill_id),))
+            "SELECT customer,total,COALESCE(status,'CONFIRMED') AS status FROM bills WHERE id=?", (int(bill_id),))
         row = cur.fetchone()
         if not row:
-            raise ValueError("الفاتورة غير موجودة")
+            raise ValueError("Ø§Ù„ÙØ§ØªÙˆØ±Ø© ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯Ø©")
         if row["status"] != "DRAFT":
-            raise ValueError("هذه الفاتورة ليست مسودة")
+            raise ValueError("Ù‡Ø°Ù‡ Ø§Ù„ÙØ§ØªÙˆØ±Ø© Ù„ÙŠØ³Øª Ù…Ø³ÙˆØ¯Ø©")
         items = self.list_bill_items(bill_id)
         if not items:
-            raise ValueError("الفاتورة لا تحتوي على بنود")
+            raise ValueError("Ø§Ù„ÙØ§ØªÙˆØ±Ø© Ù„Ø§ ØªØ­ØªÙˆÙŠ Ø¹Ù„Ù‰ Ø¨Ù†ÙˆØ¯")
+        self.validate_stock_available_for_bill_lines(items)
         with self.conn:
             affected_packages: set = set()
             for item in items:
@@ -3088,17 +3949,7 @@ class SqliteDatabase:
                     )
                     continue
                 qty_needed = int(item["qty"])
-                where_parts = ["count > 0"]
-                args: List[Any] = []
-                for k in ("item_type", "school", "color", "size"):
-                    v = (item.get(k) or "").strip()
-                    if v:
-                        where_parts.append(f"LOWER(TRIM({k})) = LOWER(?)")
-                        args.append(v)
-                cands = self.conn.execute(
-                    f"SELECT * FROM stocks WHERE {' AND '.join(where_parts)} ORDER BY id ASC",
-                    args
-                ).fetchall()
+                cands = self._stock_candidates_for_bill_line(item)
                 remaining = qty_needed
                 for s in cands:
                     if remaining <= 0:
@@ -3126,8 +3977,8 @@ class SqliteDatabase:
                         remaining -= take
                 if remaining > 0:
                     raise ValueError(
-                        f"كمية غير كافية للصنف {item['item_type']} / {item['school']} / {item['size']} "
-                        f"(المطلوب {qty_needed}، المتاح {qty_needed - remaining})"
+                        f"ÙƒÙ…ÙŠØ© ØºÙŠØ± ÙƒØ§ÙÙŠØ© Ù„Ù„ØµÙ†Ù {item['item_type']} / {item['school']} / {item['size']} "
+                        f"(Ø§Ù„Ù…Ø·Ù„ÙˆØ¨ {qty_needed}ØŒ Ø§Ù„Ù…ØªØ§Ø­ {qty_needed - remaining})"
                     )
             self.cleanup_unused_specs()
             self.conn.execute(
@@ -3135,16 +3986,62 @@ class SqliteDatabase:
             )
             for wh, pkg in affected_packages:
                 self.auto_reopen_package_if_empty(wh, pkg)
+            bill_uuid_row = self.conn.execute(
+                "SELECT uuid FROM bills WHERE id=?", (int(bill_id),)
+            ).fetchone()
+            items_payload = [
+                {
+                    "item_type": item["item_type"],
+                    "school": item["school"],
+                    "color": item["color"],
+                    "size": item["size"],
+                    "warehouse_no": int(item.get("warehouse_no") or 0),
+                    "package_no": int(item.get("package_no") or 0),
+                    "unit_price": float(item["unit_price"]),
+                    "qty": int(item["qty"]),
+                    "line_total": float(item.get("line_total") or 0.0),
+                    "origin": item.get("origin"),
+                    "has_badge": int(item.get("has_badge") or 0),
+                }
+                for item in items
+            ]
+            branch_target = normalize_branch_customer_name(row["customer"])
+            if branch_target:
+                shipment_items = [
+                    {
+                        "item_type": it["item_type"],
+                        "school": it["school"],
+                        "color": it["color"],
+                        "size": it["size"],
+                        "unit_price": float(it["unit_price"]),
+                        "qty": int(it["qty"]),
+                    }
+                    for it in items_payload if int(it["qty"]) > 0
+                ]
+                self._record_branch_shipment_event(
+                    shipment_uuid=(bill_uuid_row[0] if bill_uuid_row else None) or "",
+                    target_name=branch_target,
+                    note=f"draft bill #{bill_id}",
+                    lines=shipment_items,
+                )
+            else:
+                self._record_sync_event_or_raise("SALE_CREATED", {
+                    "bill_uuid": bill_uuid_row[0] if bill_uuid_row else None,
+                    "bill_id": int(bill_id),
+                    "customer": (row["customer"] or "").strip() or None,
+                    "total": float(row["total"] or 0.0),
+                    "items": items_payload,
+                })
 
     def void_bill(self, bill_id: int) -> None:
-        """Void a confirmed bill — return items to stock."""
+        """Void a confirmed bill â€” return items to stock."""
         cur = self.conn.execute(
             "SELECT COALESCE(status,'CONFIRMED') AS status FROM bills WHERE id=?", (int(bill_id),))
         row = cur.fetchone()
         if not row:
-            raise ValueError("الفاتورة غير موجودة")
+            raise ValueError("Ø§Ù„ÙØ§ØªÙˆØ±Ø© ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯Ø©")
         if row["status"] != "CONFIRMED":
-            raise ValueError("يمكن إلغاء الفواتير المؤكدة فقط")
+            raise ValueError("ÙŠÙ…ÙƒÙ† Ø¥Ù„ØºØ§Ø¡ Ø§Ù„ÙÙˆØ§ØªÙŠØ± Ø§Ù„Ù…Ø¤ÙƒØ¯Ø© ÙÙ‚Ø·")
         items = self.list_bill_items(bill_id)
         with self.conn:
             for item in items:
@@ -3197,7 +4094,7 @@ class SqliteDatabase:
             bill_uuid_row = self.conn.execute(
                 "SELECT uuid FROM bills WHERE id=?", (int(bill_id),)
             ).fetchone()
-            self._record_sync_event("SALE_VOIDED", {
+            self._record_sync_event_or_raise("SALE_VOIDED", {
                 "bill_uuid": bill_uuid_row[0] if bill_uuid_row else None,
                 "bill_id":   int(bill_id),
                 "items": [
@@ -3223,9 +4120,9 @@ class SqliteDatabase:
             "SELECT COALESCE(status,'CONFIRMED') AS status FROM bills WHERE id=?", (int(bill_id),))
         row = cur.fetchone()
         if not row:
-            raise ValueError("الفاتورة غير موجودة")
+            raise ValueError("Ø§Ù„ÙØ§ØªÙˆØ±Ø© ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯Ø©")
         if row["status"] != "DRAFT":
-            raise ValueError("يمكن حذف المسودات فقط")
+            raise ValueError("ÙŠÙ…ÙƒÙ† Ø­Ø°Ù Ø§Ù„Ù…Ø³ÙˆØ¯Ø§Øª ÙÙ‚Ø·")
         with self.conn:
             self.conn.execute("DELETE FROM bill_items WHERE bill_id=?", (int(bill_id),))
             self.conn.execute("DELETE FROM bills WHERE id=?", (int(bill_id),))
@@ -3238,12 +4135,87 @@ class SqliteDatabase:
             "SELECT customer, COALESCE(status,'CONFIRMED') AS status FROM bills WHERE id=?", (int(bill_id),))
         row = cur.fetchone()
         if not row:
-            raise ValueError("الفاتورة غير موجودة")
+            raise ValueError("Ø§Ù„ÙØ§ØªÙˆØ±Ø© ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯Ø©")
         if row["status"] != "CONFIRMED":
-            raise ValueError("المرتجعات متاحة فقط للفواتير المؤكدة")
+            raise ValueError("Ø§Ù„Ù…Ø±ØªØ¬Ø¹Ø§Øª Ù…ØªØ§Ø­Ø© ÙÙ‚Ø· Ù„Ù„ÙÙˆØ§ØªÙŠØ± Ø§Ù„Ù…Ø¤ÙƒØ¯Ø©")
         if not return_lines:
-            raise ValueError("لا توجد أصناف للإرجاع")
+            raise ValueError("Ù„Ø§ ØªÙˆØ¬Ø¯ Ø£ØµÙ†Ø§Ù Ù„Ù„Ø¥Ø±Ø¬Ø§Ø¹")
         branch_target = normalize_branch_customer_name(row["customer"])
+        positive_lines: List[Dict[str, Any]] = []
+        requested_by_bill_item: Dict[int, int] = {}
+        requested_by_spec: Dict[Tuple[str, str, str, str, int, int, float, int], int] = {}
+        for line in return_lines:
+            qty = int(line.get("qty") or 0)
+            if qty <= 0:
+                continue
+            positive_lines.append(line)
+            bill_item_id = parse_int_text(line.get("bill_item_id"))
+            if bill_item_id is not None:
+                requested_by_bill_item[bill_item_id] = requested_by_bill_item.get(bill_item_id, 0) + qty
+            else:
+                key = (
+                    str(line.get("item_type") or "").strip(),
+                    str(line.get("school") or "").strip(),
+                    str(line.get("color") or "").strip(),
+                    str(line.get("size") or "").strip(),
+                    int(line.get("warehouse_no") or 0),
+                    int(line.get("package_no") or 0),
+                    float(line.get("unit_price") or 0.0),
+                    int(line.get("has_badge") or 0),
+                )
+                requested_by_spec[key] = requested_by_spec.get(key, 0) + qty
+        if not positive_lines:
+            raise ValueError("No returnable items were selected")
+        for bill_item_id, requested_qty in requested_by_bill_item.items():
+            original = self.conn.execute(
+                "SELECT qty FROM bill_items WHERE id=? AND bill_id=?",
+                (int(bill_item_id), int(bill_id)),
+            ).fetchone()
+            if not original:
+                raise ValueError("Return line does not belong to this bill")
+            already = self.conn.execute(
+                """
+                SELECT COALESCE(SUM(ri.qty),0)
+                FROM return_items ri
+                JOIN returns r ON r.id = ri.return_id
+                WHERE r.bill_id=? AND ri.bill_item_id=?
+                """,
+                (int(bill_id), int(bill_item_id)),
+            ).fetchone()[0] or 0
+            if requested_qty > int(original["qty"] or 0) - int(already):
+                raise ValueError("Return quantity exceeds the remaining bill quantity")
+        for key, requested_qty in requested_by_spec.items():
+            it, sc, cl, sz, wh, pkg, price, has_badge = key
+            original = self.conn.execute(
+                """
+                SELECT COALESCE(SUM(qty),0)
+                FROM bill_items
+                WHERE bill_id=?
+                  AND LOWER(TRIM(item_type))=LOWER(TRIM(?))
+                  AND LOWER(TRIM(school))=LOWER(TRIM(?))
+                  AND LOWER(TRIM(color))=LOWER(TRIM(?))
+                  AND LOWER(TRIM(size))=LOWER(TRIM(?))
+                  AND warehouse_no=? AND package_no=? AND unit_price=? AND COALESCE(has_badge,0)=?
+                """,
+                (int(bill_id), it, sc, cl, sz, wh, pkg, price, has_badge),
+            ).fetchone()[0] or 0
+            already = self.conn.execute(
+                """
+                SELECT COALESCE(SUM(ri.qty),0)
+                FROM return_items ri
+                JOIN returns r ON r.id = ri.return_id
+                WHERE r.bill_id=?
+                  AND LOWER(TRIM(ri.item_type))=LOWER(TRIM(?))
+                  AND LOWER(TRIM(ri.school))=LOWER(TRIM(?))
+                  AND LOWER(TRIM(ri.color))=LOWER(TRIM(?))
+                  AND LOWER(TRIM(ri.size))=LOWER(TRIM(?))
+                  AND ri.warehouse_no=? AND ri.package_no=? AND ri.unit_price=? AND COALESCE(ri.has_badge,0)=?
+                """,
+                (int(bill_id), it, sc, cl, sz, wh, pkg, price, has_badge),
+            ).fetchone()[0] or 0
+            if requested_qty > int(original) - int(already):
+                raise ValueError("Return quantity exceeds the remaining bill quantity")
+        return_lines = positive_lines
         with self.conn:
             ret_cur = self.conn.execute(
                 "INSERT INTO returns(bill_id, created_at, note) VALUES(?,?,?)",
@@ -3289,21 +4261,16 @@ class SqliteDatabase:
                             price,
                             qty,
                             has_badge,
-                            (note or "").strip() or f"مرتجع فاتورة شحن إلى {branch_target}",
+                            (note or "").strip() or f"Ù…Ø±ØªØ¬Ø¹ ÙØ§ØªÙˆØ±Ø© Ø´Ø­Ù† Ø¥Ù„Ù‰ {branch_target}",
                         ),
                     )
                 else:
                     if wh > 0 and pkg > 0:
                         self.ensure_package_open(wh, pkg)
-                    stock_cur = self.conn.execute(
-                        """INSERT INTO stocks
-                        (item_type,school,color,size,warehouse_no,package_no,
-                         unit_price,count,has_badge)
-                        VALUES(?,?,?,?,?,?,?,?,?)""",
-                        (line["item_type"], line["school"], line["color"],
-                         line["size"], wh, pkg, price, qty, has_badge),
+                    stock_id = self.add_or_update_stock_row(
+                        line["item_type"], line["school"], line["color"],
+                        line["size"], wh, pkg, price, qty, has_badge,
                     )
-                    stock_id = stock_cur.lastrowid
                     self.conn.execute(
                         """INSERT INTO movements
                         (ts,direction,stock_id,qty,note,bill_id,
@@ -3321,7 +4288,7 @@ class SqliteDatabase:
             bill_uuid_row = self.conn.execute(
                 "SELECT uuid FROM bills WHERE id=?", (int(bill_id),)
             ).fetchone()
-            self._record_sync_event("SALE_RETURNED", {
+            self._record_sync_event_or_raise("SALE_RETURNED", {
                 "return_uuid": return_uuid_row[0] if return_uuid_row else None,
                 "return_id":   return_id,
                 "bill_uuid":   bill_uuid_row[0] if bill_uuid_row else None,
@@ -3365,31 +4332,27 @@ class SqliteDatabase:
                        note: str = "Warehouse transfer") -> Tuple[int, int]:
         """Move qty items from stock_id to dest warehouse/package."""
         if qty <= 0:
-            raise ValueError("الكمية يجب أن تكون أكبر من صفر")
+            raise ValueError("Ø§Ù„ÙƒÙ…ÙŠØ© ÙŠØ¬Ø¨ Ø£Ù† ØªÙƒÙˆÙ† Ø£ÙƒØ¨Ø± Ù…Ù† ØµÙØ±")
         with self.conn:
             cur = self.conn.execute("SELECT * FROM stocks WHERE id=?", (int(stock_id),))
             s = cur.fetchone()
             if not s:
-                raise ValueError("صف المخزون غير موجود")
+                raise ValueError("ØµÙ Ø§Ù„Ù…Ø®Ø²ÙˆÙ† ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯")
             if int(s["count"]) < qty:
-                raise ValueError(f"الكمية المتاحة ({s['count']}) أقل من المطلوب ({qty})")
+                raise ValueError(f"Ø§Ù„ÙƒÙ…ÙŠØ© Ø§Ù„Ù…ØªØ§Ø­Ø© ({s['count']}) Ø£Ù‚Ù„ Ù…Ù† Ø§Ù„Ù…Ø·Ù„ÙˆØ¨ ({qty})")
             src_wh = int(s["warehouse_no"])
             src_pkg = int(s["package_no"])
             if src_wh == dest_warehouse_no and src_pkg == dest_package_no:
-                raise ValueError("المصدر والوجهة متطابقان")
+                raise ValueError("Ø§Ù„Ù…ØµØ¯Ø± ÙˆØ§Ù„ÙˆØ¬Ù‡Ø© Ù…ØªØ·Ø§Ø¨Ù‚Ø§Ù†")
             self.ensure_package_open(dest_warehouse_no, dest_package_no)
             self.conn.execute(
                 "UPDATE stocks SET count = count - ? WHERE id = ?",
                 (qty, int(stock_id)))
-            dest_cur = self.conn.execute(
-                """INSERT INTO stocks
-                (item_type,school,color,size,warehouse_no,package_no,
-                 unit_price,count,has_badge)
-                VALUES(?,?,?,?,?,?,?,?,?)""",
-                (s["item_type"], s["school"], s["color"], s["size"],
-                 int(dest_warehouse_no), int(dest_package_no),
-                 float(s["unit_price"]), qty, int(s["has_badge"] or 0)))
-            dest_stock_id = dest_cur.lastrowid
+            dest_stock_id = self.add_or_update_stock_row(
+                s["item_type"], s["school"], s["color"], s["size"],
+                int(dest_warehouse_no), int(dest_package_no),
+                float(s["unit_price"]), qty, int(s["has_badge"] or 0),
+            )
             out_cur = self.conn.execute(
                 """INSERT INTO movements
                 (ts,direction,stock_id,qty,note,bill_id,
@@ -3540,7 +4503,7 @@ class SqliteDatabase:
                 return str(row[0]).strip()
         except sqlite3.OperationalError:
             pass
-        return s[:22] + "…" if len(s) > 26 else s
+        return s[:22] + "â€¦" if len(s) > 26 else s
 
     def list_pos_reservations_mirror_device_picklist(self) -> List[str]:
         """Combobox values: known POS names plus raw identifiers from mirror/ledger tables."""
@@ -3577,7 +4540,7 @@ class SqliteDatabase:
             sql += frag
             args.extend(frag_args)
         if active_only:
-            sql += " AND status = 'معلق'"
+            sql += " AND status = 'Ù…Ø¹Ù„Ù‚'"
         sql += " ORDER BY updated_at DESC, id DESC"
         try:
             return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
@@ -3591,7 +4554,7 @@ class SqliteDatabase:
     ) -> List[Dict[str, Any]]:
         """Sum reservation mirror lines by product (type/school/color/size) across POS devices.
 
-        Multiple reservation lines (same or different معرّف) that share the same normalized
+        Multiple reservation lines (same or different Ù…Ø¹Ø±Ù‘Ù) that share the same normalized
         product keys are combined; ``agg_qty`` is the total quantity and
         ``reservation_line_count`` is how many mirror rows were merged.
         """
@@ -3618,7 +4581,7 @@ class SqliteDatabase:
             sql += frag
             args.extend(frag_args)
         if active_only:
-            sql += " AND status = 'معلق'"
+            sql += " AND status = 'Ù…Ø¹Ù„Ù‚'"
         sql += """
           GROUP BY 1, 2, 3, 4
           ORDER BY MAX(updated_at) DESC, 1, 2, 3, 4
@@ -3839,13 +4802,13 @@ class SqliteDatabase:
     ) -> int:
         dev = canonical_branch_device_name(branch_device, DEFAULT_BRANCH_POS_NAMES) or str(branch_device or "").strip()
         if not dev:
-            raise ValueError("اختر الفرع أولاً.")
+            raise ValueError("Ø§Ø®ØªØ± Ø§Ù„ÙØ±Ø¹ Ø£ÙˆÙ„Ø§Ù‹.")
         try:
             amt = float(amount)
         except (TypeError, ValueError):
-            raise ValueError("المبلغ غير صالح.")
+            raise ValueError("Ø§Ù„Ù…Ø¨Ù„Øº ØºÙŠØ± ØµØ§Ù„Ø­.")
         if amt < 0:
-            raise ValueError("المبلغ يجب أن يكون صفراً أو أكبر.")
+            raise ValueError("Ø§Ù„Ù…Ø¨Ù„Øº ÙŠØ¬Ø¨ Ø£Ù† ÙŠÙƒÙˆÙ† ØµÙØ±Ø§Ù‹ Ø£Ùˆ Ø£ÙƒØ¨Ø±.")
         dt_txt = str(received_at or "").strip() or now_iso()[:10]
         with self.conn:
             cur = self.conn.execute(
@@ -3934,14 +4897,14 @@ class SqliteDatabase:
     ) -> None:
         item = self.get_branch_inventory_queue_item(queue_id)
         if not item:
-            raise ValueError("العنصر المطلوب غير موجود.")
+            raise ValueError("Ø§Ù„Ø¹Ù†ØµØ± Ø§Ù„Ù…Ø·Ù„ÙˆØ¨ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯.")
         if (item.get("status") or "").upper() != "PENDING":
-            raise ValueError("تمت معالجة هذا العنصر بالفعل.")
+            raise ValueError("ØªÙ…Øª Ù…Ø¹Ø§Ù„Ø¬Ø© Ù‡Ø°Ø§ Ø§Ù„Ø¹Ù†ØµØ± Ø¨Ø§Ù„ÙØ¹Ù„.")
 
         w = int(warehouse_no)
         p = int(package_no)
         if w < 1 or p < 1:
-            raise ValueError("رقم المخزن والعبوة يجب أن يكونا 1 أو أكبر.")
+            raise ValueError("Ø±Ù‚Ù… Ø§Ù„Ù…Ø®Ø²Ù† ÙˆØ§Ù„Ø¹Ø¨ÙˆØ© ÙŠØ¬Ø¨ Ø£Ù† ÙŠÙƒÙˆÙ†Ø§ 1 Ø£Ùˆ Ø£ÙƒØ¨Ø±.")
 
         with self.conn:
             self.add_stock(
@@ -3977,9 +4940,9 @@ class SqliteDatabase:
     def discard_branch_inventory_queue_item(self, queue_id: int, note: str = "") -> None:
         item = self.get_branch_inventory_queue_item(queue_id)
         if not item:
-            raise ValueError("العنصر المطلوب غير موجود.")
+            raise ValueError("Ø§Ù„Ø¹Ù†ØµØ± Ø§Ù„Ù…Ø·Ù„ÙˆØ¨ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯.")
         if (item.get("status") or "").upper() != "PENDING":
-            raise ValueError("تمت معالجة هذا العنصر بالفعل.")
+            raise ValueError("ØªÙ…Øª Ù…Ø¹Ø§Ù„Ø¬Ø© Ù‡Ø°Ø§ Ø§Ù„Ø¹Ù†ØµØ± Ø¨Ø§Ù„ÙØ¹Ù„.")
 
         with self.conn:
             self.conn.execute(
@@ -4005,15 +4968,15 @@ class SqliteDatabase:
     ) -> None:
         item = self.get_branch_inventory_queue_item(queue_id)
         if not item:
-            raise ValueError("العنصر المطلوب غير موجود.")
+            raise ValueError("Ø§Ù„Ø¹Ù†ØµØ± Ø§Ù„Ù…Ø·Ù„ÙˆØ¨ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯.")
         if (item.get("status") or "").upper() != "PENDING":
-            raise ValueError("تمت معالجة هذا العنصر بالفعل.")
+            raise ValueError("ØªÙ…Øª Ù…Ø¹Ø§Ù„Ø¬Ø© Ù‡Ø°Ø§ Ø§Ù„Ø¹Ù†ØµØ± Ø¨Ø§Ù„ÙØ¹Ù„.")
 
         target = (target_name or "").strip()
         if not target:
-            raise ValueError("اسم الفرع المطلوب غير صالح.")
+            raise ValueError("Ø§Ø³Ù… Ø§Ù„ÙØ±Ø¹ Ø§Ù„Ù…Ø·Ù„ÙˆØ¨ ØºÙŠØ± ØµØ§Ù„Ø­.")
         if target == item.get("source_device"):
-            raise ValueError("لا يمكن إعادة التوجيه إلى نفس الفرع المرسل.")
+            raise ValueError("Ù„Ø§ ÙŠÙ…ÙƒÙ† Ø¥Ø¹Ø§Ø¯Ø© Ø§Ù„ØªÙˆØ¬ÙŠÙ‡ Ø¥Ù„Ù‰ Ù†ÙØ³ Ø§Ù„ÙØ±Ø¹ Ø§Ù„Ù…Ø±Ø³Ù„.")
 
         with self.conn:
             self._record_branch_shipment_event(
@@ -4117,7 +5080,7 @@ class SqliteDatabase:
             known = []
         canonical_target = canonical_branch_device_name(target_name, known) or (target_name or "").strip()
         if not canonical_target:
-            raise ValueError("اسم الفرع المستهدف غير صالح.")
+            raise ValueError("Ø§Ø³Ù… Ø§Ù„ÙØ±Ø¹ Ø§Ù„Ù…Ø³ØªÙ‡Ø¯Ù ØºÙŠØ± ØµØ§Ù„Ø­.")
 
         payload = {
             "shipment_uuid":   shipment_uuid,
@@ -4146,7 +5109,7 @@ class SqliteDatabase:
                 ),
             )
         except _sqlite3.OperationalError:
-            # Legacy outbox schema (no target_scope column) — fall back
+            # Legacy outbox schema (no target_scope column) â€” fall back
             # to storing the scope inside the payload. The client-side
             # push loop handles both shapes.
             payload["__target_scope__"] = target_scope
@@ -4217,9 +5180,9 @@ class SqliteDatabase:
             (int(review_id),),
         ).fetchone()
         if not row:
-            raise ValueError("مراجعة الشحنة غير موجودة.")
+            raise ValueError("Ù…Ø±Ø§Ø¬Ø¹Ø© Ø§Ù„Ø´Ø­Ù†Ø© ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯Ø©.")
         if str(row["status"]) != "PENDING":
-            raise ValueError("تم اتخاذ قرار مسبقاً لهذه المراجعة.")
+            raise ValueError("ØªÙ… Ø§ØªØ®Ø§Ø° Ù‚Ø±Ø§Ø± Ù…Ø³Ø¨Ù‚Ø§Ù‹ Ù„Ù‡Ø°Ù‡ Ø§Ù„Ù…Ø±Ø§Ø¬Ø¹Ø©.")
 
         lines: List[Dict[str, Any]] = []
         try:
@@ -4229,6 +5192,35 @@ class SqliteDatabase:
         except Exception:
             lines = []
         applied = 0
+        if accept:
+            needed_by_spec: Dict[Tuple[str, str, str, str], int] = {}
+            for ln in lines:
+                diff = int(ln.get("diff_qty") or 0)
+                if diff <= 0:
+                    continue
+                it = str(ln.get("item_type") or "").strip()
+                sc = str(ln.get("school") or "").strip()
+                cl = str(ln.get("color") or "").strip()
+                sz = str(ln.get("size") or "").strip()
+                if not (it and sc and cl and sz):
+                    continue
+                key = (it, sc, cl, sz)
+                needed_by_spec[key] = needed_by_spec.get(key, 0) + int(diff)
+            for (it, sc, cl, sz), needed_qty in needed_by_spec.items():
+                available = self.conn.execute(
+                    """
+                    SELECT COALESCE(SUM(count),0)
+                    FROM stocks
+                    WHERE count>0
+                      AND LOWER(TRIM(item_type))=LOWER(TRIM(?))
+                      AND LOWER(TRIM(school))=LOWER(TRIM(?))
+                      AND LOWER(TRIM(color))=LOWER(TRIM(?))
+                      AND LOWER(TRIM(size))=LOWER(TRIM(?))
+                    """,
+                    (it, sc, cl, sz),
+                ).fetchone()[0] or 0
+                if int(available) < int(needed_qty):
+                    raise ValueError("Cannot accept shipment review: warehouse stock is not enough for the requested correction")
 
         with self.conn:
             if accept:
@@ -4246,20 +5238,16 @@ class SqliteDatabase:
 
                     if diff < 0:
                         qty = abs(diff)
-                        self.conn.execute(
-                            """
-                            INSERT INTO stocks(item_type,school,color,size,warehouse_no,package_no,unit_price,count,has_badge)
-                            VALUES(?,?,?,?,?,?,?,?,0)
-                            """,
-                            (it, sc, cl, sz, 1, 1, price, qty),
+                        stock_id = self.add_or_update_stock_row(
+                            it, sc, cl, sz, 1, 1, price, qty, 0,
                         )
                         self.conn.execute(
                             """INSERT INTO movements
                                (ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,warehouse_no,package_no,unit_price,has_badge)
                                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
                             (
-                                now_iso(), "ADJUST_IN", None, qty,
-                                f"قبول فرق استلام شحنة #{str(row['shipment_uuid'])[:8]} من {row['source_device']}",
+                                now_iso(), "ADJUST_IN", int(stock_id), qty,
+                                f"Ù‚Ø¨ÙˆÙ„ ÙØ±Ù‚ Ø§Ø³ØªÙ„Ø§Ù… Ø´Ø­Ù†Ø© #{str(row['shipment_uuid'])[:8]} Ù…Ù† {row['source_device']}",
                                 None, it, sc, cl, sz, 1, 1, price,
                             ),
                         )
@@ -4292,7 +5280,7 @@ class SqliteDatabase:
                                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
                                 (
                                     now_iso(), "ADJUST_OUT", int(s["id"]), int(take),
-                                    f"قبول فرق استلام شحنة #{str(row['shipment_uuid'])[:8]} من {row['source_device']}",
+                                    f"Ù‚Ø¨ÙˆÙ„ ÙØ±Ù‚ Ø§Ø³ØªÙ„Ø§Ù… Ø´Ø­Ù†Ø© #{str(row['shipment_uuid'])[:8]} Ù…Ù† {row['source_device']}",
                                     None, it, sc, cl, sz,
                                     int(s["warehouse_no"] or 0), int(s["package_no"] or 0),
                                     float(s["unit_price"] or price),
@@ -4300,6 +5288,8 @@ class SqliteDatabase:
                             )
                             need -= int(take)
                             applied += 1
+                        if need > 0:
+                            raise ValueError("Cannot accept shipment review: correction was not fully applied")
 
             self.conn.execute(
                 """
@@ -4320,18 +5310,51 @@ class SqliteDatabase:
         applied_events: List[Dict[str, Any]] = []
         with self.conn:
             for adj in adjustments:
-                stock_id = int(adj["stock_id"])
                 expected = int(adj["expected"])
                 actual = int(adj["actual"])
                 diff = actual - expected
                 if diff == 0:
                     continue
-                cur = self.conn.execute("SELECT * FROM stocks WHERE id=?", (stock_id,))
-                s = cur.fetchone()
+                stock_id_raw = adj.get("stock_id")
+                stock_id = parse_int_text(stock_id_raw)
+                s = None
+                if stock_id is not None:
+                    cur = self.conn.execute("SELECT * FROM stocks WHERE id=?", (stock_id,))
+                    s = cur.fetchone()
                 if not s:
+                    if diff <= 0:
+                        continue
+                    item_type = str(adj.get("item_type") or "").strip()
+                    school = str(adj.get("school") or "").strip()
+                    color = str(adj.get("color") or "").strip()
+                    size = str(adj.get("size") or "").strip()
+                    warehouse_no = parse_int_text(adj.get("warehouse_no"))
+                    package_no = parse_int_text(adj.get("package_no"))
+                    unit_price = parse_float_text(adj.get("unit_price"), 0.0) or 0.0
+                    if not (item_type and school and color and size and warehouse_no is not None and package_no is not None):
+                        continue
+                    self.ensure_package_open(warehouse_no, package_no)
+                    stock_id = self.add_or_update_stock_row(
+                        item_type,
+                        school,
+                        color,
+                        size,
+                        int(warehouse_no),
+                        int(package_no),
+                        float(unit_price),
+                        0,
+                        int(adj.get("has_badge") or 0),
+                    )
+                    s = self.conn.execute("SELECT * FROM stocks WHERE id=?", (stock_id,)).fetchone()
+                if not s or stock_id is None:
                     continue
                 direction = "ADJUST_IN" if diff > 0 else "ADJUST_OUT"
                 abs_diff = abs(diff)
+                current_count = int(s["count"] or 0)
+                if actual < 0:
+                    raise ValueError("Actual stock count cannot be negative")
+                if diff < 0 and abs_diff > current_count:
+                    raise ValueError("Stock adjustment would make the item count negative")
                 if diff > 0:
                     self.conn.execute(
                         "UPDATE stocks SET count = count + ? WHERE id = ?",
@@ -4377,6 +5400,364 @@ class SqliteDatabase:
                 })
         return count
 
+    def create_stock_audit_report(
+        self,
+        rows: Sequence[Dict[str, Any]],
+        *,
+        filters: Optional[Dict[str, Any]] = None,
+        source: str = "manual",
+        note: str = "",
+        created_at: Optional[str] = None,
+        bucket_key: Optional[str] = None,
+    ) -> Optional[int]:
+        report_rows = [dict(r) for r in (rows or []) if int(r.get("diff") or 0) != 0]
+        if not report_rows:
+            return None
+        total_diff = sum(int(r.get("diff") or 0) for r in report_rows)
+        total_value = sum(float(r.get("diff_value") or 0.0) for r in report_rows)
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                INSERT INTO stock_audit_reports(
+                    created_at, source, note, bucket_key, filters_json, line_count, total_diff, total_value
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(created_at or now_iso()),
+                    str(source or "").strip() or "manual",
+                    str(note or "").strip() or None,
+                    str(bucket_key or "").strip() or None,
+                    json.dumps(filters or {}, ensure_ascii=False, default=str),
+                    len(report_rows),
+                    int(total_diff),
+                    float(total_value),
+                ),
+            )
+            report_id = int(cur.lastrowid)
+            for r in report_rows:
+                self._insert_stock_audit_report_line(report_id, r)
+        return report_id
+
+    def _insert_stock_audit_report_line(self, report_id: int, row: Dict[str, Any]) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO stock_audit_report_lines(
+                report_id, stock_id, item_type, school, color, size, warehouse_no, package_no,
+                expected, actual, diff, unit_price, diff_value
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(report_id),
+                row.get("id") or row.get("stock_id"),
+                row.get("item_type"),
+                row.get("school"),
+                row.get("color"),
+                row.get("size"),
+                str(row.get("warehouse_no") or ""),
+                str(row.get("package_no") or ""),
+                int(row.get("expected") or 0),
+                int(row.get("actual") or 0),
+                int(row.get("diff") or 0),
+                float(row.get("unit_price") or 0.0),
+                float(row.get("diff_value") or 0.0),
+            ),
+        )
+
+    def append_stock_audit_report_bucket(
+        self,
+        rows: Sequence[Dict[str, Any]],
+        *,
+        filters: Optional[Dict[str, Any]] = None,
+        source: str = "auto-equalization",
+        bucket_key: Optional[str] = None,
+        note: str = "",
+    ) -> Optional[int]:
+        report_rows = [dict(r) for r in (rows or []) if int(r.get("diff") or 0) != 0]
+        if not report_rows:
+            return None
+        bucket = str(bucket_key or now_iso()[:13]).strip()
+        total_diff = sum(int(r.get("diff") or 0) for r in report_rows)
+        total_value = sum(float(r.get("diff_value") or 0.0) for r in report_rows)
+        source_clean = str(source or "").strip() or "auto-equalization"
+        with self.conn:
+            existing = self.conn.execute(
+                """
+                SELECT id, filters_json
+                FROM stock_audit_reports
+                WHERE source=? AND bucket_key=?
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (source_clean, bucket),
+            ).fetchone()
+            if existing:
+                report_id = int(existing["id"])
+                for r in report_rows:
+                    self._insert_stock_audit_report_line(report_id, r)
+                self.conn.execute(
+                    """
+                    UPDATE stock_audit_reports
+                    SET line_count = line_count + ?,
+                        total_diff = total_diff + ?,
+                        total_value = total_value + ?
+                    WHERE id=?
+                    """,
+                    (len(report_rows), int(total_diff), float(total_value), report_id),
+                )
+                return report_id
+            return self.create_stock_audit_report(
+                report_rows,
+                filters=filters,
+                source=source_clean,
+                note=note or "Auto equalization hourly bucket",
+                created_at=f"{bucket}:00:00",
+                bucket_key=bucket,
+            )
+
+    def normalize_auto_stock_audit_reports_by_hour(self) -> int:
+        reports = [
+            dict(r)
+            for r in self.conn.execute(
+                """
+                SELECT id, created_at, source, bucket_key
+                FROM stock_audit_reports
+                WHERE source='auto-equalization'
+                ORDER BY created_at ASC, id ASC
+                """
+            ).fetchall()
+        ]
+        by_hour: Dict[str, List[Dict[str, Any]]] = {}
+        for report in reports:
+            hour = str(report.get("bucket_key") or report.get("created_at") or "")[:13]
+            if hour:
+                by_hour.setdefault(hour, []).append(report)
+
+        merged = 0
+        with self.conn:
+            for hour, group in by_hour.items():
+                if len(group) <= 1 and str(group[0].get("bucket_key") or "") == hour:
+                    continue
+                bucketed = [r for r in group if str(r.get("bucket_key") or "") == hour]
+                keep = bucketed[0] if bucketed else group[0]
+                keep_id = int(keep["id"])
+                ids = [int(r["id"]) for r in group]
+                placeholders = ",".join("?" for _ in ids)
+                totals = self.conn.execute(
+                    f"""
+                    SELECT
+                        COUNT(*) AS line_count,
+                        COALESCE(SUM(diff), 0) AS total_diff,
+                        COALESCE(SUM(diff_value), 0) AS total_value
+                    FROM stock_audit_report_lines
+                    WHERE report_id IN ({placeholders})
+                    """,
+                    ids,
+                ).fetchone()
+                self.conn.execute(
+                    f"""
+                    UPDATE stock_audit_report_lines
+                    SET report_id=?
+                    WHERE report_id<>? AND report_id IN ({placeholders})
+                    """,
+                    [keep_id, keep_id, *ids],
+                )
+                self.conn.execute(
+                    """
+                    UPDATE stock_audit_reports
+                    SET created_at=?,
+                        bucket_key=?,
+                        note=?,
+                        line_count=?,
+                        total_diff=?,
+                        total_value=?
+                    WHERE id=?
+                    """,
+                    (
+                        f"{hour}:00:00",
+                        hour,
+                        "Auto equalization hourly bucket",
+                        int(totals["line_count"] if totals else 0),
+                        int(totals["total_diff"] if totals else 0),
+                        float(totals["total_value"] if totals else 0.0),
+                        keep_id,
+                    ),
+                )
+                drop_ids = [i for i in ids if i != keep_id]
+                if drop_ids:
+                    self.conn.execute(
+                        f"DELETE FROM stock_audit_reports WHERE id IN ({','.join('?' for _ in drop_ids)})",
+                        drop_ids,
+                    )
+                    merged += len(drop_ids)
+        return merged
+
+    def list_stock_audit_reports(self, limit: int = 200) -> List[Dict[str, Any]]:
+        self.normalize_auto_stock_audit_reports_by_hour()
+        cur = self.conn.execute(
+            """
+            SELECT id, created_at, source, note, line_count, total_diff, total_value
+            FROM stock_audit_reports
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def backfill_stock_audit_reports_from_movements(self) -> int:
+        existing = self.conn.execute(
+            "SELECT COUNT(*) AS c FROM stock_audit_reports WHERE source='legacy-movement'"
+        ).fetchone()
+        if int((existing["c"] if existing else 0) or 0) > 0:
+            return 0
+
+        cur = self.conn.execute(
+            """
+            SELECT
+                id, ts, direction, stock_id, qty, note,
+                item_type, school, color, size, warehouse_no, package_no, unit_price
+            FROM movements
+            WHERE direction IN ('ADJUST_IN','ADJUST_OUT')
+              AND note LIKE 'Physical count adjustment%'
+            ORDER BY ts ASC, id ASC
+            """
+        )
+        movements = [dict(r) for r in cur.fetchall()]
+        if not movements:
+            return 0
+
+        def _parse_expected_actual(note: Any) -> Tuple[Optional[int], Optional[int]]:
+            match = re.search(r"\(expected\s+(-?\d+),\s*actual\s+(-?\d+)\)", str(note or ""))
+            if not match:
+                return None, None
+            return int(match.group(1)), int(match.group(2))
+
+        def _parse_ts(value: Any) -> datetime:
+            raw = str(value or "").strip()
+            try:
+                return datetime.fromisoformat(raw.replace("Z", "+00:00")).replace(tzinfo=None)
+            except Exception:
+                return datetime.min
+
+        groups: List[List[Dict[str, Any]]] = []
+        for row in movements:
+            row_dt = _parse_ts(row.get("ts"))
+            if not groups:
+                groups.append([row])
+                continue
+            prev = groups[-1][-1]
+            prev_dt = _parse_ts(prev.get("ts"))
+            same_note = str(row.get("note") or "").split(" (expected ", 1)[0] == str(prev.get("note") or "").split(" (expected ", 1)[0]
+            close = abs((row_dt - prev_dt).total_seconds()) <= 10
+            if same_note and close:
+                groups[-1].append(row)
+            else:
+                groups.append([row])
+
+        created = 0
+        for group in groups:
+            report_rows: List[Dict[str, Any]] = []
+            for row in group:
+                diff = int(row.get("qty") or 0)
+                if row.get("direction") == "ADJUST_OUT":
+                    diff = -diff
+                expected, actual = _parse_expected_actual(row.get("note"))
+                if expected is None or actual is None:
+                    actual = 0
+                    expected = actual - diff
+                unit_price = float(row.get("unit_price") or 0.0)
+                report_rows.append({
+                    "id": row.get("stock_id"),
+                    "item_type": row.get("item_type") or "",
+                    "school": row.get("school") or "",
+                    "color": row.get("color") or "",
+                    "size": row.get("size") or "",
+                    "warehouse_no": row.get("warehouse_no") or "",
+                    "package_no": row.get("package_no") or "",
+                    "expected": int(expected),
+                    "actual": int(actual),
+                    "diff": int(diff),
+                    "unit_price": unit_price,
+                    "diff_value": float(diff) * unit_price,
+                })
+            report_id = self.create_stock_audit_report(
+                report_rows,
+                source="legacy-movement",
+                note="Imported from old physical count movements",
+                created_at=str(group[0].get("ts") or now_iso()),
+            )
+            if report_id:
+                created += 1
+        return created
+
+    def stock_audit_touched_keys(self) -> set[Tuple[str, str, str, str, str, str]]:
+        touched: set[Tuple[str, str, str, str, str, str]] = set()
+
+        def _key(row: sqlite3.Row) -> Tuple[str, str, str, str, str, str]:
+            return (
+                str(row["item_type"] or "").strip().casefold(),
+                str(row["school"] or "").strip().casefold(),
+                str(row["color"] or "").strip().casefold(),
+                _normalize_size_label(row["size"] or "").casefold(),
+                str(row["warehouse_no"] or "").strip(),
+                str(row["package_no"] or "").strip(),
+            )
+
+        try:
+            cur = self.conn.execute(
+                """
+                SELECT item_type, school, color, size, warehouse_no, package_no
+                FROM stock_audit_report_lines
+                WHERE diff <> 0
+                """
+            )
+            for row in cur.fetchall():
+                touched.add(_key(row))
+        except sqlite3.Error:
+            pass
+
+        try:
+            cur = self.conn.execute(
+                """
+                SELECT item_type, school, color, size, warehouse_no, package_no
+                FROM movements
+                WHERE direction IN ('ADJUST_IN','ADJUST_OUT')
+                  AND note LIKE 'Physical count adjustment%'
+                """
+            )
+            for row in cur.fetchall():
+                touched.add(_key(row))
+        except sqlite3.Error:
+            pass
+
+        return touched
+
+    def get_stock_audit_report(self, report_id: int) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        report = self.conn.execute(
+            """
+            SELECT id, created_at, source, note, filters_json, line_count, total_diff, total_value
+            FROM stock_audit_reports
+            WHERE id=?
+            """,
+            (int(report_id),),
+        ).fetchone()
+        if report is None:
+            return None, []
+        cur = self.conn.execute(
+            """
+            SELECT
+                stock_id AS id, item_type, school, color, size, warehouse_no, package_no,
+                expected, actual, diff, unit_price, diff_value
+            FROM stock_audit_report_lines
+            WHERE report_id=?
+            ORDER BY id ASC
+            """,
+            (int(report_id),),
+        )
+        return dict(report), [dict(r) for r in cur.fetchall()]
+
     # -------- Excel export for inventory --------
     def export_inventory_excel(self, path: str, rows: Sequence[Dict[str, Any]]) -> None:
         headers = [
@@ -4389,7 +5770,7 @@ class SqliteDatabase:
                 [
                     r["id"], r["item_type"], r["school"], r["color"], r["size"],
                     r["warehouse_no"], r["package_no"],
-                    ("✓" if int(r.get("has_badge") or 0) else ""),
+                    ("âœ“" if int(r.get("has_badge") or 0) else ""),
                     float(r["unit_price"]),
                     int(r["count"]), float(value),
                 ]
@@ -4586,6 +5967,7 @@ class SqliteDatabase:
                 metrics[key] = {
                     "incoming_qty": 0,
                     "sold_warehouse_qty": 0,
+                    "pos_sold_qty": 0,
                     "branch_shipped_qty": 0,
                     "branch_sold_qty_est": 0,
                     "reserved_qty": 0,
@@ -4674,7 +6056,7 @@ class SqliteDatabase:
             sql = """
                 SELECT item_type, school, color, size, COALESCE(SUM(qty),0)
                 FROM pos_reservations_mirror
-                WHERE status = 'معلق'
+                WHERE status = 'Ù…Ø¹Ù„Ù‚'
             """
             args: List[Any] = []
             if branch_filter:
@@ -4708,8 +6090,8 @@ class SqliteDatabase:
                             b.id IS NULL
                          OR (
                                 (COALESCE(b.bill_type, 'SALE') = 'SALE' OR b.bill_type IS NULL)
-                            AND LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))
-                            AND LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('الى المصنع'))
+                            AND LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('ÙØ±Ø¹:%'))
+                            AND LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('Ø§Ù„Ù‰ Ø§Ù„Ù…ØµÙ†Ø¹'))
                             AND UPPER(TRIM(COALESCE(b.customer,''))) != 'WAREHOUSE'
                             )
                         )
@@ -4736,8 +6118,8 @@ class SqliteDatabase:
                     b.id IS NULL
                  OR (
                         (COALESCE(b.bill_type, 'SALE') = 'SALE' OR b.bill_type IS NULL)
-                    AND LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))
-                    AND LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('الى المصنع'))
+                    AND LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('ÙØ±Ø¹:%'))
+                    AND LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('Ø§Ù„Ù‰ Ø§Ù„Ù…ØµÙ†Ø¹'))
                     AND UPPER(TRIM(COALESCE(b.customer,''))) != 'WAREHOUSE'
                     )
               )
@@ -4764,7 +6146,7 @@ class SqliteDatabase:
             FROM bill_items bi
             JOIN bills b ON b.id = bi.bill_id
             WHERE COALESCE(b.status,'CONFIRMED') = 'CONFIRMED'
-              AND LOWER(TRIM(COALESCE(b.customer,''))) LIKE LOWER(TRIM('فرع:%'))
+              AND LOWER(TRIM(COALESCE(b.customer,''))) LIKE LOWER(TRIM('ÙØ±Ø¹:%'))
             {branch_sql}
             {d_sql}
             GROUP BY bi.item_type, bi.school, bi.color, bi.size
@@ -4775,20 +6157,92 @@ class SqliteDatabase:
             key = _to_key(r)
             _bucket(key)["branch_shipped_qty"] = int(r[4] or 0)
 
+        # POS sold qty from synced POS sale payloads only.
+        # Warehouse bills/shipments do not mark an item as sold for this view.
+        try:
+            sale_sql = """
+                SELECT event_type, source_device, payload_json
+                FROM sync_inbox
+                WHERE event_type IN ('SALE_CREATED','SALE_RETURNED','SALE_VOIDED','SALE_EXCHANGED')
+                  AND COALESCE(apply_status,'ok') != 'error'
+            """
+            sale_args: List[Any] = []
+            d_sql, d_args = _date_clause("COALESCE(apply_at, applied_at)")
+            sale_sql += d_sql
+            sale_args.extend(d_args)
+            if branch_filter:
+                frag, frag_args = self.resolve_pos_mirror_device_sql_filter(branch_filter)
+                sale_sql += frag
+                sale_args.extend(frag_args)
+            sale_rows = cur.execute(sale_sql, tuple(sale_args)).fetchall()
+        except sqlite3.OperationalError:
+            sale_rows = []
+
+        def _apply_pos_sale_lines(lines: Any, sign: int) -> None:
+            if not isinstance(lines, list):
+                return
+            for ln in lines:
+                if not isinstance(ln, dict):
+                    continue
+                try:
+                    qty = int(ln.get("qty") or 0)
+                except Exception:
+                    qty = 0
+                if qty <= 0:
+                    continue
+                key = (
+                    _normalize_spec_label(ln.get("item_type")),
+                    _normalize_spec_label(ln.get("school")),
+                    _normalize_spec_label(ln.get("color")),
+                    _normalize_size_label(str(ln.get("size") or "")),
+                )
+                if not all(key):
+                    continue
+                _bucket(key)["pos_sold_qty"] += int(sign) * qty
+
+        for rr in sale_rows:
+            try:
+                payload = json.loads(rr["payload_json"] or "{}")
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                continue
+            event_type = str(rr["event_type"] or "").strip()
+            if event_type == "SALE_CREATED":
+                _apply_pos_sale_lines(payload.get("items") or [], +1)
+            elif event_type in ("SALE_RETURNED", "SALE_VOIDED"):
+                _apply_pos_sale_lines(payload.get("lines") or payload.get("items") or [], -1)
+            elif event_type == "SALE_EXCHANGED":
+                _apply_pos_sale_lines(payload.get("take_lines") or [], +1)
+                _apply_pos_sale_lines(payload.get("return_lines") or [], -1)
+
         cur.close()
 
         out: List[Dict[str, Any]] = []
         for key, m in metrics.items():
             if not _spec_match(key):
                 continue
-            branch_sold = max(0, int(m["branch_shipped_qty"]) - int(m["branch_qty"]))
-            sold_total = int(m["sold_warehouse_qty"]) + branch_sold
+            branch_sold = max(0, int(m["pos_sold_qty"]))
+            sold_total = max(0, int(m["pos_sold_qty"]))
             remaining_total = int(m["warehouse_qty"]) + int(m["branch_qty"])
-            requested_qty = max(0, sold_total - remaining_total)
+            remaining_for_request = int(m["branch_qty"]) if branch_filter else remaining_total
+            requested_qty = max(0, sold_total - remaining_for_request)
+            incoming_qty = int(m["branch_shipped_qty"]) if branch_filter else int(m["incoming_qty"])
+            if branch_filter and not (
+                incoming_qty
+                or branch_sold
+                or int(m["branch_qty"])
+                or int(m["reserved_qty"])
+                or requested_qty
+            ):
+                # When a branch is selected, do not show unrelated warehouse
+                # products just because the warehouse has stock or old incoming
+                # movements for them.
+                continue
             if has_date_filter and not (
-                int(m["incoming_qty"])
-                or int(m["sold_warehouse_qty"])
-                or int(m["branch_shipped_qty"])
+                incoming_qty
+                or int(m["pos_sold_qty"])
+                or int(m["reserved_qty"])
             ):
                 # Date filters should narrow the visible product rows to items
                 # that actually moved in the selected period.
@@ -4799,7 +6253,7 @@ class SqliteDatabase:
                     "school": key[1],
                     "color": key[2],
                     "size": key[3],
-                    "incoming_qty": int(m["incoming_qty"]),
+                    "incoming_qty": incoming_qty,
                     "sold_branch_qty": int(branch_sold),
                     "sold_warehouse_qty": int(m["sold_warehouse_qty"]),
                     "sold_total_qty": int(sold_total),
@@ -4846,7 +6300,7 @@ class LabeledStaticCombo(ttk.Frame):
 class LabeledCombobox(ttk.Frame):
     """
     Entry + caret button + Listbox popup (no focus theft).
-    - Button “▼” toggles popup; Entry keeps focus.
+    - Button â€œâ–¼â€ toggles popup; Entry keeps focus.
     - Opens on first typed letter; live filters while typing.
     - Emits <<ComboboxSelected>> when a value is picked (keeps existing app binds working).
     - Public API: get(), set(), .cb (Entry), .btn (Button).
@@ -4872,7 +6326,7 @@ class LabeledCombobox(ttk.Frame):
         self.cb.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # Small caret button; no focus grab
-        self.btn = ttk.Button(row, text="▼", width=2, takefocus=0, command=self._on_caret_click)
+        self.btn = ttk.Button(row, text="â–¼", width=2, takefocus=0, command=self._on_caret_click)
         # make it flat-ish if theme supports it
         try:
             self.btn.configure(style="Toolbutton")
@@ -5191,7 +6645,7 @@ class LabeledEntry(ttk.Frame):
         self.var.set(v)
 
 class DateField(ttk.Frame):
-    """Entry + '📅' button; popup calendar; returns YYYY-MM-DD; empty allowed."""
+    """Entry + 'ðŸ“…' button; popup calendar; returns YYYY-MM-DD; empty allowed."""
     def __init__(self, master, label: str):
         super().__init__(master)
         ttk.Label(self, text=label).pack(side=tk.TOP, anchor="w")
@@ -5199,7 +6653,7 @@ class DateField(ttk.Frame):
         self.var = tk.StringVar()
         self.entry = ttk.Entry(row, textvariable=self.var, width=14)
         self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.btn = ttk.Button(row, text="📅", width=3, command=self._open)
+        self.btn = ttk.Button(row, text="ðŸ“…", width=3, command=self._open)
         self.btn.pack(side=tk.LEFT, padx=(4,0))
         self._popup: Optional[tk.Toplevel] = None
         self.entry.bind("<Return>", lambda e: self._validate())
@@ -5229,9 +6683,9 @@ class DateField(ttk.Frame):
         self._month = tk.IntVar(value=base.month)
 
         hdr = ttk.Frame(frm); hdr.pack(fill=tk.X)
-        ttk.Button(hdr, text="◀", width=2, command=self._prev_month).pack(side=tk.LEFT)
+        ttk.Button(hdr, text="â—€", width=2, command=self._prev_month).pack(side=tk.LEFT)
         self._title = ttk.Label(hdr, font=("", 10, "bold")); self._title.pack(side=tk.LEFT, padx=6)
-        ttk.Button(hdr, text="▶", width=2, command=self._next_month).pack(side=tk.RIGHT)
+        ttk.Button(hdr, text="â–¶", width=2, command=self._next_month).pack(side=tk.RIGHT)
 
         self._grid = ttk.Frame(frm); self._grid.pack()
         self._render()
@@ -5271,7 +6725,7 @@ class DateField(ttk.Frame):
         try:
             datetime.strptime(txt, "%Y-%m-%d")
         except Exception:
-            messagebox.showerror("صيغة التاريخ", "الرجاء إدخال التاريخ بصيغة YYYY-MM-DD أو استخدم التقويم.", parent=self)
+            messagebox.showerror("ØµÙŠØºØ© Ø§Ù„ØªØ§Ø±ÙŠØ®", "Ø§Ù„Ø±Ø¬Ø§Ø¡ Ø¥Ø¯Ø®Ø§Ù„ Ø§Ù„ØªØ§Ø±ÙŠØ® Ø¨ØµÙŠØºØ© YYYY-MM-DD Ø£Ùˆ Ø§Ø³ØªØ®Ø¯Ù… Ø§Ù„ØªÙ‚ÙˆÙŠÙ….", parent=self)
             self.entry.focus_set()
 
     def _handle_global_click(self, event):
@@ -5363,12 +6817,12 @@ class SizesGrid(ttk.Frame):
                 ttk.Label(cell, text=sz, anchor="center").pack()
 
             # qty
-            ttk.Label(cell, text="الكمية", font=("", 8)).pack()
+            ttk.Label(cell, text="Ø§Ù„ÙƒÙ…ÙŠØ©", font=("", 8)).pack()
             v_qty = tk.StringVar()
             ttk.Entry(cell, textvariable=v_qty, width=6).pack()
 
             # price
-            ttk.Label(cell, text="السعر", font=("", 8)).pack()
+            ttk.Label(cell, text="Ø§Ù„Ø³Ø¹Ø±", font=("", 8)).pack()
             v_price = tk.StringVar()
             ttk.Entry(cell, textvariable=v_price, width=8).pack()
 
@@ -5389,7 +6843,7 @@ class SizesGrid(ttk.Frame):
 
             qty_txt = v_qty.get().strip()
             if not qty_txt:
-                continue  # ← EMPTY instead of zero
+                continue  # â† EMPTY instead of zero
 
             try:
                 qty = int(qty_txt)
@@ -5397,11 +6851,11 @@ class SizesGrid(ttk.Frame):
                 continue
 
             if qty <= 0:
-                continue  # ← ZERO NOT PRINTED
+                continue  # â† ZERO NOT PRINTED
 
             price_txt = v_price.get().strip()
             try:
-                price = float(price_txt) if price_txt else None
+                price = parse_float_text(price_txt)
             except Exception:
                 price = None
 
@@ -5413,22 +6867,22 @@ class SizesGrid(ttk.Frame):
 
         return out
 
-    def set_price_for_size(self, size_label: str, price):
+    def set_price_for_size(self, size_label: str, price, force: bool = False):
         """Set the price entry for a specific size (only if currently empty)."""
         for sz, (v_qty, v_price, v_label, is_custom) in self._vars.items():
             actual_label = v_label.get().strip() if is_custom else sz
-            if actual_label == size_label and not v_price.get().strip():
+            if actual_label == size_label and (force or not v_price.get().strip()):
                 try:
-                    v_price.set(f"{float(price):.2f}")
+                    v_price.set(f"{format_money(float(price))}")
                 except Exception:
                     pass
 
-    def set_price_for_all(self, price):
+    def set_price_for_all(self, price, force: bool = False):
         """Set the price entry for ALL sizes (only where currently empty)."""
         for _, (v_qty, v_price, v_label, is_custom) in self._vars.items():
-            if not v_price.get().strip():
+            if force or not v_price.get().strip():
                 try:
-                    v_price.set(f"{float(price):.2f}")
+                    v_price.set(f"{format_money(float(price))}")
                 except Exception:
                     pass
 
@@ -5437,8 +6891,8 @@ class SizesGrid(ttk.Frame):
 def _bind_mousewheel(widget, scrollable=None):
     """
     Enable hover-to-scroll on any scrollable tkinter widget.
-    widget    – the visual element the user hovers over
-    scrollable – the target that receives yview_scroll (defaults to widget)
+    widget    â€“ the visual element the user hovers over
+    scrollable â€“ the target that receives yview_scroll (defaults to widget)
     """
     target = scrollable or widget
 
@@ -5622,11 +7076,15 @@ class ToolTip:
             self._tip = None
 
 
-def apply_zebra_tags(tree):
+def apply_zebra_tags(tree, skip_tags: Optional[set] = None):
     """Apply alternating row colors to a treeview."""
+    skip_tags = skip_tags or set()
     tree.tag_configure("oddrow", background=_UI["ROW_ODD"])
     tree.tag_configure("evenrow", background=_UI["ROW_EVEN"])
     for i, item in enumerate(tree.get_children("")):
+        existing = tuple(tree.item(item, "tags") or ())
+        if any(t in skip_tags for t in existing):
+            continue
         tag = "evenrow" if i % 2 == 0 else "oddrow"
         tree.item(item, tags=(tag,))
 
@@ -5657,8 +7115,8 @@ def add_context_menu(tree, extra_commands=None):
         tree.clipboard_clear()
         tree.clipboard_append("\t".join(str(v) for v in vals))
 
-    menu.add_command(label="نسخ الخلية", command=_copy_cell)
-    menu.add_command(label="نسخ الصف", command=_copy_row)
+    menu.add_command(label="Ù†Ø³Ø® Ø§Ù„Ø®Ù„ÙŠØ©", command=_copy_cell)
+    menu.add_command(label="Ù†Ø³Ø® Ø§Ù„ØµÙ", command=_copy_row)
 
     if extra_commands:
         menu.add_separator()
@@ -5697,21 +7155,25 @@ class IncomeFrame(ttk.Frame):
         self._defined_qty_var = tk.StringVar(value="1")
         self._defined_price_var = tk.StringVar(value="")
         self._defined_path_var = tk.StringVar(value="")
+        self._income_price_profile_var = tk.StringVar(value="")
+        self._defined_price_profile_var = tk.StringVar(value="")
+        self._income_price_profile_map: Dict[str, int] = {}
+        self._defined_price_profile_map: Dict[str, int] = {}
 
         self._build()
 
     def _build(self):
-        ttk.Label(self, text="وارد (إضافة أصناف جديدة)", font=_FONTS["h2"]).pack(anchor="w", pady=(0, 4))
+        ttk.Label(self, text="ÙˆØ§Ø±Ø¯ (Ø¥Ø¶Ø§ÙØ© Ø£ØµÙ†Ø§Ù Ø¬Ø¯ÙŠØ¯Ø©)", font=_FONTS["h2"]).pack(anchor="w", pady=(0, 4))
 
-        pkg_frame = ttk.LabelFrame(self, text="حاوية (حسب المخزن/العبوة)")
+        pkg_frame = ttk.LabelFrame(self, text="Ø­Ø§ÙˆÙŠØ© (Ø­Ø³Ø¨ Ø§Ù„Ù…Ø®Ø²Ù†/Ø§Ù„Ø¹Ø¨ÙˆØ©)")
         pkg_frame.pack(fill=tk.X, pady=(0, 4))
 
         self.wh  = LabeledStaticCombo(
-            pkg_frame, "رقم المخزن",
+            pkg_frame, "Ø±Ù‚Ù… Ø§Ù„Ù…Ø®Ø²Ù†",
             values=["", *WAREHOUSE_NUMBER_DISPLAY_VALUES],
             value_map=WAREHOUSE_NUMBER_LABELS,
         )
-        self.pkg = LabeledEntry(pkg_frame, "رقم العبوة")
+        self.pkg = LabeledEntry(pkg_frame, "Ø±Ù‚Ù… Ø§Ù„Ø¹Ø¨ÙˆØ©")
         self.pkg_hint_var  = tk.StringVar(value="")
         self.pkg_status_var= tk.StringVar(value="")
         self.pkg_count_var = tk.StringVar(value="0")
@@ -5728,9 +7190,9 @@ class IncomeFrame(ttk.Frame):
 
         stat_box = ttk.Frame(pkg_frame)
         stat_box.grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 3))
-        ttk.Label(stat_box, text="الحالة:").pack(side=tk.LEFT)
+        ttk.Label(stat_box, text="Ø§Ù„Ø­Ø§Ù„Ø©:").pack(side=tk.LEFT)
         ttk.Label(stat_box, textvariable=self.pkg_status_var, font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=(4, 12))
-        ttk.Label(stat_box, text="عدد صفوف المخزون داخل العبوة:").pack(side=tk.LEFT)
+        ttk.Label(stat_box, text="Ø¹Ø¯Ø¯ ØµÙÙˆÙ Ø§Ù„Ù…Ø®Ø²ÙˆÙ† Ø¯Ø§Ø®Ù„ Ø§Ù„Ø¹Ø¨ÙˆØ©:").pack(side=tk.LEFT)
         ttk.Label(stat_box, textvariable=self.pkg_count_var, font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=(4, 0))
 
         pkg_frame.columnconfigure(0, weight=1)
@@ -5740,13 +7202,13 @@ class IncomeFrame(ttk.Frame):
         view_bar.pack(fill=tk.X, pady=(0, 6))
         self._btn_undefined_view = ttk.Button(
             view_bar,
-            text="أصناف غير معرفة",
+            text="Ø£ØµÙ†Ø§Ù ØºÙŠØ± Ù…Ø¹Ø±ÙØ©",
             command=lambda: self._switch_income_view("undefined"),
         )
         self._btn_undefined_view.pack(side=tk.LEFT, padx=(0, 6))
         self._btn_defined_view = ttk.Button(
             view_bar,
-            text="أصناف معرفة",
+            text="Ø£ØµÙ†Ø§Ù Ù…Ø¹Ø±ÙØ©",
             command=lambda: self._switch_income_view("defined"),
         )
         self._btn_defined_view.pack(side=tk.LEFT)
@@ -5756,18 +7218,19 @@ class IncomeFrame(ttk.Frame):
         self._undefined_view = ttk.Frame(self._income_views)
         self._defined_view = ttk.Frame(self._income_views)
 
-        grid = ttk.LabelFrame(self._undefined_view, text="بيانات الصنف")
+        grid = ttk.LabelFrame(self._undefined_view, text="Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„ØµÙ†Ù")
         grid.pack(fill=tk.BOTH, expand=True)
 
         # Specs comboboxes (no single 'size' field now)
-        self.item_type = LabeledCombobox(grid, "النوع", self.db, "item_type")
-        self.school    = LabeledCombobox(grid, "المدرسة", self.db, "school")
-        self.color     = LabeledCombobox(grid, "اللون", self.db, "color")
+        self.item_type = LabeledCombobox(grid, "Ø§Ù„Ù†ÙˆØ¹", self.db, "item_type")
+        self.school    = LabeledCombobox(grid, "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", self.db, "school")
+        self.color     = LabeledCombobox(grid, "Ø§Ù„Ù„ÙˆÙ†", self.db, "color")
+        self._income_price_profile_combo: Optional[ttk.Combobox] = None
         # ---------- Income size ranges (single compact row) ----------
         ranges_box = ttk.Frame(grid)
         ranges_box.grid(row=2, column=0, columnspan=2, sticky="ew", padx=6, pady=(2, 2))
 
-        ttk.Label(ranges_box, text="النطاق الأول").pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Label(ranges_box, text="Ø§Ù„Ù†Ø·Ø§Ù‚ Ø§Ù„Ø£ÙˆÙ„").pack(side=tk.LEFT, padx=(0, 2))
         ttk.Combobox(
             ranges_box,
             textvariable=self._income_r1,
@@ -5776,7 +7239,7 @@ class IncomeFrame(ttk.Frame):
             width=14
         ).pack(side=tk.LEFT, padx=(0, 8))
 
-        ttk.Label(ranges_box, text="النطاق الثاني").pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Label(ranges_box, text="Ø§Ù„Ù†Ø·Ø§Ù‚ Ø§Ù„Ø«Ø§Ù†ÙŠ").pack(side=tk.LEFT, padx=(0, 2))
         ttk.Combobox(
             ranges_box,
             textvariable=self._income_r2,
@@ -5787,24 +7250,25 @@ class IncomeFrame(ttk.Frame):
 
         ttk.Checkbutton(
             ranges_box,
-            text="مقاسات حرفية (S → 5XL)",
+            text="Ù…Ù‚Ø§Ø³Ø§Øª Ø­Ø±ÙÙŠØ© (S â†’ 5XL)",
             variable=self._income_has_alpha
         ).pack(side=tk.LEFT)
 
         # --- Cascading filter suppliers ---
         self.item_type.set_supplier(lambda: self.db.get_distinct_filtered(
             "item_type", self._income_constraints("item_type")) or [])
-        self.school.set_supplier(lambda: self.db.get_distinct_filtered(
-            "school", self._income_constraints("school")) or [])
+        self.school.set_supplier(lambda: self.db.get_distinct("school") or [])
         self.color.set_supplier(lambda: self.db.get_distinct_filtered(
-            "color", self._income_constraints("color")) or [])
+            "color", {"school": (self.school.get() or "").strip()} if (self.school.get() or "").strip() else {}) or [])
 
         # Bind to cascade + auto-load size profile + fill prices when specs change
         def _on_spec_change(e=None):
             self._on_income_filter_changed()
             self._auto_load_size_profile()
+            self._sync_income_price_profile_from_specs()
             self._rebuild_sizes_grid()
             self._auto_fill_price_for_grid()
+            self.after_idle(self._auto_fill_price_for_grid)
 
         for w in (self.item_type.cb, self.school.cb, self.color.cb):
             w.bind("<<ComboboxSelected>>", _on_spec_change, add="+")
@@ -5845,23 +7309,38 @@ class IncomeFrame(ttk.Frame):
         self._sizes_canvas = sizes_canvas
         _bind_mousewheel(sizes_container, sizes_canvas)
 
-        # NEW: badge checkbox — inside the sizes_container so it doesn't overlap
+        # NEW: badge checkbox â€” inside the sizes_container so it doesn't overlap
         self.has_badge = tk.BooleanVar(value=False)
 
         # layout of spec fields + sizes grid
         # Row 0: item_type + school
         # Row 1: color
         # Row 2: ranges_box (already placed above)
-        # Row 3: sizes_container (canvas — expandable)
+        # Row 3: sizes_container (canvas â€” expandable)
         # Row 4: badge
         # Row 5: buttons
         self.item_type.grid(row=0, column=0, padx=6, pady=4, sticky="ew")
         self.school.grid(   row=0, column=1, padx=6, pady=4, sticky="ew")
         self.color.grid(    row=1, column=0, padx=6, pady=4, sticky="ew")
+        profile_row = ttk.Frame(grid)
+        profile_row.grid(row=1, column=1, padx=6, pady=4, sticky="ew")
+        ttk.Label(profile_row, text="Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø§Ù„Ø³Ø¹Ø±").pack(anchor="w")
+        self._income_price_profile_combo = ttk.Combobox(
+            profile_row,
+            textvariable=self._income_price_profile_var,
+            state="readonly",
+            values=[],
+        )
+        self._income_price_profile_combo.pack(fill=tk.X)
+        self._income_price_profile_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self._auto_fill_price_for_grid(force=True),
+            add="+",
+        )
 
         badge_row = ttk.Frame(grid)
         badge_row.grid(row=4, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 2))
-        ttk.Checkbutton(badge_row, text="بادج", variable=self.has_badge).pack(side=tk.LEFT)
+        ttk.Checkbutton(badge_row, text="Ø¨Ø§Ø¯Ø¬", variable=self.has_badge).pack(side=tk.LEFT)
 
         # ensure columns expand equally
         for c in range(2):
@@ -5875,16 +7354,16 @@ class IncomeFrame(ttk.Frame):
         pkg_btns.grid(row=5, column=0, columnspan=2, sticky="ew", padx=6, pady=(4, 4))
 
         # keep the same buttons inside it
-        _btn_close_pkg = ttk.Button(pkg_btns, text="إغلاق العبوة", command=self._close_current_package); _btn_close_pkg.pack(side=tk.RIGHT)
-        ToolTip(_btn_close_pkg, "إغلاق العبوة الحالية ومنع الإضافة إليها")
-        _btn_add = ttk.Button(pkg_btns, text="إضافة", command=self._on_add); _btn_add.pack(side=tk.LEFT)
-        ToolTip(_btn_add, "إضافة الصنف بالكمية المحددة إلى المخزون")
+        _btn_close_pkg = ttk.Button(pkg_btns, text="Ø¥ØºÙ„Ø§Ù‚ Ø§Ù„Ø¹Ø¨ÙˆØ©", command=self._close_current_package); _btn_close_pkg.pack(side=tk.RIGHT)
+        ToolTip(_btn_close_pkg, "Ø¥ØºÙ„Ø§Ù‚ Ø§Ù„Ø¹Ø¨ÙˆØ© Ø§Ù„Ø­Ø§Ù„ÙŠØ© ÙˆÙ…Ù†Ø¹ Ø§Ù„Ø¥Ø¶Ø§ÙØ© Ø¥Ù„ÙŠÙ‡Ø§")
+        _btn_add = ttk.Button(pkg_btns, text="Ø¥Ø¶Ø§ÙØ©", command=self._on_add); _btn_add.pack(side=tk.LEFT)
+        ToolTip(_btn_add, "Ø¥Ø¶Ø§ÙØ© Ø§Ù„ØµÙ†Ù Ø¨Ø§Ù„ÙƒÙ…ÙŠØ© Ø§Ù„Ù…Ø­Ø¯Ø¯Ø© Ø¥Ù„Ù‰ Ø§Ù„Ù…Ø®Ø²ÙˆÙ†")
 
         btns = ttk.Frame(self._undefined_view)
         btns.pack(side=tk.BOTTOM, fill=tk.X, pady=(12, 0))
-        _btn_reset = ttk.Button(btns, text="تفريغ (يبقي المخزن/العبوة)", command=self._on_reset_keep_pkg); _btn_reset.pack(side=tk.LEFT, padx=8)
-        ToolTip(_btn_reset, "مسح الحقول مع الإبقاء على رقم المخزن والعبوة")
-        # removed "إضافة مقاسات متعددة…" button (inline grid used instead)
+        _btn_reset = ttk.Button(btns, text="ØªÙØ±ÙŠØº (ÙŠØ¨Ù‚ÙŠ Ø§Ù„Ù…Ø®Ø²Ù†/Ø§Ù„Ø¹Ø¨ÙˆØ©)", command=self._on_reset_keep_pkg); _btn_reset.pack(side=tk.LEFT, padx=8)
+        ToolTip(_btn_reset, "Ù…Ø³Ø­ Ø§Ù„Ø­Ù‚ÙˆÙ„ Ù…Ø¹ Ø§Ù„Ø¥Ø¨Ù‚Ø§Ø¡ Ø¹Ù„Ù‰ Ø±Ù‚Ù… Ø§Ù„Ù…Ø®Ø²Ù† ÙˆØ§Ù„Ø¹Ø¨ÙˆØ©")
+        # removed "Ø¥Ø¶Ø§ÙØ© Ù…Ù‚Ø§Ø³Ø§Øª Ù…ØªØ¹Ø¯Ø¯Ø©â€¦" button (inline grid used instead)
 
         self._build_defined_income_view(self._defined_view)
 
@@ -5895,6 +7374,8 @@ class IncomeFrame(ttk.Frame):
         # initial
         self._refresh_pkg_hints()
         self._refresh_pkg_status()
+        self._sync_income_price_profile_from_specs()
+        self._sync_defined_price_profile_from_specs()
         self._switch_income_view("undefined")
 
     def _switch_income_view(self, mode: str) -> None:
@@ -5919,30 +7400,30 @@ class IncomeFrame(ttk.Frame):
                 pass
 
     def _build_defined_income_view(self, parent):
-        wrap = ttk.LabelFrame(parent, text="إضافة إلى صنف معرف")
+        wrap = ttk.LabelFrame(parent, text="Ø¥Ø¶Ø§ÙØ© Ø¥Ù„Ù‰ ØµÙ†Ù Ù…Ø¹Ø±Ù")
         wrap.pack(fill=tk.BOTH, expand=True)
         wrap.columnconfigure(0, weight=3)
         wrap.columnconfigure(1, weight=2)
         wrap.rowconfigure(3, weight=1)
 
-        self._defined_crumb_var = tk.StringVar(value="اختر المدرسة")
+        self._defined_crumb_var = tk.StringVar(value="Ø§Ø®ØªØ± Ø§Ù„Ù…Ø¯Ø±Ø³Ø©")
         ttk.Label(
             wrap,
-            text="اختر المدرسة ثم النوع ثم اللون ثم المقاس لإضافة كمية على صنف موجود بالفعل.",
+            text="Ø§Ø®ØªØ± Ø§Ù„Ù…Ø¯Ø±Ø³Ø© Ø«Ù… Ø§Ù„Ù†ÙˆØ¹ Ø«Ù… Ø§Ù„Ù„ÙˆÙ† Ø«Ù… Ø§Ù„Ù…Ù‚Ø§Ø³ Ù„Ø¥Ø¶Ø§ÙØ© ÙƒÙ…ÙŠØ© Ø¹Ù„Ù‰ ØµÙ†Ù Ù…ÙˆØ¬ÙˆØ¯ Ø¨Ø§Ù„ÙØ¹Ù„.",
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 4))
         ttk.Label(wrap, textvariable=self._defined_crumb_var, font=_FONTS["h3"]).grid(
             row=1, column=0, sticky="w", padx=8, pady=(0, 6)
         )
 
-        filters = ttk.LabelFrame(wrap, text="فلاتر سريعة")
+        filters = ttk.LabelFrame(wrap, text="ÙÙ„Ø§ØªØ± Ø³Ø±ÙŠØ¹Ø©")
         filters.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
         filters.columnconfigure(0, weight=1)
         filters.columnconfigure(1, weight=1)
         filters.columnconfigure(2, weight=1)
 
-        self._defined_filter_school = LabeledCombobox(filters, "المدرسة", self.db, "school")
-        self._defined_filter_item = LabeledCombobox(filters, "النوع", self.db, "item_type")
-        self._defined_filter_color = LabeledCombobox(filters, "اللون", self.db, "color")
+        self._defined_filter_school = LabeledCombobox(filters, "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", self.db, "school")
+        self._defined_filter_item = LabeledCombobox(filters, "Ø§Ù„Ù†ÙˆØ¹", self.db, "item_type")
+        self._defined_filter_color = LabeledCombobox(filters, "Ø§Ù„Ù„ÙˆÙ†", self.db, "color")
         self._defined_filter_school.grid(row=0, column=0, padx=6, pady=6, sticky="ew")
         self._defined_filter_item.grid(row=0, column=1, padx=6, pady=6, sticky="ew")
         self._defined_filter_color.grid(row=0, column=2, padx=6, pady=6, sticky="ew")
@@ -5980,31 +7461,44 @@ class IncomeFrame(ttk.Frame):
         self._defined_canvas.bind("<Configure>", lambda _e=None: self._defined_sync_canvas())
         _bind_mousewheel(grid_wrap, self._defined_canvas)
 
-        side = ttk.LabelFrame(wrap, text="بيانات الإضافة")
+        side = ttk.LabelFrame(wrap, text="Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„Ø¥Ø¶Ø§ÙØ©")
         side.grid(row=3, column=1, sticky="nsew", padx=(4, 8), pady=(0, 8))
         side.columnconfigure(1, weight=1)
 
-        ttk.Label(side, text="الاختيار").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
+        ttk.Label(side, text="Ø§Ù„Ø§Ø®ØªÙŠØ§Ø±").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
         ttk.Label(side, textvariable=self._defined_path_var, wraplength=260, justify="left").grid(
             row=0, column=1, sticky="ew", padx=8, pady=(8, 4)
         )
-        ttk.Label(side, text="السعر الحالي").grid(row=1, column=0, sticky="w", padx=8, pady=4)
+        ttk.Label(side, text="Ø§Ù„Ø³Ø¹Ø± Ø§Ù„Ø­Ø§Ù„ÙŠ").grid(row=1, column=0, sticky="w", padx=8, pady=4)
         ttk.Label(side, textvariable=self._defined_price_var).grid(row=1, column=1, sticky="w", padx=8, pady=4)
-        ttk.Label(side, text="الكمية المضافة").grid(row=2, column=0, sticky="w", padx=8, pady=4)
-        ttk.Entry(side, textvariable=self._defined_qty_var, width=12).grid(row=2, column=1, sticky="w", padx=8, pady=4)
-        ttk.Checkbutton(side, text="بادج", variable=self._defined_has_badge).grid(
-            row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 8)
+        ttk.Label(side, text="Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø§Ù„Ø³Ø¹Ø±").grid(row=2, column=0, sticky="w", padx=8, pady=4)
+        self._defined_price_profile_combo = ttk.Combobox(
+            side,
+            textvariable=self._defined_price_profile_var,
+            state="readonly",
+            values=[],
+        )
+        self._defined_price_profile_combo.grid(row=2, column=1, sticky="ew", padx=8, pady=4)
+        self._defined_price_profile_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self._defined_refresh_selected_price(),
+            add="+",
+        )
+        ttk.Label(side, text="Ø§Ù„ÙƒÙ…ÙŠØ© Ø§Ù„Ù…Ø¶Ø§ÙØ©").grid(row=3, column=0, sticky="w", padx=8, pady=4)
+        ttk.Entry(side, textvariable=self._defined_qty_var, width=12).grid(row=3, column=1, sticky="w", padx=8, pady=4)
+        ttk.Checkbutton(side, text="Ø¨Ø§Ø¯Ø¬", variable=self._defined_has_badge).grid(
+            row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 8)
         )
 
         action_bar = ttk.Frame(side)
-        action_bar.grid(row=4, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 4))
-        ttk.Button(action_bar, text="إضافة", command=self._on_add_defined).pack(side=tk.LEFT)
-        ttk.Button(action_bar, text="تفريغ الاختيار", command=self._defined_reset_selection).pack(side=tk.LEFT, padx=(6, 0))
+        action_bar.grid(row=5, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 4))
+        ttk.Button(action_bar, text="Ø¥Ø¶Ø§ÙØ©", command=self._on_add_defined).pack(side=tk.LEFT)
+        ttk.Button(action_bar, text="ØªÙØ±ÙŠØº Ø§Ù„Ø§Ø®ØªÙŠØ§Ø±", command=self._defined_reset_selection).pack(side=tk.LEFT, padx=(6, 0))
 
         pkg_actions = ttk.Frame(side)
-        pkg_actions.grid(row=5, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 8))
-        ttk.Button(pkg_actions, text="تفريغ (يبقي المخزن/العبوة)", command=self._on_reset_keep_pkg).pack(side=tk.LEFT)
-        ttk.Button(pkg_actions, text="إغلاق العبوة", command=self._close_current_package).pack(side=tk.RIGHT)
+        pkg_actions.grid(row=6, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 8))
+        ttk.Button(pkg_actions, text="ØªÙØ±ÙŠØº (ÙŠØ¨Ù‚ÙŠ Ø§Ù„Ù…Ø®Ø²Ù†/Ø§Ù„Ø¹Ø¨ÙˆØ©)", command=self._on_reset_keep_pkg).pack(side=tk.LEFT)
+        ttk.Button(pkg_actions, text="Ø¥ØºÙ„Ø§Ù‚ Ø§Ù„Ø¹Ø¨ÙˆØ©", command=self._close_current_package).pack(side=tk.RIGHT)
 
         self._defined_size_rows: Dict[str, Dict[str, Any]] = {}
         self._defined_update_summary()
@@ -6027,7 +7521,7 @@ class IncomeFrame(ttk.Frame):
     def _defined_make_buttons(self, values: List[str], command, *, cols: int = 4) -> None:
         self._defined_clear_grid()
         if not values:
-            ttk.Label(self._defined_grid_host, text="لا توجد بيانات مطابقة.").pack(anchor="w", padx=8, pady=8)
+            ttk.Label(self._defined_grid_host, text="Ù„Ø§ ØªÙˆØ¬Ø¯ Ø¨ÙŠØ§Ù†Ø§Øª Ù…Ø·Ø§Ø¨Ù‚Ø©.").pack(anchor="w", padx=8, pady=8)
             return
         row_frame = None
         for i, value in enumerate(values):
@@ -6168,7 +7662,7 @@ class IncomeFrame(ttk.Frame):
             parts.append(self._defined_color)
         if self._defined_size:
             parts.append(self._defined_size)
-        self._defined_path_var.set(" / ".join(parts) if parts else "لم يتم اختيار صنف بعد")
+        self._defined_path_var.set(" / ".join(parts) if parts else "Ù„Ù… ÙŠØªÙ… Ø§Ø®ØªÙŠØ§Ø± ØµÙ†Ù Ø¨Ø¹Ø¯")
 
     def _defined_reset_selection(self) -> None:
         self._defined_school = None
@@ -6180,6 +7674,7 @@ class IncomeFrame(ttk.Frame):
         self._defined_filter_color.set("")
         self._defined_qty_var.set("1")
         self._defined_price_var.set("")
+        self._defined_price_profile_var.set("")
         self._defined_has_badge.set(False)
         self._defined_size_rows = {}
         self._defined_update_summary()
@@ -6192,7 +7687,8 @@ class IncomeFrame(ttk.Frame):
         self._defined_color = None
         self._defined_size = None
         self._defined_price_var.set("")
-        self._defined_crumb_var.set("اختر المدرسة")
+        self._defined_price_profile_var.set("")
+        self._defined_crumb_var.set("Ø§Ø®ØªØ± Ø§Ù„Ù…Ø¯Ø±Ø³Ø©")
         self._defined_update_summary()
         schools = self._defined_unique_values(self._defined_filtered_inventory_rows(), "school")
         self._defined_make_buttons(schools, self._defined_select_school)
@@ -6206,14 +7702,14 @@ class IncomeFrame(ttk.Frame):
         self._defined_color = None
         self._defined_size = None
         self._defined_price_var.set("")
-        self._defined_crumb_var.set(f"{school} ← اختر النوع")
+        self._defined_crumb_var.set(f"{school} â† Ø§Ø®ØªØ± Ø§Ù„Ù†ÙˆØ¹")
         self._defined_update_summary()
         items = self._defined_unique_values(
             self._defined_filtered_inventory_rows(school=school),
             "item_type",
         )
         self._defined_make_buttons(items, self._defined_select_item)
-        self._defined_add_back_button("رجوع إلى المدارس", self._defined_render_schools)
+        self._defined_add_back_button("Ø±Ø¬ÙˆØ¹ Ø¥Ù„Ù‰ Ø§Ù„Ù…Ø¯Ø§Ø±Ø³", self._defined_render_schools)
 
     def _defined_select_item(self, item_type: str) -> None:
         if not item_type:
@@ -6223,7 +7719,7 @@ class IncomeFrame(ttk.Frame):
         self._defined_color = None
         self._defined_size = None
         self._defined_price_var.set("")
-        self._defined_crumb_var.set(f"{self._defined_school} / {item_type} ← اختر اللون")
+        self._defined_crumb_var.set(f"{self._defined_school} / {item_type} â† Ø§Ø®ØªØ± Ø§Ù„Ù„ÙˆÙ†")
         self._defined_update_summary()
         colors = self._defined_unique_values(
             self._defined_filtered_inventory_rows(
@@ -6233,7 +7729,7 @@ class IncomeFrame(ttk.Frame):
             "color",
         )
         self._defined_make_buttons(colors, self._defined_select_color)
-        self._defined_add_back_button("رجوع إلى الأنواع", lambda: self._defined_select_school(self._defined_school or ""))
+        self._defined_add_back_button("Ø±Ø¬ÙˆØ¹ Ø¥Ù„Ù‰ Ø§Ù„Ø£Ù†ÙˆØ§Ø¹", lambda: self._defined_select_school(self._defined_school or ""))
 
     def _defined_select_color(self, color: str) -> None:
         if not color:
@@ -6243,7 +7739,7 @@ class IncomeFrame(ttk.Frame):
         self._defined_size = None
         self._defined_price_var.set("")
         self._defined_crumb_var.set(
-            f"{self._defined_school} / {self._defined_item_type} / {color} ← اختر المقاس"
+            f"{self._defined_school} / {self._defined_item_type} / {color} â† Ø§Ø®ØªØ± Ø§Ù„Ù…Ù‚Ø§Ø³"
         )
         self._defined_update_summary()
         self._defined_render_sizes()
@@ -6252,6 +7748,7 @@ class IncomeFrame(ttk.Frame):
         school = self._defined_school or ""
         item_type = self._defined_item_type or ""
         color = self._defined_color or ""
+        self._sync_defined_price_profile_from_specs()
         size_rows = self._defined_collect_size_rows(school, item_type, color)
         self._defined_size_rows = {str(r.get("size") or "").strip(): r for r in size_rows}
         labels = []
@@ -6261,7 +7758,7 @@ class IncomeFrame(ttk.Frame):
                 continue
             labels.append(f"{size} ({int(row.get('count') or 0)})")
         self._defined_make_buttons(labels, self._defined_select_size)
-        self._defined_add_back_button("رجوع إلى الألوان", lambda: self._defined_select_item(self._defined_item_type or ""))
+        self._defined_add_back_button("Ø±Ø¬ÙˆØ¹ Ø¥Ù„Ù‰ Ø§Ù„Ø£Ù„ÙˆØ§Ù†", lambda: self._defined_select_item(self._defined_item_type or ""))
 
     def _defined_collect_size_rows(self, school: str, item_type: str, color: str) -> List[Dict[str, Any]]:
         sizes: List[str] = []
@@ -6298,6 +7795,8 @@ class IncomeFrame(ttk.Frame):
         size = label.split(" (", 1)[0].strip()
         self._defined_size = size
         self._defined_update_summary()
+        self._defined_refresh_selected_price()
+        return
         row = self._defined_size_rows.get(size, {})
         price = row.get("last_price")
         if price is None:
@@ -6311,35 +7810,59 @@ class IncomeFrame(ttk.Frame):
             except Exception:
                 price = None
         if price is None:
-            self._defined_price_var.set("غير معروف")
+            self._defined_price_var.set("ØºÙŠØ± Ù…Ø¹Ø±ÙˆÙ")
         else:
             try:
-                self._defined_price_var.set(f"{float(price):.2f}")
+                self._defined_price_var.set(f"{format_money(float(price))}")
             except Exception:
                 self._defined_price_var.set(str(price))
+
+    def _defined_refresh_selected_price(self) -> None:
+        size = self._defined_size or ""
+        if not size:
+            self._defined_price_var.set("")
+            return
+        price = None
+        try:
+            price = self.db.get_effective_price(
+                self._defined_item_type or "",
+                self._defined_school or "",
+                self._defined_color or "",
+                size,
+                preferred_profile_id=self._selected_defined_price_profile_id(),
+            )
+        except Exception:
+            price = None
+        if price is None:
+            row = self._defined_size_rows.get(size, {})
+            price = row.get("last_price")
+        if price is None:
+            self._defined_price_var.set("ØºÙŠØ± Ù…Ø¹Ø±ÙˆÙ")
+            return
+        try:
+            self._defined_price_var.set(f"{format_money(float(price))}")
+        except Exception:
+            self._defined_price_var.set(str(price))
 
     def _on_add_defined(self) -> None:
         w = self._parse_int_or_none(self.wh.get())
         p = self._parse_int_or_none(self.pkg.get())
         if not (w and p and w >= 1 and p >= 1):
-            messagebox.showerror("بيانات ناقصة", "أدخل رقم المخزن والعبوة بشكل صحيح (>= 1).")
+            messagebox.showerror("Ø¨ÙŠØ§Ù†Ø§Øª Ù†Ø§Ù‚ØµØ©", "Ø£Ø¯Ø®Ù„ Ø±Ù‚Ù… Ø§Ù„Ù…Ø®Ø²Ù† ÙˆØ§Ù„Ø¹Ø¨ÙˆØ© Ø¨Ø´ÙƒÙ„ ØµØ­ÙŠØ­ (>= 1).")
             return
         if not all([self._defined_school, self._defined_item_type, self._defined_color, self._defined_size]):
-            messagebox.showwarning("بيانات ناقصة", "اختر المدرسة والنوع واللون والمقاس أولاً.", parent=self)
+            messagebox.showwarning("Ø¨ÙŠØ§Ù†Ø§Øª Ù†Ø§Ù‚ØµØ©", "Ø§Ø®ØªØ± Ø§Ù„Ù…Ø¯Ø±Ø³Ø© ÙˆØ§Ù„Ù†ÙˆØ¹ ÙˆØ§Ù„Ù„ÙˆÙ† ÙˆØ§Ù„Ù…Ù‚Ø§Ø³ Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
             return
-        try:
-            qty = int((self._defined_qty_var.get() or "").strip())
-        except Exception:
-            qty = 0
+        qty = parse_int_text(self._defined_qty_var.get(), 0) or 0
         if qty <= 0:
-            messagebox.showwarning("كمية غير صالحة", "أدخل كمية أكبر من صفر.", parent=self)
+            messagebox.showwarning("ÙƒÙ…ÙŠØ© ØºÙŠØ± ØµØ§Ù„Ø­Ø©", "Ø£Ø¯Ø®Ù„ ÙƒÙ…ÙŠØ© Ø£ÙƒØ¨Ø± Ù…Ù† ØµÙØ±.", parent=self)
             return
 
         price_txt = (self._defined_price_var.get() or "").strip()
         price = None
-        if price_txt and price_txt != "غير معروف":
+        if price_txt and price_txt != "ØºÙŠØ± Ù…Ø¹Ø±ÙˆÙ":
             try:
-                price = float(price_txt)
+                price = parse_float_text(price_txt)
             except Exception:
                 price = None
 
@@ -6357,7 +7880,7 @@ class IncomeFrame(ttk.Frame):
                 has_badge=1 if self._defined_has_badge.get() else 0,
             )
         except Exception as ex:
-            messagebox.showerror("فشل الإضافة", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø¥Ø¶Ø§ÙØ©", str(ex), parent=self)
             return
 
         self._defined_qty_var.set("1")
@@ -6367,7 +7890,7 @@ class IncomeFrame(ttk.Frame):
         self._defined_render_sizes()
         if self._defined_size:
             self._defined_select_size(self._defined_size)
-        show_toast(self, "تمت إضافة الكمية بنجاح")
+        show_toast(self, "ØªÙ…Øª Ø¥Ø¶Ø§ÙØ© Ø§Ù„ÙƒÙ…ÙŠØ© Ø¨Ù†Ø¬Ø§Ø­")
 
     def _income_constraints(self, exclude_field: str) -> dict:
         """Build a constraints dict from the other two spec fields (for cascading)."""
@@ -6391,17 +7914,16 @@ class IncomeFrame(ttk.Frame):
         it = (self.item_type.get() or "").strip()
         sc = (self.school.get() or "").strip()
         cl = (self.color.get() or "").strip()
-        # Validate each value against the other two
-        if it:
-            valid = self.db.get_distinct_filtered("item_type", self._income_constraints("item_type"))
-            if it not in valid:
-                self.item_type.set("")
+        # Type can be new, so do not clear it just because no stock rows match yet.
         if sc:
-            valid = self.db.get_distinct_filtered("school", self._income_constraints("school"))
+            valid = self.db.get_distinct("school")
             if sc not in valid:
                 self.school.set("")
         if cl:
-            valid = self.db.get_distinct_filtered("color", self._income_constraints("color"))
+            valid = self.db.get_distinct_filtered(
+                "color",
+                {"school": sc} if sc else {},
+            )
             if cl not in valid:
                 self.color.set("")
         # Refresh all combo dropdown lists
@@ -6414,12 +7936,72 @@ class IncomeFrame(ttk.Frame):
         self._income_r2.set("")
         self._income_has_alpha.set(False)
 
+    def _refresh_price_profile_combo(
+        self,
+        combo: Optional[ttk.Combobox],
+        value_var: tk.StringVar,
+        target_map: Dict[str, int],
+        preferred_profile_id: Optional[int] = None,
+    ) -> None:
+        target_map.clear()
+        values = [""]
+        for profile in self.db.list_price_profiles():
+            label = str(profile.get("name") or "").strip()
+            if not label:
+                continue
+            target_map[label] = int(profile["id"])
+            values.append(label)
+        if combo is not None:
+            combo.configure(values=values)
+
+        selected_label = ""
+        if preferred_profile_id:
+            for label, pid in target_map.items():
+                if pid == int(preferred_profile_id):
+                    selected_label = label
+                    break
+        elif (value_var.get() or "").strip() in target_map:
+            selected_label = (value_var.get() or "").strip()
+        value_var.set(selected_label)
+
+    def _selected_income_price_profile_id(self) -> Optional[int]:
+        return self._income_price_profile_map.get((self._income_price_profile_var.get() or "").strip())
+
+    def _selected_defined_price_profile_id(self) -> Optional[int]:
+        return self._defined_price_profile_map.get((self._defined_price_profile_var.get() or "").strip())
+
+    def _sync_income_price_profile_from_specs(self) -> None:
+        preferred_profile_id = self.db.resolve_price_profile_id(
+            (self.item_type.get() or "").strip(),
+            (self.school.get() or "").strip(),
+            (self.color.get() or "").strip(),
+        )
+        self._refresh_price_profile_combo(
+            self._income_price_profile_combo,
+            self._income_price_profile_var,
+            self._income_price_profile_map,
+            preferred_profile_id=preferred_profile_id,
+        )
+
+    def _sync_defined_price_profile_from_specs(self) -> None:
+        preferred_profile_id = self.db.resolve_price_profile_id(
+            self._defined_item_type or "",
+            self._defined_school or "",
+            self._defined_color or "",
+        )
+        self._refresh_price_profile_combo(
+            self._defined_price_profile_combo,
+            self._defined_price_profile_var,
+            self._defined_price_profile_map,
+            preferred_profile_id=preferred_profile_id,
+        )
+
     def _current_income_profile_values(self) -> Tuple[Optional[int], Optional[int], Optional[int], Optional[int], bool]:
         def _parse_range_label(v: str) -> Tuple[Optional[int], Optional[int]]:
             v = (v or "").strip()
             if not v:
                 return None, None
-            a, b = v.split("→")
+            a, b = v.split("â†’")
             return int(a.strip()), int(b.strip())
 
         r1s, r1e = _parse_range_label(self._income_r1.get())
@@ -6438,7 +8020,7 @@ class IncomeFrame(ttk.Frame):
             r1s, r1e, r2s, r2e, has_alpha = profile
             # Set range 1
             if r1s is not None and r1e is not None:
-                label1 = f"{r1s} → {r1e}"
+                label1 = f"{r1s} â†’ {r1e}"
                 if label1 in NUMERIC_RANGE_LABELS:
                     self._income_r1.set(label1)
                 else:
@@ -6447,7 +8029,7 @@ class IncomeFrame(ttk.Frame):
                 self._income_r1.set(DEFAULT_NUMERIC_SIZE_RANGE_LABEL)
             # Set range 2
             if r2s is not None and r2e is not None:
-                label2 = f"{r2s} → {r2e}"
+                label2 = f"{r2s} â†’ {r2e}"
                 if label2 in NUMERIC_RANGE_LABELS:
                     self._income_r2.set(label2)
                 else:
@@ -6470,7 +8052,7 @@ class IncomeFrame(ttk.Frame):
         def _parse_range(label: str):
             if not label:
                 return None
-            a, b = label.split("→")
+            a, b = label.split("â†’")
             return int(a.strip()), int(b.strip())
 
         r1 = _parse_range(self._income_r1.get())
@@ -6495,8 +8077,8 @@ class IncomeFrame(ttk.Frame):
 
 
 
-    def _auto_fill_price_for_grid(self):
-        """Fill empty price cells in the sizes grid from last known prices."""
+    def _auto_fill_price_for_grid(self, force: bool = False):
+        """Fill empty price cells from profile first, then historical/default prices."""
         if not self.sizes_grid:
             return
         it = (self.item_type.get() or "").strip()
@@ -6505,19 +8087,30 @@ class IncomeFrame(ttk.Frame):
         if not (it and sc and cl):
             return
         try:
-            # Query per-size prices for each size in the grid
+            preferred_profile_id = self._selected_income_price_profile_id()
             found_any = False
             for sz in self.sizes_grid.fixed_sizes:
-                p = self.db.last_price_for_specs(it, sc, cl, sz)
+                p = self.db.get_effective_price(
+                    it,
+                    sc,
+                    cl,
+                    sz,
+                    preferred_profile_id=preferred_profile_id,
+                )
                 if p is not None:
-                    self.sizes_grid.set_price_for_size(sz, p)
+                    self.sizes_grid.set_price_for_size(sz, p, force=force)
                     found_any = True
-            # If no per-size prices found, try the first size as a fallback for all
             if not found_any and self.sizes_grid.fixed_sizes:
                 first = self.sizes_grid.fixed_sizes[0]
-                p = self.db.last_price_for_specs(it, sc, cl, first)
+                p = self.db.get_effective_price(
+                    it,
+                    sc,
+                    cl,
+                    first,
+                    preferred_profile_id=preferred_profile_id,
+                )
                 if p is not None:
-                    self.sizes_grid.set_price_for_all(p)
+                    self.sizes_grid.set_price_for_all(p, force=force)
         except Exception:
             pass
 
@@ -6527,7 +8120,9 @@ class IncomeFrame(ttk.Frame):
         if not s:
             return None
         try:
-            v = int(s)
+            v = parse_int_text(s)
+            if v is None:
+                return None
             return v
         except Exception:
             return None
@@ -6535,7 +8130,7 @@ class IncomeFrame(ttk.Frame):
     def _refresh_pkg_hints(self):
         w = self._parse_int_or_none(self.wh.get())
         if not w or w < 1:
-            self.pkg_hint_var.set("أدخل رقم المخزن أولاً.")
+            self.pkg_hint_var.set("Ø£Ø¯Ø®Ù„ Ø±Ù‚Ù… Ø§Ù„Ù…Ø®Ø²Ù† Ø£ÙˆÙ„Ø§Ù‹.")
             return
         try:
             info = self.db.package_numbers_summary(w)
@@ -6543,13 +8138,13 @@ class IncomeFrame(ttk.Frame):
             self.pkg_hint_var.set(str(ex))
             return
         if info["free"]:
-            free_txt = "، ".join(map(str, info["free"][:20]))
-            more = "" if len(info["free"]) <= 20 else " …"
-            hint = f"الأرقام المتاحة (فارغة): {free_txt}{more}"
+            free_txt = "ØŒ ".join(map(str, info["free"][:20]))
+            more = "" if len(info["free"]) <= 20 else " â€¦"
+            hint = f"Ø§Ù„Ø£Ø±Ù‚Ø§Ù… Ø§Ù„Ù…ØªØ§Ø­Ø© (ÙØ§Ø±ØºØ©): {free_txt}{more}"
         else:
-            hint = f"لا توجد فراغات. الرقم التالي: {info['next']}"
+            hint = f"Ù„Ø§ ØªÙˆØ¬Ø¯ ÙØ±Ø§ØºØ§Øª. Ø§Ù„Ø±Ù‚Ù… Ø§Ù„ØªØ§Ù„ÙŠ: {info['next']}"
         if info.get("open"):
-            hint += f" | حاويات مفتوحة: {', '.join(map(str, info['open'][:20]))}"
+            hint += f" | Ø­Ø§ÙˆÙŠØ§Øª Ù…ÙØªÙˆØ­Ø©: {', '.join(map(str, info['open'][:20]))}"
         self.pkg_hint_var.set(hint)
         self._refresh_pkg_status()
 
@@ -6562,7 +8157,7 @@ class IncomeFrame(ttk.Frame):
             return
         status = self.db.package_status(w, p)
         if status is None:
-            self.pkg_status_var.set("غير موجودة (سيتم فتحها تلقائياً عند أول إضافة)")
+            self.pkg_status_var.set("ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯Ø© (Ø³ÙŠØªÙ… ÙØªØ­Ù‡Ø§ ØªÙ„Ù‚Ø§Ø¦ÙŠØ§Ù‹ Ø¹Ù†Ø¯ Ø£ÙˆÙ„ Ø¥Ø¶Ø§ÙØ©)")
         elif status == "OPEN":
             self.pkg_status_var.set("OPEN")
         else:
@@ -6581,13 +8176,13 @@ class IncomeFrame(ttk.Frame):
         w = self._parse_int_or_none(self.wh.get())
         p = self._parse_int_or_none(self.pkg.get())
         if not (w and p):
-            messagebox.showwarning("بيانات ناقصة", "أدخل رقم المخزن والعبوة أولاً.")
+            messagebox.showwarning("Ø¨ÙŠØ§Ù†Ø§Øª Ù†Ø§Ù‚ØµØ©", "Ø£Ø¯Ø®Ù„ Ø±Ù‚Ù… Ø§Ù„Ù…Ø®Ø²Ù† ÙˆØ§Ù„Ø¹Ø¨ÙˆØ© Ø£ÙˆÙ„Ø§Ù‹.")
             return
-        if not messagebox.askyesno("تأكيد", f"إغلاق العبوة {p} في المخزن {w} ؟\nلن يُسمح بأي إضافات لاحقاً."):
+        if not messagebox.askyesno("ØªØ£ÙƒÙŠØ¯", f"Ø¥ØºÙ„Ø§Ù‚ Ø§Ù„Ø¹Ø¨ÙˆØ© {p} ÙÙŠ Ø§Ù„Ù…Ø®Ø²Ù† {w} ØŸ\nÙ„Ù† ÙŠÙØ³Ù…Ø­ Ø¨Ø£ÙŠ Ø¥Ø¶Ø§ÙØ§Øª Ù„Ø§Ø­Ù‚Ø§Ù‹."):
             return
         try:
             self.db.close_package(w, p)
-            show_toast(self, "تم إغلاق العبوة بنجاح")
+            show_toast(self, "ØªÙ… Ø¥ØºÙ„Ø§Ù‚ Ø§Ù„Ø¹Ø¨ÙˆØ© Ø¨Ù†Ø¬Ø§Ø­")
             self._on_reset_keep_pkg()
             self._refresh_pkg_hints()
             try:
@@ -6595,7 +8190,7 @@ class IncomeFrame(ttk.Frame):
             except Exception:
                 pass
         except Exception as ex:
-            messagebox.showerror("خطأ", str(ex))
+            messagebox.showerror("Ø®Ø·Ø£", str(ex))
 
     def _on_reset_keep_pkg(self):
         for w in (self.item_type, self.school, self.color):
@@ -6630,21 +8225,21 @@ class IncomeFrame(ttk.Frame):
         w = self._parse_int_or_none(self.wh.get())
         p = self._parse_int_or_none(self.pkg.get())
         if not (w and p and w >= 1 and p >= 1):
-            messagebox.showerror("بيانات ناقصة", "أدخل رقم المخزن والعبوة بشكل صحيح (>= 1).")
+            messagebox.showerror("Ø¨ÙŠØ§Ù†Ø§Øª Ù†Ø§Ù‚ØµØ©", "Ø£Ø¯Ø®Ù„ Ø±Ù‚Ù… Ø§Ù„Ù…Ø®Ø²Ù† ÙˆØ§Ù„Ø¹Ø¨ÙˆØ© Ø¨Ø´ÙƒÙ„ ØµØ­ÙŠØ­ (>= 1).")
             return
         try:
-            item_type = self.item_type.get() or self._err("النوع مطلوب")
-            school = self.school.get() or self._err("المدرسة مطلوبة")
-            color = self.color.get() or self._err("اللون مطلوب")
+            item_type = self.item_type.get() or self._err("Ø§Ù„Ù†ÙˆØ¹ Ù…Ø·Ù„ÙˆØ¨")
+            school = self.school.get() or self._err("Ø§Ù„Ù…Ø¯Ø±Ø³Ø© Ù…Ø·Ù„ÙˆØ¨Ø©")
+            color = self.color.get() or self._err("Ø§Ù„Ù„ÙˆÙ† Ù…Ø·Ù„ÙˆØ¨")
         except RuntimeError as ex:
-            messagebox.showerror("بيانات ناقصة", str(ex))
+            messagebox.showerror("Ø¨ÙŠØ§Ù†Ø§Øª Ù†Ø§Ù‚ØµØ©", str(ex))
             return
 
         rows = self.sizes_grid.get_rows()
         # keep only rows with qty > 0
         rows = [r for r in rows if int(r.get("qty") or 0) > 0]
         if not rows:
-            messagebox.showwarning("فارغ", "لم تُدخل أي كميات في شبكة المقاسات.", parent=self)
+            messagebox.showwarning("ÙØ§Ø±Øº", "Ù„Ù… ØªÙØ¯Ø®Ù„ Ø£ÙŠ ÙƒÙ…ÙŠØ§Øª ÙÙŠ Ø´Ø¨ÙƒØ© Ø§Ù„Ù…Ù‚Ø§Ø³Ø§Øª.", parent=self)
             return
 
         try:
@@ -6660,28 +8255,35 @@ class IncomeFrame(ttk.Frame):
                 has_alpha=has_alpha,
             )
         except Exception as ex:
-            messagebox.showerror("فشل حفظ المقاسات", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø­ÙØ¸ Ø§Ù„Ù…Ù‚Ø§Ø³Ø§Øª", str(ex), parent=self)
             return
 
         # ensure package open
         try:
             self.db.ensure_package_open(w, p)
         except Exception as ex:
-            messagebox.showerror("فشل الإضافة", str(ex))
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø¥Ø¶Ø§ÙØ©", str(ex))
             return
 
         added = 0
         errors: List[str] = []
+        preferred_profile_id = self._selected_income_price_profile_id()
         for r in rows:
             size = str(r["size"]).strip()
             qty = int(r["qty"])
             price = r["price"]
 
             if price is None:
-                price = self.db.get_effective_price(item_type, school, color, size)
+                price = self.db.get_effective_price(
+                    item_type,
+                    school,
+                    color,
+                    size,
+                    preferred_profile_id=preferred_profile_id,
+                )
 
             if price is None:
-                errors.append(f"{size}: السعر غير معروف (أدخله مرة واحدة على الأقل).")
+                errors.append(f"{size}: Ø§Ù„Ø³Ø¹Ø± ØºÙŠØ± Ù…Ø¹Ø±ÙˆÙ (Ø£Ø¯Ø®Ù„Ù‡ Ù…Ø±Ø© ÙˆØ§Ø­Ø¯Ø© Ø¹Ù„Ù‰ Ø§Ù„Ø£Ù‚Ù„).")
                 continue
 
             try:
@@ -6706,11 +8308,11 @@ class IncomeFrame(ttk.Frame):
 
         msg_parts = []
         if added:
-            msg_parts.append(f"تمت إضافة {added} صفًا للمخزون.")
+            msg_parts.append(f"ØªÙ…Øª Ø¥Ø¶Ø§ÙØ© {added} ØµÙÙ‹Ø§ Ù„Ù„Ù…Ø®Ø²ÙˆÙ†.")
         if errors:
-            msg_parts.append("أخطاء:\n" + "\n".join(errors))
+            msg_parts.append("Ø£Ø®Ø·Ø§Ø¡:\n" + "\n".join(errors))
         if not msg_parts:
-            show_toast(self, "لم تُجر أي تغييرات", bg="#f59e0b")
+            show_toast(self, "Ù„Ù… ØªÙØ¬Ø± Ø£ÙŠ ØªØºÙŠÙŠØ±Ø§Øª", bg="#f59e0b")
         else:
             show_toast(self, "\n".join(msg_parts), duration=3500)
 
@@ -6827,10 +8429,10 @@ class OutcomeFrame(ttk.Frame):
         qf_inner.pack(fill=tk.X, padx=8, pady=6)
 
         for _, (label_text, attr, width) in enumerate([
-            ("المخزن", "_filter_warehouse", 14),
-            ("المدرسة", "_filter_school", 18),
-            ("النوع", "_filter_type", 16),
-            ("اللون", "_filter_color", 12),
+            ("Ø§Ù„Ù…Ø®Ø²Ù†", "_filter_warehouse", 14),
+            ("Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", "_filter_school", 18),
+            ("Ø§Ù„Ù†ÙˆØ¹", "_filter_type", 16),
+            ("Ø§Ù„Ù„ÙˆÙ†", "_filter_color", 12),
         ]):
             pill = tk.Frame(qf_inner, bg=_UI["SURFACE2"])
             pill.pack(side=tk.RIGHT, padx=6)
@@ -6844,10 +8446,10 @@ class OutcomeFrame(ttk.Frame):
             child.destroy()
 
         filter_specs = [
-            ("المخزن", "_filter_warehouse", "warehouse_no", 14),
-            ("المدرسة", "_filter_school", "school", 18),
-            ("النوع", "_filter_type", "item_type", 16),
-            ("اللون", "_filter_color", "color", 12),
+            ("Ø§Ù„Ù…Ø®Ø²Ù†", "_filter_warehouse", "warehouse_no", 14),
+            ("Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", "_filter_school", "school", 18),
+            ("Ø§Ù„Ù†ÙˆØ¹", "_filter_type", "item_type", 16),
+            ("Ø§Ù„Ù„ÙˆÙ†", "_filter_color", "color", 12),
         ]
         for label_text, attr, field, width in filter_specs:
             pill = tk.Frame(qf_inner, bg=_UI["SURFACE2"])
@@ -6867,7 +8469,7 @@ class OutcomeFrame(ttk.Frame):
             lambda: self.db.get_distinct_filtered("color", self._outcome_filter_constraints("color")) or []
         )
 
-        clear_f = tk.Button(qf_inner, text="مسح", command=self._clear_quick_filters,
+        clear_f = tk.Button(qf_inner, text="Ù…Ø³Ø­", command=self._clear_quick_filters,
                             bg=_UI["SURFACE"], fg=_UI["TEXT_SEC"], font=_FONTS["small"],
                             bd=0, padx=12, pady=3, cursor="hand2",
                             highlightbackground=_UI["BORDER"], highlightthickness=1,
@@ -6896,7 +8498,7 @@ class OutcomeFrame(ttk.Frame):
         # -- Breadcrumb --
         crumb = tk.Frame(left, bg=_UI["BG"])
         crumb.pack(fill=tk.X, padx=14, pady=(4, 2))
-        self._crumb_var = tk.StringVar(value="اختر المدرسة")
+        self._crumb_var = tk.StringVar(value="Ø§Ø®ØªØ± Ø§Ù„Ù…Ø¯Ø±Ø³Ø©")
         tk.Label(crumb, textvariable=self._crumb_var, bg=_UI["BG"], fg=_UI["TEXT"],
                  font=_FONTS["h3"]).pack(anchor="w")
 
@@ -6963,7 +8565,7 @@ class OutcomeFrame(ttk.Frame):
         self._grid_host.bind("<MouseWheel>", _mw)
 
         # -- Favorites bar --
-        self._fav_frame = ttk.LabelFrame(left, text="الأكثر مبيعاً")
+        self._fav_frame = ttk.LabelFrame(left, text="Ø§Ù„Ø£ÙƒØ«Ø± Ù…Ø¨ÙŠØ¹Ø§Ù‹")
         self._fav_frame.pack(fill=tk.X, padx=12, pady=(0, 4))
         self._fav_inner = ttk.Frame(self._fav_frame)
         self._fav_inner.pack(fill=tk.X, padx=4, pady=4)
@@ -6977,11 +8579,11 @@ class OutcomeFrame(ttk.Frame):
         act_inner.pack(fill=tk.X, padx=10, pady=8)
 
         # Quantity
-        tk.Label(act_inner, text="الكمية:", bg=_UI["SURFACE"], fg=_UI["TEXT_SEC"],
+        tk.Label(act_inner, text="Ø§Ù„ÙƒÙ…ÙŠØ©:", bg=_UI["SURFACE"], fg=_UI["TEXT_SEC"],
                  font=_FONTS["small"]).pack(side=tk.LEFT, padx=(0, 4))
         self.qty_var = tk.StringVar(value="1")
         _qm = tk.Button(act_inner, text="-",
-                         command=lambda: self.qty_var.set(str(max(1, int(self.qty_var.get() or 1) - 1))),
+                         command=lambda: self.qty_var.set(str(max(1, (parse_int_text(self.qty_var.get(), 1) or 1) - 1))),
                          bg=_UI["SURFACE"], fg=_UI["TEXT"], font=("Segoe UI", 11, "bold"),
                          bd=0, width=3, cursor="hand2",
                          highlightbackground=_UI["BORDER"], highlightthickness=1,
@@ -6991,7 +8593,7 @@ class OutcomeFrame(ttk.Frame):
         ttk.Entry(act_inner, textvariable=self.qty_var, width=5, justify="center",
                   font=_FONTS["body"]).pack(side=tk.LEFT, padx=2)
         _qp = tk.Button(act_inner, text="+",
-                         command=lambda: self.qty_var.set(str(int(self.qty_var.get() or 1) + 1)),
+                         command=lambda: self.qty_var.set(str((parse_int_text(self.qty_var.get(), 1) or 1) + 1)),
                          bg=_UI["SURFACE"], fg=_UI["TEXT"], font=("Segoe UI", 11, "bold"),
                          bd=0, width=3, cursor="hand2",
                          highlightbackground=_UI["BORDER"], highlightthickness=1,
@@ -7000,7 +8602,7 @@ class OutcomeFrame(ttk.Frame):
         _add_hover(_qp, _UI["SURFACE2"], _UI["SURFACE"])
 
         # Price
-        tk.Label(act_inner, text="السعر:", bg=_UI["SURFACE"], fg=_UI["TEXT_SEC"],
+        tk.Label(act_inner, text="Ø§Ù„Ø³Ø¹Ø±:", bg=_UI["SURFACE"], fg=_UI["TEXT_SEC"],
                  font=_FONTS["small"]).pack(side=tk.LEFT, padx=(0, 4))
         self.price_var = tk.StringVar(value="")
         self._price_entry = ttk.Entry(act_inner, textvariable=self.price_var, width=10,
@@ -7012,10 +8614,10 @@ class OutcomeFrame(ttk.Frame):
 
         # Factory checkbox
         self.instant_mode = tk.BooleanVar(value=False)
-        ttk.Checkbutton(act_inner, text="من المصنع", variable=self.instant_mode).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Checkbutton(act_inner, text="Ù…Ù† Ø§Ù„Ù…ØµÙ†Ø¹", variable=self.instant_mode).pack(side=tk.LEFT, padx=(0, 8))
 
         # Add to bill button (brand blue)
-        _add_btn = tk.Button(act_inner, text="أضف إلى الفاتورة", command=self._add_current_selection,
+        _add_btn = tk.Button(act_inner, text="Ø£Ø¶Ù Ø¥Ù„Ù‰ Ø§Ù„ÙØ§ØªÙˆØ±Ø©", command=self._add_current_selection,
                              bg=_UI["BRAND"], fg="#FFFFFF", font=_FONTS["btn_md"],
                              bd=0, padx=20, pady=8, cursor="hand2",
                              activebackground=_UI["BRAND_H"], activeforeground="#FFFFFF")
@@ -7041,12 +8643,12 @@ class OutcomeFrame(ttk.Frame):
         # -- Customer --
         cust_frame = tk.Frame(right, bg=_UI["SURFACE"])
         cust_frame.pack(fill=tk.X, padx=10, pady=(10, 6))
-        tk.Label(cust_frame, text="العميل:", bg=_UI["SURFACE"], fg=_UI["TEXT_SEC"],
+        tk.Label(cust_frame, text="Ø§Ù„Ø¹Ù…ÙŠÙ„:", bg=_UI["SURFACE"], fg=_UI["TEXT_SEC"],
                  font=_FONTS["body"]).pack(side=tk.RIGHT, padx=(4, 0))
         self.customer = LabeledCombobox(cust_frame, "", self.db, "item_type")
 
         def _customer_supplier():
-            # Branch POS devices appear at the top with a "فرع: " prefix
+            # Branch POS devices appear at the top with a "ÙØ±Ø¹: " prefix
             # so the user can tell a shipment bill apart from a sale
             # bill at a glance. Picking one routes the bill through
             # Phase-3 STOCK_TRANSFER_OUT on save.
@@ -7098,9 +8700,9 @@ class OutcomeFrame(ttk.Frame):
             show="headings", height=12,
         )
         for col, txt, w in [
-            ("type", "النوع", 100), ("school", "المدرسة", 100), ("color", "اللون", 70),
-            ("size", "المقاس", 55), ("price", "السعر", 65), ("qty", "الكمية", 50),
-            ("total", "الإجمالي", 75),
+            ("type", "Ø§Ù„Ù†ÙˆØ¹", 100), ("school", "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", 100), ("color", "Ø§Ù„Ù„ÙˆÙ†", 70),
+            ("size", "Ø§Ù„Ù…Ù‚Ø§Ø³", 55), ("price", "Ø§Ù„Ø³Ø¹Ø±", 65), ("qty", "Ø§Ù„ÙƒÙ…ÙŠØ©", 50),
+            ("total", "Ø§Ù„Ø¥Ø¬Ù…Ø§Ù„ÙŠ", 75),
         ]:
             self.bill_table.heading(col, text=txt)
             self.bill_table.column(col, width=w, anchor="center")
@@ -7128,7 +8730,7 @@ class OutcomeFrame(ttk.Frame):
         _bp.pack(side=tk.LEFT, padx=(2, 12))
         _add_hover(_bp, _UI["SURFACE2"], _UI["SURFACE"])
 
-        _del = tk.Button(bar, text="حذف السطر", command=self._remove_bill_line,
+        _del = tk.Button(bar, text="Ø­Ø°Ù Ø§Ù„Ø³Ø·Ø±", command=self._remove_bill_line,
                          bg=_UI["SURFACE"], fg=_UI["DANGER"], font=("Segoe UI", 9, "bold"),
                          bd=0, padx=12, pady=4, cursor="hand2",
                          highlightbackground=_UI["DANGER_L"], highlightthickness=1,
@@ -7136,7 +8738,7 @@ class OutcomeFrame(ttk.Frame):
         _del.pack(side=tk.LEFT, padx=(0, 4))
         _add_hover(_del, _UI["DANGER_L"], _UI["SURFACE"])
 
-        _clr = tk.Button(bar, text="تفريغ", command=self._clear_bill,
+        _clr = tk.Button(bar, text="ØªÙØ±ÙŠØº", command=self._clear_bill,
                          bg=_UI["SURFACE"], fg=_UI["WARN"], font=("Segoe UI", 9, "bold"),
                          bd=0, padx=12, pady=4, cursor="hand2",
                          highlightbackground=_UI["WARN_L"], highlightthickness=1,
@@ -7150,14 +8752,14 @@ class OutcomeFrame(ttk.Frame):
         total_card.pack(fill=tk.X, padx=10, pady=(0, 8))
         total_inner = tk.Frame(total_card, bg=_UI["OK_L"])
         total_inner.pack(fill=tk.X, padx=16, pady=12)
-        tk.Label(total_inner, text="الإجمالي", bg=_UI["OK_L"], fg="#065F46",
+        tk.Label(total_inner, text="Ø§Ù„Ø¥Ø¬Ù…Ø§Ù„ÙŠ", bg=_UI["OK_L"], fg="#065F46",
                  font=_FONTS["body"]).pack(side=tk.RIGHT, padx=(0, 12))
-        self.total_var = tk.StringVar(value="0.00")
+        self.total_var = tk.StringVar(value="0")
         tk.Label(total_inner, textvariable=self.total_var, bg=_UI["OK_L"], fg="#065F46",
                  font=_FONTS["price"]).pack(side=tk.RIGHT)
 
         # -- Confirm button (full width, premium green) --
-        _conf = tk.Button(right, text="تأكيد الفاتورة / الحجز  (F8)", command=self._finalize_bill,
+        _conf = tk.Button(right, text="ØªØ£ÙƒÙŠØ¯ Ø§Ù„ÙØ§ØªÙˆØ±Ø© / Ø§Ù„Ø­Ø¬Ø²  (F8)", command=self._finalize_bill,
                           bg=_UI["OK"], fg="white", font=_FONTS["btn_lg"],
                           bd=0, pady=14, cursor="hand2",
                           activebackground=_UI["OK_H"], activeforeground="white")
@@ -7165,7 +8767,7 @@ class OutcomeFrame(ttk.Frame):
         _add_hover(_conf, _UI["OK_H"], _UI["OK"])
 
         # Draft button
-        ttk.Button(right, text="حفظ كمسودة", command=self._save_as_draft)\
+        ttk.Button(right, text="Ø­ÙØ¸ ÙƒÙ…Ø³ÙˆØ¯Ø©", command=self._save_as_draft)\
             .pack(fill=tk.X, padx=10, pady=(0, 8))
 
         # ---- initial stage: show SCHOOLS first ----
@@ -7195,7 +8797,7 @@ class OutcomeFrame(ttk.Frame):
     def _mk_grid_buttons(self, labels: List[str], on_click, *, cols: int = 5):
         """Create a grid of product-tile buttons inside the scrollable host."""
         if not labels:
-            tk.Label(self._grid_host, text="لا توجد بيانات.", bg=_UI["BG"],
+            tk.Label(self._grid_host, text="Ù„Ø§ ØªÙˆØ¬Ø¯ Ø¨ÙŠØ§Ù†Ø§Øª.", bg=_UI["BG"],
                      fg=_UI["TEXT_DIM"], font=_FONTS["body"]).pack(pady=20)
             return
         row = None
@@ -7325,7 +8927,7 @@ class OutcomeFrame(ttk.Frame):
         self._sel_size = None
         self._price_user_edited = False
 
-        # Render: School → Item → Color → Size
+        # Render: School â†’ Item â†’ Color â†’ Size
         if school and item_type and color:
             self._render_sizes()
         elif school and item_type:
@@ -7365,9 +8967,9 @@ class OutcomeFrame(ttk.Frame):
         if not self._sel_item and not self._sel_color:
             self._sel_item = None
             self._sel_color = None
-            self._crumb_var.set("اختر المدرسة")
+            self._crumb_var.set("Ø§Ø®ØªØ± Ø§Ù„Ù…Ø¯Ø±Ø³Ø©")
         else:
-            self._crumb_var.set("اختر المدرسة (بعد تضييق النتائج)")
+            self._crumb_var.set("Ø§Ø®ØªØ± Ø§Ù„Ù…Ø¯Ø±Ø³Ø© (Ø¨Ø¹Ø¯ ØªØ¶ÙŠÙŠÙ‚ Ø§Ù„Ù†ØªØ§Ø¦Ø¬)")
         self._clear_grid()
         try:
             constraints: Dict[str, Any] = {}
@@ -7394,16 +8996,16 @@ class OutcomeFrame(ttk.Frame):
         self._sel_item = None
         self._sel_color = None
         self._sel_size = None
-        self._crumb_var.set(f"نتائج البحث — اختر المدرسة ({len(names)})")
+        self._crumb_var.set(f"Ù†ØªØ§Ø¦Ø¬ Ø§Ù„Ø¨Ø­Ø« â€” Ø§Ø®ØªØ± Ø§Ù„Ù…Ø¯Ø±Ø³Ø© ({len(names)})")
         self._clear_grid()
         if not names:
-            self._crumb_var.set("اختر المدرسة")
+            self._crumb_var.set("Ø§Ø®ØªØ± Ø§Ù„Ù…Ø¯Ø±Ø³Ø©")
             self._bind_grid_scroll()
             return
         self._mk_grid_buttons(names, self._select_school, cols=4)
         tk.Button(
             self._grid_host,
-            text="◀ عرض كل المدارس",
+            text="â—€ Ø¹Ø±Ø¶ ÙƒÙ„ Ø§Ù„Ù…Ø¯Ø§Ø±Ø³",
             command=self._render_schools,
             **self._BTN_GRAY,
         ).pack(anchor="w", padx=4, pady=4)
@@ -7440,12 +9042,12 @@ class OutcomeFrame(ttk.Frame):
                     self._sel_school = schools_for_item[0]
                     self._sync_filters_to_combos()
                     self._render_colors()
-                    show_toast(self, f"تم الانتقال إلى: {chosen_item} / {schools_for_item[0]}")
+                    show_toast(self, f"ØªÙ… Ø§Ù„Ø§Ù†ØªÙ‚Ø§Ù„ Ø¥Ù„Ù‰: {chosen_item} / {schools_for_item[0]}")
                 else:
                     self._sel_school = None
                     self._sync_filters_to_combos()
                     self._render_schools()
-                    show_toast(self, f"تم العثور على {chosen_item} في أكثر من مدرسة")
+                    show_toast(self, f"ØªÙ… Ø§Ù„Ø¹Ø«ÙˆØ± Ø¹Ù„Ù‰ {chosen_item} ÙÙŠ Ø£ÙƒØ«Ø± Ù…Ù† Ù…Ø¯Ø±Ø³Ø©")
                 return
         except Exception:
             pass
@@ -7459,11 +9061,11 @@ class OutcomeFrame(ttk.Frame):
             })
             matching_schools = [s for s in schools if q in (s or "").lower()]
             if not matching_schools:
-                show_toast(self, "لم يتم العثور على نتائج", bg="#dc2626")
+                show_toast(self, "Ù„Ù… ÙŠØªÙ… Ø§Ù„Ø¹Ø«ÙˆØ± Ø¹Ù„Ù‰ Ù†ØªØ§Ø¦Ø¬", bg="#dc2626")
                 return
             if len(matching_schools) == 1:
                 self._select_school(matching_schools[0])
-                show_toast(self, f"تم الانتقال إلى: {matching_schools[0]}")
+                show_toast(self, f"ØªÙ… Ø§Ù„Ø§Ù†ØªÙ‚Ø§Ù„ Ø¥Ù„Ù‰: {matching_schools[0]}")
                 return
             self._sel_school = None
             self._sel_item = None
@@ -7474,12 +9076,12 @@ class OutcomeFrame(ttk.Frame):
             self._render_school_search_results(matching_schools)
             show_toast(
                 self,
-                f"يوجد {len(matching_schools)} مدرسة مطابقة للبحث — اختر المدرسة من القائمة",
+                f"ÙŠÙˆØ¬Ø¯ {len(matching_schools)} Ù…Ø¯Ø±Ø³Ø© Ù…Ø·Ø§Ø¨Ù‚Ø© Ù„Ù„Ø¨Ø­Ø« â€” Ø§Ø®ØªØ± Ø§Ù„Ù…Ø¯Ø±Ø³Ø© Ù…Ù† Ø§Ù„Ù‚Ø§Ø¦Ù…Ø©",
             )
             return
         except Exception:
             pass
-        show_toast(self, "لم يتم العثور على نتائج", bg="#dc2626")
+        show_toast(self, "Ù„Ù… ÙŠØªÙ… Ø§Ù„Ø¹Ø«ÙˆØ± Ø¹Ù„Ù‰ Ù†ØªØ§Ø¦Ø¬", bg="#dc2626")
 
     def _refresh_favorites(self):
         """Show top 6 most sold item/school/color combos as quick-access buttons."""
@@ -7497,14 +9099,14 @@ class OutcomeFrame(ttk.Frame):
             rows = cur.fetchall()
             cur.close()
             if not rows:
-                ttk.Label(self._fav_inner, text="لا توجد بيانات بعد").pack(side=tk.LEFT)
+                ttk.Label(self._fav_inner, text="Ù„Ø§ ØªÙˆØ¬Ø¯ Ø¨ÙŠØ§Ù†Ø§Øª Ø¨Ø¹Ø¯").pack(side=tk.LEFT)
                 return
             for r in rows:
                 label = f"{r[0]} / {r[1]} / {r[2]}"
                 btn = ttk.Button(self._fav_inner, text=label,
                                  command=lambda it=r[0], sc=r[1], cl=r[2]: self._jump_to_favorite(it, sc, cl))
                 btn.pack(side=tk.RIGHT, padx=3, pady=2)
-                ToolTip(btn, f"الكمية المباعة: {r[3]}")
+                ToolTip(btn, f"Ø§Ù„ÙƒÙ…ÙŠØ© Ø§Ù„Ù…Ø¨Ø§Ø¹Ø©: {r[3]}")
         except Exception:
             pass
 
@@ -7516,7 +9118,7 @@ class OutcomeFrame(ttk.Frame):
         self._price_user_edited = False
         self._sync_filters_to_combos()
         self._render_sizes()
-        show_toast(self, f"تم التحديد: {item_type} / {school} / {color}")
+        show_toast(self, f"ØªÙ… Ø§Ù„ØªØ­Ø¯ÙŠØ¯: {item_type} / {school} / {color}")
 
     def _render_items(self):
         """Show item types for the selected school (or all if none selected)."""
@@ -7526,7 +9128,7 @@ class OutcomeFrame(ttk.Frame):
         self._clear_grid()
 
         if self._sel_school:
-            self._crumb_var.set(f"المدرسة: {self._sel_school}  ⟶  اختر النوع")
+            self._crumb_var.set(f"Ø§Ù„Ù…Ø¯Ø±Ø³Ø©: {self._sel_school}  âŸ¶  Ø§Ø®ØªØ± Ø§Ù„Ù†ÙˆØ¹")
             try:
                 items = sorted({
                     str(r.get("item_type") or "").strip()
@@ -7540,11 +9142,11 @@ class OutcomeFrame(ttk.Frame):
                 items = []
             self._mk_grid_buttons(items, self._select_item, cols=4)
             # Back to schools
-            tk.Button(self._grid_host, text="◀ رجوع إلى المدارس", command=self._render_schools,
+            tk.Button(self._grid_host, text="â—€ Ø±Ø¬ÙˆØ¹ Ø¥Ù„Ù‰ Ø§Ù„Ù…Ø¯Ø§Ø±Ø³", command=self._render_schools,
                       **self._BTN_GRAY).pack(anchor="w", padx=4, pady=4)
             self._bind_grid_scroll()
         else:
-            self._crumb_var.set("اختر النوع")
+            self._crumb_var.set("Ø§Ø®ØªØ± Ø§Ù„Ù†ÙˆØ¹")
             try:
                 items = sorted({
                     r["item_type"]
@@ -7576,7 +9178,7 @@ class OutcomeFrame(ttk.Frame):
     def _render_colors(self):
         self._sel_color = None
         self._sel_size = None
-        self._crumb_var.set(f"{self._sel_school}  ⟶  {self._sel_item}  ⟶  اختر اللون")
+        self._crumb_var.set(f"{self._sel_school}  âŸ¶  {self._sel_item}  âŸ¶  Ø§Ø®ØªØ± Ø§Ù„Ù„ÙˆÙ†")
         self._clear_grid()
         rows = self.db.current_inventory({
             "warehouse_no": self._sel_warehouse_no,
@@ -7586,7 +9188,7 @@ class OutcomeFrame(ttk.Frame):
         colors = sorted({str(r.get("color") or "").strip() for r in rows if str(r.get("color") or "").strip()})
         self._mk_grid_buttons(colors, self._select_color, cols=4)
         # Back to items
-        tk.Button(self._grid_host, text="◀ رجوع إلى الأنواع", command=self._render_items,
+        tk.Button(self._grid_host, text="â—€ Ø±Ø¬ÙˆØ¹ Ø¥Ù„Ù‰ Ø§Ù„Ø£Ù†ÙˆØ§Ø¹", command=self._render_items,
                   **self._BTN_GRAY).pack(anchor="w", padx=4, pady=4)
         self._bind_grid_scroll()
 
@@ -7601,7 +9203,7 @@ class OutcomeFrame(ttk.Frame):
         return (a or "").strip().casefold() == (b or "").strip().casefold()
 
     def _pending_stock_out_qty(self, school: str, item: str, color: str, size: str) -> int:
-        """Qty already on the draft bill that will deduct warehouse stock (excludes مصنع مباشر lines)."""
+        """Qty already on the draft bill that will deduct warehouse stock (excludes Ù…ØµÙ†Ø¹ Ù…Ø¨Ø§Ø´Ø± lines)."""
         total = 0
         for ln in self.bill_lines:
             if bool(ln.get("allow_factory_fill")):
@@ -7630,7 +9232,7 @@ class OutcomeFrame(ttk.Frame):
     def _render_sizes(self, preserve_size: Optional[str] = None):
         self._sel_size = None
         self._crumb_var.set(
-            f"{self._sel_school}  ⟶  {self._sel_item}  ⟶  {self._sel_color}  ⟶  اختر المقاس"
+            f"{self._sel_school}  âŸ¶  {self._sel_item}  âŸ¶  {self._sel_color}  âŸ¶  Ø§Ø®ØªØ± Ø§Ù„Ù…Ù‚Ø§Ø³"
         )
         self._clear_grid()
 
@@ -7639,6 +9241,7 @@ class OutcomeFrame(ttk.Frame):
             self._sel_school or "",
             self._sel_item or "",
             self._sel_color or "",
+            self._sel_warehouse_no,
         )
 
         # Build cache with counts/prices if stock exists
@@ -7707,15 +9310,19 @@ class OutcomeFrame(ttk.Frame):
 
             # Double-click: quick add +1 to bill
             btn.bind("<Double-1>", lambda e, v=label, b=btn: self._on_size_double_click(v, b))
-            ToolTip(btn, f"نقر: اختيار | نقر مزدوج: إضافة سريعة +1")
+            ToolTip(btn, f"Ù†Ù‚Ø±: Ø§Ø®ØªÙŠØ§Ø± | Ù†Ù‚Ø± Ù…Ø²Ø¯ÙˆØ¬: Ø¥Ø¶Ø§ÙØ© Ø³Ø±ÙŠØ¹Ø© +1")
 
             # save button reference
             self._size_btns[label] = (btn, (cnt == 0))  # second value tracks zero-count
 
 
         # Back link
-        tk.Button(self._grid_host, text="◀ رجوع إلى الألوان", command=self._render_colors,
-                  **self._BTN_GRAY).pack(anchor="w", padx=4, pady=4)
+        nav_row = tk.Frame(self._grid_host, bg=_UI["BG"])
+        nav_row.pack(anchor="w", padx=4, pady=4)
+        tk.Button(nav_row, text="â—€ Ø±Ø¬ÙˆØ¹ Ø¥Ù„Ù‰ Ø§Ù„Ø£Ù„ÙˆØ§Ù†", command=self._render_colors,
+                  **self._BTN_GRAY).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(nav_row, text="Add all to bill", command=self._add_all_visible_sizes_to_bill,
+                  **self._BTN_PRODUCT).pack(side=tk.LEFT)
 
         if preserve_size:
             psz = str(preserve_size).strip()
@@ -7750,7 +9357,7 @@ class OutcomeFrame(ttk.Frame):
         try:
             computed = self._compute_price_for_size(size)
             if computed is not None and not self._price_user_edited:
-                self.price_var.set(f"{float(computed):.2f}")
+                self.price_var.set(f"{format_money(float(computed))}")
                 self._price_user_edited = False
             else:
                 if not self._price_user_edited and computed is None:
@@ -7768,7 +9375,7 @@ class OutcomeFrame(ttk.Frame):
             self._add_current_selection()
             show_toast(self, f"+1 {self._sel_size}", duration=1200)
         else:
-            show_toast(self, "لا يوجد سعر محدد - اختر السعر أولاً", bg="#f59e0b", fg="#000")
+            show_toast(self, "Ù„Ø§ ÙŠÙˆØ¬Ø¯ Ø³Ø¹Ø± Ù…Ø­Ø¯Ø¯ - Ø§Ø®ØªØ± Ø§Ù„Ø³Ø¹Ø± Ø£ÙˆÙ„Ø§Ù‹", bg="#f59e0b", fg="#000")
 
     def _compute_price_for_size(self, target_size: str) -> Optional[float]:
 
@@ -7789,7 +9396,7 @@ class OutcomeFrame(ttk.Frame):
                     except Exception:
                         pass
 
-            # 1) exact match (history) — return as-is (preserve original value)
+            # 1) exact match (history) â€” return as-is (preserve original value)
             if target_size in known:
                 return float(known[target_size])
 
@@ -7826,7 +9433,7 @@ class OutcomeFrame(ttk.Frame):
             if points and target_size in index_of:
                 tgt_idx = index_of[target_size]
                 nearest = min(points, key=lambda ip: abs(ip[0] - tgt_idx))
-                # nearest price derived from history — treat as a calculated fallback and ceil to next 10
+                # nearest price derived from history â€” treat as a calculated fallback and ceil to next 10
                 return _ceil_to_next_10(nearest[1])
 
             # If points exist but target not indexable -> return the median known price (ceil to next 10)
@@ -7869,7 +9476,7 @@ class OutcomeFrame(ttk.Frame):
             computed = self._compute_price_for_size(size)
             # Respect manual user edits: if user edited the price we don't overwrite it.
             if computed is not None and not getattr(self, "_price_user_edited", False):
-                self.price_var.set(f"{float(computed):.2f}")
+                self.price_var.set(f"{format_money(float(computed))}")
                 # mark programmatic set as NOT user-edited
                 self._price_user_edited = False
             else:
@@ -7884,27 +9491,42 @@ class OutcomeFrame(ttk.Frame):
     def _add_current_selection(self):
         # validate selection path
         if not all([self._sel_school, self._sel_item, self._sel_color, self._sel_size]):
-            messagebox.showwarning("اختر أولًا", "اختر المدرسة ثم النوع ثم اللون ثم المقاس.")
+            messagebox.showwarning("Ø§Ø®ØªØ± Ø£ÙˆÙ„Ù‹Ø§", "Ø§Ø®ØªØ± Ø§Ù„Ù…Ø¯Ø±Ø³Ø© Ø«Ù… Ø§Ù„Ù†ÙˆØ¹ Ø«Ù… Ø§Ù„Ù„ÙˆÙ† Ø«Ù… Ø§Ù„Ù…Ù‚Ø§Ø³.")
             return
         # qty
         try:
-            qty = int((self.qty_var.get() or "0").strip())
+            qty = parse_int_text(self.qty_var.get(), 0) or 0
             if qty <= 0:
                 raise ValueError
         except Exception:
-            messagebox.showerror("كمية غير صالحة", "الكمية يجب أن تكون عددًا صحيحًا موجبًا.")
+            messagebox.showerror("ÙƒÙ…ÙŠØ© ØºÙŠØ± ØµØ§Ù„Ø­Ø©", "Ø§Ù„ÙƒÙ…ÙŠØ© ÙŠØ¬Ø¨ Ø£Ù† ØªÙƒÙˆÙ† Ø¹Ø¯Ø¯Ù‹Ø§ ØµØ­ÙŠØ­Ù‹Ø§ Ù…ÙˆØ¬Ø¨Ù‹Ø§.")
             return
         # price
         try:
-            price = float((self.price_var.get() or "").strip())
+            price = parse_float_text(self.price_var.get())
+            if price is None:
+                raise ValueError
             if price < 0:
                 raise ValueError
         except Exception:
-            messagebox.showerror("سعر غير صالح", "أدخل سعرًا رقميًا غير سالب.")
+            messagebox.showerror("Ø³Ø¹Ø± ØºÙŠØ± ØµØ§Ù„Ø­", "Ø£Ø¯Ø®Ù„ Ø³Ø¹Ø±Ù‹Ø§ Ø±Ù‚Ù…ÙŠÙ‹Ø§ ØºÙŠØ± Ø³Ø§Ù„Ø¨.")
             return
 
         user_set_flag = bool(getattr(self, "_price_user_edited", False))
         allow_factory = bool(self.instant_mode.get())
+        if allow_factory:
+            try:
+                customer_raw = (self.customer.get() or "").strip()
+                known_pos = set(self.db.list_known_pos_device_names() or [])
+                if canonical_branch_device_name(customer_raw, known_pos) or customer_raw in known_pos:
+                    messagebox.showwarning(
+                        "ØºÙŠØ± Ù…ØªØ§Ø­ Ù„Ù„Ø´Ø­Ù†",
+                        "Ù„Ø§ ÙŠÙ…ÙƒÙ† Ø¥Ø¶Ø§ÙØ© Ø¨Ù†Ø¯ Ù…Ù† Ø§Ù„Ù…ØµÙ†Ø¹ Ø¥Ù„Ù‰ Ø´Ø­Ù†Ø© ÙØ±Ø¹. Ø§Ø®ØªØ± ÙƒÙ…ÙŠØ© Ù…ØªØ§Ø­Ø© Ù…Ù† Ø§Ù„Ù…Ø®Ø²ÙˆÙ† Ø£ÙˆÙ„Ø§Ù‹.",
+                        parent=self,
+                    )
+                    return
+            except Exception:
+                pass
         line = {
             "item_type":  self._sel_item,
             "school":     self._sel_school,
@@ -7917,6 +9539,8 @@ class OutcomeFrame(ttk.Frame):
             "user_set_price": user_set_flag,
             # we'll also set warehouse_no/package_no below when uniquely determined
         }
+        if self._sel_warehouse_no is not None:
+            line["warehouse_no"] = int(self._sel_warehouse_no)
 
         # ---- NEW: prefill WH/PKG/BADGE when uniquely determined ----
         if allow_factory:
@@ -7931,6 +9555,7 @@ class OutcomeFrame(ttk.Frame):
                 "school":    self._sel_school,
                 "color":     self._sel_color,
                 "size":      self._sel_size,
+                "warehouse_no": self._sel_warehouse_no,
             })
             # restrict to rows that still have quantity
             cands = [r for r in cands if int(r.count) > 0]
@@ -7941,6 +9566,13 @@ class OutcomeFrame(ttk.Frame):
                 line["package_no"]   = int(p)
                 line["has_badge"]    = int(b)
             # else: multiple packages match; leave wh/pkg unset so the table shows blank
+
+            try:
+                self.db.validate_stock_available_for_bill_lines(self.bill_lines + [line])
+            except Exception as ex:
+                messagebox.showwarning("ÙƒÙ…ÙŠØ© ØºÙŠØ± Ù…ØªØ§Ø­Ø©", str(ex), parent=self)
+                self._refresh_size_grid_if_current(preserve_size=self._sel_size)
+                return
 
         # ---- UPDATED: merge rule also considers wh/pkg/badge (when present) ----
         def _same_line(x: dict) -> bool:
@@ -7974,11 +9606,86 @@ class OutcomeFrame(ttk.Frame):
         self._price_user_edited = False
         self._refresh_size_grid_if_current(preserve_size=self._sel_size)
 
+    def _add_all_visible_sizes_to_bill(self):
+        if not all([self._sel_school, self._sel_item, self._sel_color]):
+            messagebox.showwarning("Ø§Ø®ØªØ± Ø£ÙˆÙ„Ù‹Ø§", "Ø§Ø®ØªØ± Ø§Ù„Ù…Ø¯Ø±Ø³Ø© Ø«Ù… Ø§Ù„Ù†ÙˆØ¹ Ø«Ù… Ø§Ù„Ù„ÙˆÙ†.")
+            return
+        if not self._sizes_cache:
+            show_toast(self, "Ù„Ø§ ØªÙˆØ¬Ø¯ Ù…Ù‚Ø§Ø³Ø§Øª Ù„Ù„Ø¥Ø¶Ø§ÙØ©", bg="#f59e0b", fg="#000")
+            return
+
+        allow_factory = bool(self.instant_mode.get())
+        if allow_factory:
+            try:
+                customer_raw = (self.customer.get() or "").strip()
+                known_pos = set(self.db.list_known_pos_device_names() or [])
+                if canonical_branch_device_name(customer_raw, known_pos) or customer_raw in known_pos:
+                    messagebox.showwarning(
+                        "ØºÙŠØ± Ù…ØªØ§Ø­ Ù„Ù„Ø´Ø­Ù†",
+                        "Ù„Ø§ ÙŠÙ…ÙƒÙ† Ø¥Ø¶Ø§ÙØ© Ø¨Ù†ÙˆØ¯ Ù…Ù† Ø§Ù„Ù…ØµÙ†Ø¹ Ø¥Ù„Ù‰ Ø´Ø­Ù†Ø© ÙØ±Ø¹. Ø§Ø®ØªØ± ÙƒÙ…ÙŠØ§Øª Ù…ØªØ§Ø­Ø© Ù…Ù† Ø§Ù„Ù…Ø®Ø²ÙˆÙ† Ø£ÙˆÙ„Ø§Ù‹.",
+                        parent=self,
+                    )
+                    return
+            except Exception:
+                pass
+
+        try:
+            factory_qty = parse_int_text(self.qty_var.get(), 1) or 1
+            if factory_qty <= 0:
+                raise ValueError
+        except Exception:
+            messagebox.showerror("ÙƒÙ…ÙŠØ© ØºÙŠØ± ØµØ§Ù„Ø­Ø©", "Ø§Ù„ÙƒÙ…ÙŠØ© ÙŠØ¬Ø¨ Ø£Ù† ØªÙƒÙˆÙ† Ø¹Ø¯Ø¯Ù‹Ø§ ØµØ­ÙŠØ­Ù‹Ø§ Ù…ÙˆØ¬Ø¨Ù‹Ø§.", parent=self)
+            return
+
+        original_size = self._sel_size
+        added = 0
+        skipped_zero = 0
+        skipped_price = 0
+        for row in list(self._sizes_cache):
+            size = str(row.get("size") or "").strip()
+            if not size:
+                continue
+            count = int(row.get("count") or 0)
+            if not allow_factory and count <= 0:
+                skipped_zero += 1
+                continue
+
+            price = self._compute_price_for_size(size)
+            if price is None:
+                skipped_price += 1
+                continue
+
+            self._sel_size = size
+            self.price_var.set(format_money(float(price)))
+            self.qty_var.set(str(factory_qty if allow_factory else count))
+            before = len(self.bill_lines)
+            before_qty = sum(int(ln.get("qty") or 0) for ln in self.bill_lines)
+            self._add_current_selection()
+            after_qty = sum(int(ln.get("qty") or 0) for ln in self.bill_lines)
+            if len(self.bill_lines) > before or after_qty > before_qty:
+                added += 1
+
+        self._sel_size = original_size
+        self.qty_var.set("1")
+        self._price_user_edited = False
+        self._sync_bill_table()
+        self._refresh_size_grid_if_current(preserve_size=original_size)
+
+        if added <= 0:
+            messagebox.showwarning("Ù„Ù… ØªØªÙ… Ø§Ù„Ø¥Ø¶Ø§ÙØ©", "Ù„Ø§ ØªÙˆØ¬Ø¯ Ù…Ù‚Ø§Ø³Ø§Øª ØµØ§Ù„Ø­Ø© Ù„Ù„Ø¥Ø¶Ø§ÙØ©.", parent=self)
+            return
+        note = f"ØªÙ…Øª Ø¥Ø¶Ø§ÙØ© {added} Ù…Ù‚Ø§Ø³"
+        if skipped_zero and not allow_factory:
+            note += f" - ØªÙ… ØªØ¬Ø§ÙˆØ² {skipped_zero} Ø¨Ø¯ÙˆÙ† Ù…Ø®Ø²ÙˆÙ†"
+        if skipped_price:
+            note += f" - Ø¨Ø¯ÙˆÙ† Ø³Ø¹Ø±: {skipped_price}"
+        show_toast(self, note)
+
     def _remove_bill_line(self):
         sel = self.bill_table.selection()
         if not sel:
             return
-        idx = int(sel[0])
+        idx = parse_int_text(sel[0], -1)
         if 0 <= idx < len(self.bill_lines):
             self.bill_lines.pop(idx)
             self._sync_bill_table()
@@ -7994,9 +9701,17 @@ class OutcomeFrame(ttk.Frame):
         sel = self.bill_table.selection()
         if not sel:
             return
-        idx = int(sel[0])
+        idx = parse_int_text(sel[0], -1)
         if 0 <= idx < len(self.bill_lines):
-            self.bill_lines[idx]["qty"] = int(self.bill_lines[idx]["qty"]) + 1
+            next_lines = [dict(ln) for ln in self.bill_lines]
+            next_lines[idx]["qty"] = int(next_lines[idx]["qty"]) + 1
+            try:
+                self.db.validate_stock_available_for_bill_lines(next_lines)
+            except Exception as ex:
+                messagebox.showwarning("ÙƒÙ…ÙŠØ© ØºÙŠØ± Ù…ØªØ§Ø­Ø©", str(ex), parent=self)
+                self._refresh_size_grid_if_current(preserve_size=self._sel_size)
+                return
+            self.bill_lines[idx]["qty"] = next_lines[idx]["qty"]
             self._sync_bill_table()
             self._refresh_size_grid_if_current(preserve_size=self._sel_size)
 
@@ -8005,7 +9720,7 @@ class OutcomeFrame(ttk.Frame):
         sel = self.bill_table.selection()
         if not sel:
             return
-        idx = int(sel[0])
+        idx = parse_int_text(sel[0], -1)
         if 0 <= idx < len(self.bill_lines):
             q = int(self.bill_lines[idx]["qty"])
             if q > 1:
@@ -8022,24 +9737,24 @@ class OutcomeFrame(ttk.Frame):
             self.bill_table.insert(
                 "", tk.END, iid=str(idx),
                 values=(ln["item_type"], ln["school"], ln["color"], ln["size"],
-                        f"{float(ln['unit_price']):.2f}", ln["qty"], f"{line_total:.2f}")
+                        f"{format_money(float(ln['unit_price']))}", ln["qty"], f"{format_money(line_total)}")
             )
-        self.total_var.set(f"{total:.2f}")
+        self.total_var.set(f"{format_money(total)}")
         apply_zebra_tags(self.bill_table)
 
 
     # ---------------- Finalize / print ----------------
     def _finalize_bill(self):
         if not self.bill_lines:
-            show_toast(self, "أضف بندًا واحدًا على الأقل", bg="#f59e0b", fg="#000")
+            show_toast(self, "Ø£Ø¶Ù Ø¨Ù†Ø¯Ù‹Ø§ ÙˆØ§Ø­Ø¯Ù‹Ø§ Ø¹Ù„Ù‰ Ø§Ù„Ø£Ù‚Ù„", bg="#f59e0b", fg="#000")
             return
         # Customer is required
         customer_raw = (self.customer.get() or "").strip()
         if not customer_raw:
-            show_toast(self, "يرجى اختيار اسم عميل أولاً", bg="#dc2626")
+            show_toast(self, "ÙŠØ±Ø¬Ù‰ Ø§Ø®ØªÙŠØ§Ø± Ø§Ø³Ù… Ø¹Ù…ÙŠÙ„ Ø£ÙˆÙ„Ø§Ù‹", bg="#dc2626")
             return
 
-        # Phase 3: "فرع: <branch ui name>" or raw device name → shipment.
+        # Phase 3: "ÙØ±Ø¹: <branch ui name>" or raw device name â†’ shipment.
         known_pos = set(self.db.list_known_pos_device_names() or [])
         norm_target = canonical_branch_device_name(customer_raw, known_pos)
         if norm_target:
@@ -8054,12 +9769,20 @@ class OutcomeFrame(ttk.Frame):
             target_pos = None
             customer = customer_raw
 
+        if target_pos and any(bool(ln.get("allow_factory_fill")) for ln in self.bill_lines):
+            messagebox.showwarning(
+                "ØºÙŠØ± Ù…ØªØ§Ø­ Ù„Ù„Ø´Ø­Ù†",
+                "Ù„Ø§ ÙŠÙ…ÙƒÙ† ØªØ£ÙƒÙŠØ¯ Ø´Ø­Ù†Ø© ÙØ±Ø¹ ØªØ­ØªÙˆÙŠ Ø¹Ù„Ù‰ Ø¨Ù†Ø¯ Ù…Ù† Ø§Ù„Ù…ØµÙ†Ø¹. Ø§Ø­Ø°Ù Ù‡Ø°Ø§ Ø§Ù„Ø¨Ù†Ø¯ ÙˆØ§Ø®ØªØ± ÙƒÙ…ÙŠØ© Ù…ØªØ§Ø­Ø© Ù…Ù† Ø§Ù„Ù…Ø®Ø²ÙˆÙ†.",
+                parent=self,
+            )
+            return
+
         # ===== CONFIRMATION OVERLAY =====
         total = self.total_var.get()
         n_items = len(self.bill_lines)
 
         overlay = tk.Toplevel(self)
-        overlay.title("تأكيد الفاتورة" if not target_pos else "تأكيد شحنة إلى فرع")
+        overlay.title("ØªØ£ÙƒÙŠØ¯ Ø§Ù„ÙØ§ØªÙˆØ±Ø©" if not target_pos else "ØªØ£ÙƒÙŠØ¯ Ø´Ø­Ù†Ø© Ø¥Ù„Ù‰ ÙØ±Ø¹")
         overlay.transient(self.winfo_toplevel())
         overlay.grab_set()
         overlay.resizable(False, False)
@@ -8067,26 +9790,26 @@ class OutcomeFrame(ttk.Frame):
         frm = ttk.Frame(overlay, padding=20)
         frm.pack(fill=tk.BOTH, expand=True)
 
-        header_text = "مراجعة الفاتورة قبل الحفظ" if not target_pos else "مراجعة شحنة الفرع قبل الحفظ"
+        header_text = "Ù…Ø±Ø§Ø¬Ø¹Ø© Ø§Ù„ÙØ§ØªÙˆØ±Ø© Ù‚Ø¨Ù„ Ø§Ù„Ø­ÙØ¸" if not target_pos else "Ù…Ø±Ø§Ø¬Ø¹Ø© Ø´Ø­Ù†Ø© Ø§Ù„ÙØ±Ø¹ Ù‚Ø¨Ù„ Ø§Ù„Ø­ÙØ¸"
         ttk.Label(frm, text=header_text, font=("Segoe UI", 13, "bold")).pack(pady=(0, 12))
         if target_pos:
-            ttk.Label(frm, text=f"الفرع المُستلِم: {target_pos}",
+            ttk.Label(frm, text=f"Ø§Ù„ÙØ±Ø¹ Ø§Ù„Ù…ÙØ³ØªÙ„ÙÙ…: {target_pos}",
                       font=("Segoe UI", 11, "bold"),
                       foreground="#0ea5e9").pack(anchor="w", padx=8)
         else:
-            ttk.Label(frm, text=f"العميل: {customer}", font=("Segoe UI", 11)).pack(anchor="w", padx=8)
-        ttk.Label(frm, text=f"عدد البنود: {n_items}", font=("Segoe UI", 11)).pack(anchor="w", padx=8)
-        ttk.Label(frm, text=f"الإجمالي: {total}", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=8, pady=(4, 12))
+            ttk.Label(frm, text=f"Ø§Ù„Ø¹Ù…ÙŠÙ„: {customer}", font=("Segoe UI", 11)).pack(anchor="w", padx=8)
+        ttk.Label(frm, text=f"Ø¹Ø¯Ø¯ Ø§Ù„Ø¨Ù†ÙˆØ¯: {n_items}", font=("Segoe UI", 11)).pack(anchor="w", padx=8)
+        ttk.Label(frm, text=f"Ø§Ù„Ø¥Ø¬Ù…Ø§Ù„ÙŠ: {total}", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=8, pady=(4, 12))
 
         # Summary of items
         summary = ttk.Treeview(frm, columns=("item", "size", "qty", "price"), show="headings", height=min(6, n_items))
-        for col, txt, w in [("item", "الصنف", 180), ("size", "المقاس", 70), ("qty", "الكمية", 60), ("price", "السعر", 80)]:
+        for col, txt, w in [("item", "Ø§Ù„ØµÙ†Ù", 180), ("size", "Ø§Ù„Ù…Ù‚Ø§Ø³", 70), ("qty", "Ø§Ù„ÙƒÙ…ÙŠØ©", 60), ("price", "Ø§Ù„Ø³Ø¹Ø±", 80)]:
             summary.heading(col, text=txt)
             summary.column(col, width=w, anchor="center")
         for ln in self.bill_lines:
             summary.insert("", tk.END, values=(
                 f"{ln['item_type']} / {ln['school']}",
-                ln["size"], ln["qty"], f"{float(ln['unit_price']):.2f}"
+                ln["size"], ln["qty"], f"{format_money(float(ln['unit_price']))}"
             ))
         summary.pack(fill=tk.X, padx=8, pady=(0, 12))
         apply_zebra_tags(summary)
@@ -8102,26 +9825,26 @@ class OutcomeFrame(ttk.Frame):
                     customer, self.bill_lines, target_pos=target_pos
                 )
             except Exception as ex:
-                messagebox.showerror("فشل الحفظ", str(ex))
+                messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø­ÙØ¸", str(ex))
                 return
             self._clear_bill()
             self._refresh_favorites()
             if print_after:
                 self._direct_print_bill(bill_id)
-                show_toast(self, f"الفاتورة #{bill_id} تم الحفظ والطباعة")
+                show_toast(self, f"Ø§Ù„ÙØ§ØªÙˆØ±Ø© #{bill_id} ØªÙ… Ø§Ù„Ø­ÙØ¸ ÙˆØ§Ù„Ø·Ø¨Ø§Ø¹Ø©")
             elif target_pos:
-                show_toast(self, f"تم إنشاء شحنة الفرع #{bill_id} إلى {target_pos}")
+                show_toast(self, f"ØªÙ… Ø¥Ù†Ø´Ø§Ø¡ Ø´Ø­Ù†Ø© Ø§Ù„ÙØ±Ø¹ #{bill_id} Ø¥Ù„Ù‰ {target_pos}")
                 try:
                     import sync_ui
-                    sync_ui.run_sync_now(self.winfo_toplevel(), self.db.conn, reason=f"شحنة إلى {target_pos}")
+                    sync_ui.run_sync_now(self.winfo_toplevel(), self.db.conn, reason=f"Ø´Ø­Ù†Ø© Ø¥Ù„Ù‰ {target_pos}")
                 except Exception:
                     pass
             else:
-                show_toast(self, f"تم حفظ الفاتورة #{bill_id}")
+                show_toast(self, f"ØªÙ… Ø­ÙØ¸ Ø§Ù„ÙØ§ØªÙˆØ±Ø© #{bill_id}")
 
-        ttk.Button(btns, text="إلغاء", command=overlay.destroy).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="حفظ بدون طباعة", command=lambda: _do_save(False)).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(btns, text="حفظ وطباعة", command=lambda: _do_save(True)).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="Ø¥Ù„ØºØ§Ø¡", command=overlay.destroy).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Ø­ÙØ¸ Ø¨Ø¯ÙˆÙ† Ø·Ø¨Ø§Ø¹Ø©", command=lambda: _do_save(False)).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="Ø­ÙØ¸ ÙˆØ·Ø¨Ø§Ø¹Ø©", command=lambda: _do_save(True)).pack(side=tk.RIGHT, padx=4)
 
         # Center overlay on parent
         overlay.update_idletasks()
@@ -8135,70 +9858,74 @@ class OutcomeFrame(ttk.Frame):
 
     def _save_as_draft(self):
         if not self.bill_lines:
-            show_toast(self, "أضف بند واحد على الأقل", bg="#f59e0b", fg="#000")
+            show_toast(self, "Ø£Ø¶Ù Ø¨Ù†Ø¯ ÙˆØ§Ø­Ø¯ Ø¹Ù„Ù‰ Ø§Ù„Ø£Ù‚Ù„", bg="#f59e0b", fg="#000")
             return
         customer = (self.customer.get() or "").strip()
         if not customer:
-            show_toast(self, "يرجى اختيار اسم عميل أولاً", bg="#dc2626")
+            show_toast(self, "ÙŠØ±Ø¬Ù‰ Ø§Ø®ØªÙŠØ§Ø± Ø§Ø³Ù… Ø¹Ù…ÙŠÙ„ Ø£ÙˆÙ„Ø§Ù‹", bg="#dc2626")
             return
         try:
             bill_id = self.db.create_draft_bill(customer, self.bill_lines)
         except Exception as ex:
-            messagebox.showerror("فشل الحفظ", str(ex))
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø­ÙØ¸", str(ex))
             return
         self._clear_bill()
-        show_toast(self, f"تم حفظ المسودة #{bill_id}")
+        show_toast(self, f"ØªÙ… Ø­ÙØ¸ Ø§Ù„Ù…Ø³ÙˆØ¯Ø© #{bill_id}")
 
     def _print_bill(self, bill_id: int):
         try:
             bill = next(b for b in self.db.list_bills() if int(b["id"]) == int(bill_id))
             items = self.db.list_bill_items(bill_id)
         except StopIteration:
-            messagebox.showerror("فشل الطباعة", "لم يتم العثور على الفاتورة.")
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø·Ø¨Ø§Ø¹Ø©", "Ù„Ù… ÙŠØªÙ… Ø§Ù„Ø¹Ø«ÙˆØ± Ø¹Ù„Ù‰ Ø§Ù„ÙØ§ØªÙˆØ±Ø©.")
             return
         tmp_dir = tempfile.gettempdir()
         path = os.path.join(tmp_dir, f"bill_{bill_id}.html")
         save_bill_as_html(path, bill, items)
         webbrowser.open_new_tab(f"file:///{path.replace(os.sep, '/')}")
 
-    def _get_sizes_for_bill(self, school: str, item: str, color: str) -> List[str]:
+    def _get_sizes_for_bill(self, school: str, item: str, color: str, warehouse_no: Optional[int] = None) -> List[str]:
         """
         Priority:
-        1) Size profile (numeric + alpha)
-        2) Available sizes from stock
+        1) Available sizes from the selected warehouse stock
+        2) Size profile (numeric + alpha), appended only after real stock sizes
         """
-        profile = self.db.get_size_profile(item, school, color)
-
         sizes: List[str] = []
-
-        if profile:
-            r1s, r1e, r2s, r2e, has_alpha = profile
-            sizes.extend(
-                merged_numeric_size_labels_from_profile(r1s, r1e, r2s, r2e),
-            )
-            if has_alpha:
-                sizes.extend(ALPHA_SIZES)
-            return sizes
-
-
+        seen = set()
         try:
-            rows = self.db.current_inventory({
+            filters: Dict[str, Any] = {
                 "school": school,
                 "item_type": item,
                 "color": color,
-            })
-
-            seen = set()
-            sizes = []
+            }
+            if warehouse_no is not None:
+                filters["warehouse_no"] = int(warehouse_no)
+            rows = self.db.current_inventory(filters)
             for r in rows:
                 sz = str(r.get("size") or "").strip()
-                if sz and sz not in seen:
-                    seen.add(sz)
+                key = _normalize_size_label(sz).casefold()
+                if sz and key not in seen and int(r.get("count") or 0) > 0:
+                    seen.add(key)
+                    sizes.append(sz)
+        except Exception:
+            pass
+
+        try:
+            profile = self.db.get_size_profile(item, school, color)
+        except Exception:
+            profile = None
+        if profile:
+            r1s, r1e, r2s, r2e, has_alpha = profile
+            profile_sizes = list(merged_numeric_size_labels_from_profile(r1s, r1e, r2s, r2e))
+            if has_alpha:
+                profile_sizes.extend(ALPHA_SIZES)
+            for sz in profile_sizes:
+                key = _normalize_size_label(sz).casefold()
+                if sz and key not in seen:
+                    seen.add(key)
                     sizes.append(sz)
 
-            return sizes
-        except Exception:
-            return []
+        return sizes
 
 
     def _direct_print_bill(self, bill_id: int, copies: int = 2):
@@ -8206,7 +9933,7 @@ class OutcomeFrame(ttk.Frame):
             bill = next(b for b in self.db.list_bills() if int(b["id"]) == int(bill_id))
             items = self.db.list_bill_items(bill_id)
         except StopIteration:
-            messagebox.showerror("فشل الطباعة", "لم يتم العثور على الفاتورة.")
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø·Ø¨Ø§Ø¹Ø©", "Ù„Ù… ÙŠØªÙ… Ø§Ù„Ø¹Ø«ÙˆØ± Ø¹Ù„Ù‰ Ø§Ù„ÙØ§ØªÙˆØ±Ø©.")
             return
         tmp_dir = tempfile.gettempdir()
         path = os.path.join(tmp_dir, f"bill_{bill_id}.html")
@@ -8221,7 +9948,7 @@ class FactoryItemDialog(tk.Toplevel):
     def __init__(self, master: tk.Widget, db: SqliteDatabase, preset: Optional[Dict[str, str]] = None):
         super().__init__(master)
         self.db = db
-        self.title("إضافة بند من المصنع")
+        self.title("Ø¥Ø¶Ø§ÙØ© Ø¨Ù†Ø¯ Ù…Ù† Ø§Ù„Ù…ØµÙ†Ø¹")
         self.transient(master)
         self.grab_set()
         self.geometry("520x420")
@@ -8231,10 +9958,10 @@ class FactoryItemDialog(tk.Toplevel):
         frm = ttk.Frame(self, padding=10); frm.pack(fill=tk.BOTH, expand=True)
 
         # Specs (combos for consistency with the app)
-        self.t = LabeledCombobox(frm, "النوع",   db, "item_type"); self.t.set(preset.get("item_type",""))
-        self.s = LabeledCombobox(frm, "المدرسة", db, "school");    self.s.set(preset.get("school",""))
-        self.c = LabeledCombobox(frm, "اللون",   db, "color");     self.c.set(preset.get("color",""))
-        self.z = LabeledCombobox(frm, "المقاس",  db, "size");      self.z.set(preset.get("size",""))
+        self.t = LabeledCombobox(frm, "Ø§Ù„Ù†ÙˆØ¹",   db, "item_type"); self.t.set(preset.get("item_type",""))
+        self.s = LabeledCombobox(frm, "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", db, "school");    self.s.set(preset.get("school",""))
+        self.c = LabeledCombobox(frm, "Ø§Ù„Ù„ÙˆÙ†",   db, "color");     self.c.set(preset.get("color",""))
+        self.z = LabeledCombobox(frm, "Ø§Ù„Ù…Ù‚Ø§Ø³",  db, "size");      self.z.set(preset.get("size",""))
         for i, w in enumerate((self.t, self.s, self.c, self.z)):
             w.grid(row=i//2, column=i%2, padx=6, pady=6, sticky="ew")
         # NEW: auto price detection on edit/select/typing
@@ -8249,9 +9976,9 @@ class FactoryItemDialog(tk.Toplevel):
         self.pkv = tk.StringVar(value=preset.get("package_no",""))
 
         row_wp = ttk.Frame(frm); row_wp.grid(row=2, column=0, columnspan=2, sticky="ew", padx=6, pady=(0,6))
-        ttk.Label(row_wp, text="المخزن:").pack(side=tk.LEFT)
+        ttk.Label(row_wp, text="Ø§Ù„Ù…Ø®Ø²Ù†:").pack(side=tk.LEFT)
         ttk.Entry(row_wp, textvariable=self.whv, width=8).pack(side=tk.LEFT, padx=(4,10))
-        ttk.Label(row_wp, text="العبوة:").pack(side=tk.LEFT)
+        ttk.Label(row_wp, text="Ø§Ù„Ø¹Ø¨ÙˆØ©:").pack(side=tk.LEFT)
         ttk.Entry(row_wp, textvariable=self.pkv, width=10).pack(side=tk.LEFT, padx=(4,0))
 
         # Price/Qty + badge
@@ -8260,16 +9987,16 @@ class FactoryItemDialog(tk.Toplevel):
         self.badge = tk.BooleanVar(value=bool(int(preset.get("has_badge","0") or 0)))
 
         grid2 = ttk.Frame(frm); grid2.grid(row=3, column=0, columnspan=2, sticky="ew", padx=6, pady=6)
-        ttk.Label(grid2, text="الكمية:").grid(row=0, column=0, sticky="e", padx=4, pady=4)
+        ttk.Label(grid2, text="Ø§Ù„ÙƒÙ…ÙŠØ©:").grid(row=0, column=0, sticky="e", padx=4, pady=4)
         ttk.Entry(grid2, textvariable=self.qv, width=12).grid(row=0, column=1, sticky="w")
-        ttk.Label(grid2, text="سعر الوحدة:").grid(row=0, column=2, sticky="e", padx=12, pady=4)
+        ttk.Label(grid2, text="Ø³Ø¹Ø± Ø§Ù„ÙˆØ­Ø¯Ø©:").grid(row=0, column=2, sticky="e", padx=12, pady=4)
         ttk.Entry(grid2, textvariable=self.pv, width=12).grid(row=0, column=3, sticky="w")
-        ttk.Checkbutton(grid2, text="بادج", variable=self.badge).grid(row=0, column=4, sticky="w", padx=(12,0))
+        ttk.Checkbutton(grid2, text="Ø¨Ø§Ø¯Ø¬", variable=self.badge).grid(row=0, column=4, sticky="w", padx=(12,0))
 
         # Buttons
         btns = ttk.Frame(frm); btns.grid(row=4, column=0, columnspan=2, sticky="e", padx=6, pady=(10,0))
-        ttk.Button(btns, text="إلغاء", command=self.destroy).pack(side=tk.RIGHT)
-        ttk.Button(btns, text="إضافة", command=self._ok).pack(side=tk.RIGHT, padx=8)
+        ttk.Button(btns, text="Ø¥Ù„ØºØ§Ø¡", command=self.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Ø¥Ø¶Ø§ÙØ©", command=self._ok).pack(side=tk.RIGHT, padx=8)
 
         # Autofill color from school (like the rest of the app)
         # self.s.cb.bind("<<ComboboxSelected>>", lambda e: self._maybe_autofill_color(), add="+")
@@ -8305,25 +10032,25 @@ class FactoryItemDialog(tk.Toplevel):
         try:
             p = self.db.last_price_for_specs(it, sc, cl, sz)
             if p is not None:
-                self.pv.set(f"{p:.2f}")
+                self.pv.set(f"{format_money(p)}")
         except Exception:
             # silent: don't block user flow
             pass
 
     def _ok(self):
         try:
-            item_type = self.t.get() or self._err("النوع مطلوب")
-            school    = self.s.get() or self._err("المدرسة مطلوبة")
-            color     = self.c.get() or self._err("اللون مطلوب")
-            size      = self.z.get() or self._err("المقاس مطلوب")
-            qty       = int((self.qv.get() or "0").strip());   assert qty > 0
-            price     = float((self.pv.get() or "").strip());  assert price >= 0.0
-            wh        = int(self.whv.get()) if (self.whv.get() or "").strip() else 0
-            pkg       = int(self.pkv.get()) if (self.pkv.get() or "").strip() else 0
+            item_type = self.t.get() or self._err("Ø§Ù„Ù†ÙˆØ¹ Ù…Ø·Ù„ÙˆØ¨")
+            school    = self.s.get() or self._err("Ø§Ù„Ù…Ø¯Ø±Ø³Ø© Ù…Ø·Ù„ÙˆØ¨Ø©")
+            color     = self.c.get() or self._err("Ø§Ù„Ù„ÙˆÙ† Ù…Ø·Ù„ÙˆØ¨")
+            size      = self.z.get() or self._err("Ø§Ù„Ù…Ù‚Ø§Ø³ Ù…Ø·Ù„ÙˆØ¨")
+            qty       = parse_int_text(self.qv.get(), 0) or 0;   assert qty > 0
+            price     = parse_float_text(self.pv.get());         assert price is not None and price >= 0.0
+            wh        = parse_int_text(self.whv.get(), 0) or 0
+            pkg       = parse_int_text(self.pkv.get(), 0) or 0
         except AssertionError:
-            messagebox.showerror("بيانات غير صالحة", "تحقق من الكمية (>0) والسعر (>=0).", parent=self); return
+            messagebox.showerror("Ø¨ÙŠØ§Ù†Ø§Øª ØºÙŠØ± ØµØ§Ù„Ø­Ø©", "ØªØ­Ù‚Ù‚ Ù…Ù† Ø§Ù„ÙƒÙ…ÙŠØ© (>0) ÙˆØ§Ù„Ø³Ø¹Ø± (>=0).", parent=self); return
         except Exception as ex:
-            messagebox.showerror("بيانات ناقصة", str(ex), parent=self); return
+            messagebox.showerror("Ø¨ÙŠØ§Ù†Ø§Øª Ù†Ø§Ù‚ØµØ©", str(ex), parent=self); return
 
         self._result = {
             "item_type": item_type, "school": school, "color": color, "size": size,
@@ -8346,7 +10073,7 @@ class FactoryItemDialog(tk.Toplevel):
 def open_price_sync_audit_dialog(parent: tk.Misc, db: "SqliteDatabase", *, limit: int = 200) -> None:
     """Read-only UI for warehouse-side PRICE_UPDATE fan-out decisions."""
     dlg = tk.Toplevel(parent)
-    dlg.title("سجل تعديلات أسعار الفروع")
+    dlg.title("Ø³Ø¬Ù„ ØªØ¹Ø¯ÙŠÙ„Ø§Øª Ø£Ø³Ø¹Ø§Ø± Ø§Ù„ÙØ±ÙˆØ¹")
     try:
         dlg.transient(parent.winfo_toplevel())
     except Exception:
@@ -8358,24 +10085,24 @@ def open_price_sync_audit_dialog(parent: tk.Misc, db: "SqliteDatabase", *, limit
 
     ttk.Label(
         top,
-        text="يعرض هذا السجل قرارات «تعديل السعر» التي تمت مزامنتها مع فروع البيع (POS) — بما فيها أحداث الفاتورة عند إدخال سعر يدوي.",
+        text="ÙŠØ¹Ø±Ø¶ Ù‡Ø°Ø§ Ø§Ù„Ø³Ø¬Ù„ Ù‚Ø±Ø§Ø±Ø§Øª Â«ØªØ¹Ø¯ÙŠÙ„ Ø§Ù„Ø³Ø¹Ø±Â» Ø§Ù„ØªÙŠ ØªÙ…Øª Ù…Ø²Ø§Ù…Ù†ØªÙ‡Ø§ Ù…Ø¹ ÙØ±ÙˆØ¹ Ø§Ù„Ø¨ÙŠØ¹ (POS) â€” Ø¨Ù…Ø§ ÙÙŠÙ‡Ø§ Ø£Ø­Ø¯Ø§Ø« Ø§Ù„ÙØ§ØªÙˆØ±Ø© Ø¹Ù†Ø¯ Ø¥Ø¯Ø®Ø§Ù„ Ø³Ø¹Ø± ÙŠØ¯ÙˆÙŠ.",
         wraplength=860,
     ).pack(anchor="w", pady=(0, 8))
 
-    # Treeview must live inside `grid` — `top` already uses pack(); mixing grid+pack on one parent raises TclError.
+    # Treeview must live inside `grid` â€” `top` already uses pack(); mixing grid+pack on one parent raises TclError.
     grid = ttk.Frame(top)
     grid.pack(fill=tk.BOTH, expand=True)
 
     cols = ("ts", "price", "mode", "targets", "uuids", "filters", "note")
     tv = ttk.Treeview(grid, columns=cols, show="headings", height=16)
     for c, t, w in [
-        ("ts", "الوقت", 170),
-        ("price", "السعر", 90),
-        ("mode", "وضع السجل", 120),
-        ("targets", "النطاق/الفروع", 260),
-        ("uuids", "معرّفات الحدث", 260),
-        ("filters", "عوامل التصفية", 320),
-        ("note", "ملاحظة", 220),
+        ("ts", "Ø§Ù„ÙˆÙ‚Øª", 170),
+        ("price", "Ø§Ù„Ø³Ø¹Ø±", 90),
+        ("mode", "ÙˆØ¶Ø¹ Ø§Ù„Ø³Ø¬Ù„", 120),
+        ("targets", "Ø§Ù„Ù†Ø·Ø§Ù‚/Ø§Ù„ÙØ±ÙˆØ¹", 260),
+        ("uuids", "Ù…Ø¹Ø±Ù‘ÙØ§Øª Ø§Ù„Ø­Ø¯Ø«", 260),
+        ("filters", "Ø¹ÙˆØ§Ù…Ù„ Ø§Ù„ØªØµÙÙŠØ©", 320),
+        ("note", "Ù…Ù„Ø§Ø­Ø¸Ø©", 220),
     ]:
         tv.heading(c, text=t)
         tv.column(c, width=w, anchor="center")
@@ -8395,7 +10122,7 @@ def open_price_sync_audit_dialog(parent: tk.Misc, db: "SqliteDatabase", *, limit
         s = (txt or "").strip()
         if len(s) <= max_len:
             return s
-        return s[: max_len - 1] + "…"
+        return s[: max_len - 1] + "â€¦"
 
     def _reload():
         tv.delete(*tv.get_children())
@@ -8406,7 +10133,7 @@ def open_price_sync_audit_dialog(parent: tk.Misc, db: "SqliteDatabase", *, limit
                 tk.END,
                 values=(
                     str(r.get("created_at") or ""),
-                    f"{float(r.get('new_price') or 0):.2f}",
+                    f"{format_money(float(r.get('new_price') or 0))}",
                     str(r.get("sync_mode") or ""),
                     _short_json(str(r.get("targets_json") or ""), 260),
                     _short_json(str(r.get("event_uuids_json") or ""), 260),
@@ -8417,8 +10144,8 @@ def open_price_sync_audit_dialog(parent: tk.Misc, db: "SqliteDatabase", *, limit
 
     btns = ttk.Frame(top)
     btns.pack(fill=tk.X, pady=(8, 0))
-    ttk.Button(btns, text="تحديث", command=_reload).pack(side=tk.RIGHT)
-    ttk.Button(btns, text="إغلاق", command=dlg.destroy).pack(side=tk.RIGHT, padx=(0, 8))
+    ttk.Button(btns, text="ØªØ­Ø¯ÙŠØ«", command=_reload).pack(side=tk.RIGHT)
+    ttk.Button(btns, text="Ø¥ØºÙ„Ø§Ù‚", command=dlg.destroy).pack(side=tk.RIGHT, padx=(0, 8))
 
     _reload()
     dlg.update_idletasks()
@@ -8440,11 +10167,11 @@ class InventoryWindow(tk.Toplevel):
     def __init__(self, master, db: SqliteDatabase):
         super().__init__(master)
         self.db = db
-        self.title("المخزون")
+        self.title("Ø§Ù„Ù…Ø®Ø²ÙˆÙ†")
         self.geometry("1000x560")
         self.configure(bg=_UI["BG"])
         _wh = tk.Frame(self, bg=_UI["ACCENT"], height=44); _wh.pack(fill=tk.X); _wh.pack_propagate(False)
-        tk.Label(_wh, text="  المخزون", bg=_UI["ACCENT"], fg="#FFFFFF", font=_FONTS["h3"]).pack(side=tk.RIGHT, padx=12)
+        tk.Label(_wh, text="  Ø§Ù„Ù…Ø®Ø²ÙˆÙ†", bg=_UI["ACCENT"], fg="#FFFFFF", font=_FONTS["h3"]).pack(side=tk.RIGHT, padx=12)
 
         # Track multi selections
         self.multi: Dict[str, List[Any]] = {
@@ -8459,26 +10186,27 @@ class InventoryWindow(tk.Toplevel):
         # Keep references to widgets to enable/disable them together
         self._multi_btns: Dict[str, ttk.Button] = {}
         self._field_widgets: Dict[str, tk.Widget] = {}
+        self.show_zero_var = tk.BooleanVar(value=True)
 
         self._build()
 
     # ---------- UI ----------
 
     def _build(self):
-        filters = ttk.LabelFrame(self, text="تصنيف")
+        filters = ttk.LabelFrame(self, text="ØªØµÙ†ÙŠÙ")
         filters.pack(fill=tk.X, padx=8, pady=8)
 
         # Controls
-        self.f_type   = LabeledCombobox(filters, "النوع",    self.db, "item_type")
-        self.f_school = LabeledCombobox(filters, "المدرسة", self.db, "school")
-        self.f_color  = LabeledCombobox(filters, "اللون",    self.db, "color")
-        self.f_size   = LabeledCombobox(filters, "المقاس",   self.db, "size")
+        self.f_type   = LabeledCombobox(filters, "Ø§Ù„Ù†ÙˆØ¹",    self.db, "item_type")
+        self.f_school = LabeledCombobox(filters, "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", self.db, "school")
+        self.f_color  = LabeledCombobox(filters, "Ø§Ù„Ù„ÙˆÙ†",    self.db, "color")
+        self.f_size   = LabeledCombobox(filters, "Ø§Ù„Ù…Ù‚Ø§Ø³",   self.db, "size")
         self.f_wh     = LabeledStaticCombo(
-            filters, "رقم المخزن",
+            filters, "Ø±Ù‚Ù… Ø§Ù„Ù…Ø®Ø²Ù†",
             values=["", *WAREHOUSE_NUMBER_DISPLAY_VALUES],
             value_map=WAREHOUSE_NUMBER_LABELS,
         )
-        self.f_pkg    = LabeledEntry(filters, "رقم العبوة")
+        self.f_pkg    = LabeledEntry(filters, "Ø±Ù‚Ù… Ø§Ù„Ø¹Ø¨ÙˆØ©")
 
         def _constraints(exclude=None):
             d = {
@@ -8520,16 +10248,16 @@ class InventoryWindow(tk.Toplevel):
             w.grid(row=r*2, column=c, padx=6, pady=(6, 0), sticky="ew")  # widget row
             filters.columnconfigure(c, weight=1)
 
-            # Add "اختيار متعدد…" button under each filter
+            # Add "Ø§Ø®ØªÙŠØ§Ø± Ù…ØªØ¹Ø¯Ø¯â€¦" button under each filter
             from functools import partial  # put this at the top of the file once
 
             def _safe_open(field):
                 try:
                     self._open_multi_dialog(field)
                 except Exception as ex:
-                    messagebox.showerror("خطأ", str(ex), parent=self)
+                    messagebox.showerror("Ø®Ø·Ø£", str(ex), parent=self)
 
-            btn = ttk.Button(filters, text="اختيار متعدد…", command=partial(_safe_open, fld))
+            btn = ttk.Button(filters, text="Ø§Ø®ØªÙŠØ§Ø± Ù…ØªØ¹Ø¯Ø¯â€¦", command=partial(_safe_open, fld))
             btn.grid(row=r*2+1, column=c, sticky="w", padx=6, pady=(2, 8))
             self._multi_btns[fld] = btn
 
@@ -8552,17 +10280,21 @@ class InventoryWindow(tk.Toplevel):
         # Buttons
         btns = ttk.Frame(filters)
         btns.grid(row=4, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
-        _b1 = ttk.Button(btns, text="بحث", command=self._refresh); _b1.pack(side=tk.LEFT)
-        ToolTip(_b1, "تطبيق الفلاتر وعرض النتائج")
-        _b2 = ttk.Button(btns, text="مسح", command=self._clear_all); _b2.pack(side=tk.LEFT, padx=8)
-        ToolTip(_b2, "مسح جميع الفلاتر")
-        _b3 = ttk.Button(btns, text="تصدير إلى إكسل", command=self._export_excel); _b3.pack(side=tk.LEFT, padx=8)
-        ToolTip(_b3, "تصدير النتائج الحالية إلى ملف إكسل")
-        _b4 = ttk.Button(btns, text="طباعة جداول المقاسات", command=self._print_size_sheets); _b4.pack(side=tk.LEFT, padx=8)
-        ToolTip(_b4, "طباعة جداول المقاسات لكل نوع/مدرسة/لون")
-        _b5 = ttk.Button(btns, text="تعديل نطاقات المقاسات…", command=self._edit_size_ranges_dialog); _b5.pack(side=tk.LEFT, padx=8)
-        ToolTip(_b5, "تعديل نطاقات المقاسات المعروضة في الجداول")
-
+        _b1 = ttk.Button(btns, text="Ø¨Ø­Ø«", command=self._refresh); _b1.pack(side=tk.LEFT)
+        ToolTip(_b1, "ØªØ·Ø¨ÙŠÙ‚ Ø§Ù„ÙÙ„Ø§ØªØ± ÙˆØ¹Ø±Ø¶ Ø§Ù„Ù†ØªØ§Ø¦Ø¬")
+        _b2 = ttk.Button(btns, text="Ù…Ø³Ø­", command=self._clear_all); _b2.pack(side=tk.LEFT, padx=8)
+        ToolTip(_b2, "Ù…Ø³Ø­ Ø¬Ù…ÙŠØ¹ Ø§Ù„ÙÙ„Ø§ØªØ±")
+        _b3 = ttk.Button(btns, text="ØªØµØ¯ÙŠØ± Ø¥Ù„Ù‰ Ø¥ÙƒØ³Ù„", command=self._export_excel); _b3.pack(side=tk.LEFT, padx=8)
+        ToolTip(_b3, "ØªØµØ¯ÙŠØ± Ø§Ù„Ù†ØªØ§Ø¦Ø¬ Ø§Ù„Ø­Ø§Ù„ÙŠØ© Ø¥Ù„Ù‰ Ù…Ù„Ù Ø¥ÙƒØ³Ù„")
+        _b4 = ttk.Button(btns, text="Ø·Ø¨Ø§Ø¹Ø© Ø¬Ø¯Ø§ÙˆÙ„ Ø§Ù„Ù…Ù‚Ø§Ø³Ø§Øª", command=self._print_size_sheets); _b4.pack(side=tk.LEFT, padx=8)
+        ToolTip(_b4, "Ø·Ø¨Ø§Ø¹Ø© Ø¬Ø¯Ø§ÙˆÙ„ Ø§Ù„Ù…Ù‚Ø§Ø³Ø§Øª Ù„ÙƒÙ„ Ù†ÙˆØ¹/Ù…Ø¯Ø±Ø³Ø©/Ù„ÙˆÙ†")
+        _b5 = ttk.Button(btns, text="ØªØ¹Ø¯ÙŠÙ„ Ù†Ø·Ø§Ù‚Ø§Øª Ø§Ù„Ù…Ù‚Ø§Ø³Ø§Øªâ€¦", command=self._edit_size_ranges_dialog); _b5.pack(side=tk.LEFT, padx=8)
+        ToolTip(_b5, "ØªØ¹Ø¯ÙŠÙ„ Ù†Ø·Ø§Ù‚Ø§Øª Ø§Ù„Ù…Ù‚Ø§Ø³Ø§Øª Ø§Ù„Ù…Ø¹Ø±ÙˆØ¶Ø© ÙÙŠ Ø§Ù„Ø¬Ø¯Ø§ÙˆÙ„")
+        _b6 = ttk.Button(btns, text="ØªØ¹ÙŠÙŠÙ† Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø³Ø¹Ø±â€¦", command=self._edit_price_profile_assignment_dialog); _b6.pack(side=tk.LEFT, padx=8)
+        ToolTip(_b6, "Ø±Ø¨Ø· Ø§Ù„Ù†ÙˆØ¹/Ø§Ù„Ù…Ø¯Ø±Ø³Ø©/Ø§Ù„Ù„ÙˆÙ† Ø§Ù„Ø­Ø§Ù„ÙŠÙŠÙ† Ø¨Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø³Ø¹Ø± Ù‚Ø§Ø¨Ù„ Ù„Ø¥Ø¹Ø§Ø¯Ø© Ø§Ù„Ø§Ø³ØªØ®Ø¯Ø§Ù…")
+        _cz = ttk.Checkbutton(btns, text="Ø¥Ø¸Ù‡Ø§Ø± Ø§Ù„ÙƒÙ…ÙŠØ§Øª Ø§Ù„ØµÙØ±ÙŠØ©", variable=self.show_zero_var, command=self._refresh)
+        _cz.pack(side=tk.LEFT, padx=8)
+        ToolTip(_cz, "Ø¥Ø¸Ù‡Ø§Ø± Ø£Ùˆ Ø¥Ø®ÙØ§Ø¡ Ø§Ù„Ø£ØµÙ†Ø§Ù Ø§Ù„ØªÙŠ ÙƒÙ…ÙŠØªÙ‡Ø§ ØµÙØ±")
 
         # Table
         table_wrap = ttk.Frame(self)
@@ -8574,13 +10306,14 @@ class InventoryWindow(tk.Toplevel):
             selectmode="extended",
         )
         for col, txt, w in [
-            ("id","المعرّف",60), ("type","النوع",140), ("school","المدرسة",160),
-            ("color","اللون",80), ("size","المقاس",70), ("wh","المخزن",50),
-            ("pkg","العبوة",60), ("badge","بادج",60), ("price","السعر",80), ("count","الكمية",70), ("value","القيمة",90),
+            ("id","Ø§Ù„Ù…Ø¹Ø±Ù‘Ù",60), ("type","Ø§Ù„Ù†ÙˆØ¹",140), ("school","Ø§Ù„Ù…Ø¯Ø±Ø³Ø©",160),
+            ("color","Ø§Ù„Ù„ÙˆÙ†",80), ("size","Ø§Ù„Ù…Ù‚Ø§Ø³",70), ("wh","Ø§Ù„Ù…Ø®Ø²Ù†",50),
+            ("pkg","Ø§Ù„Ø¹Ø¨ÙˆØ©",60), ("badge","Ø¨Ø§Ø¯Ø¬",60), ("price","Ø§Ù„Ø³Ø¹Ø±",80), ("count","Ø§Ù„ÙƒÙ…ÙŠØ©",70), ("value","Ø§Ù„Ù‚ÙŠÙ…Ø©",90),
         ]:
 
             self.table.heading(col, text=txt)
             self.table.column(col, width=w, anchor="center")
+        self.table.tag_configure("zero_stock", background="#f3f4f6", foreground="#6b7280")
         ysb = ttk.Scrollbar(table_wrap, orient="vertical", command=self.table.yview)
         xsb = ttk.Scrollbar(table_wrap, orient="horizontal", command=self.table.xview)
         self.table.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
@@ -8594,20 +10327,20 @@ class InventoryWindow(tk.Toplevel):
         bar = ttk.Frame(self)
         bar.pack(fill=tk.X, padx=8, pady=(0, 8))
         self.sum_qty = tk.StringVar(value="0")
-        self.sum_val = tk.StringVar(value="0.00")
-        ttk.Label(bar, text="إجمالي الكمية:").pack(side=tk.LEFT)
+        self.sum_val = tk.StringVar(value="0")
+        ttk.Label(bar, text="Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„ÙƒÙ…ÙŠØ©:").pack(side=tk.LEFT)
         ttk.Label(bar, textvariable=self.sum_qty, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(4, 12))
-        ttk.Label(bar, text="إجمالي القيمة:").pack(side=tk.LEFT)
+        ttk.Label(bar, text="Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù‚ÙŠÙ…Ø©:").pack(side=tk.LEFT)
         ttk.Label(bar, textvariable=self.sum_val, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(4, 12))
-        _ba = ttk.Button(bar, text="سجل أسعار الفروع…", command=self._open_price_branch_audit)
+        _ba = ttk.Button(bar, text="Ø³Ø¬Ù„ Ø£Ø³Ø¹Ø§Ø± Ø§Ù„ÙØ±ÙˆØ¹â€¦", command=self._open_price_branch_audit)
         _ba.pack(side=tk.RIGHT)
-        ToolTip(_ba, "عرض سجل مزامنة تعديلات الأسعار إلى فروع البيع (POS)")
-        _bp = ttk.Button(bar, text="تعديل السعر…", command=self._edit_price_dialog); _bp.pack(side=tk.RIGHT, padx=(8, 0))
-        ToolTip(_bp, "تعديل سعر الأصناف المطابقة للفلاتر")
-        _bs = ttk.Button(bar, text="تعديل المواصفات…", command=self._edit_specs_dialog); _bs.pack(side=tk.RIGHT, padx=(8, 0))
-        ToolTip(_bs, "تعديل المخزن/العبوة/البادج للأصناف المطابقة")
-        _bd = ttk.Button(bar, text="حذف المحدد…", command=self._remove_selected_dialog); _bd.pack(side=tk.RIGHT, padx=(8, 0))
-        ToolTip(_bd, "حذف الصفوف المحددة من المخزون")
+        ToolTip(_ba, "Ø¹Ø±Ø¶ Ø³Ø¬Ù„ Ù…Ø²Ø§Ù…Ù†Ø© ØªØ¹Ø¯ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø± Ø¥Ù„Ù‰ ÙØ±ÙˆØ¹ Ø§Ù„Ø¨ÙŠØ¹ (POS)")
+        _bp = ttk.Button(bar, text="ØªØ¹Ø¯ÙŠÙ„ Ø§Ù„Ø³Ø¹Ø±â€¦", command=self._edit_price_dialog); _bp.pack(side=tk.RIGHT, padx=(8, 0))
+        ToolTip(_bp, "ØªØ¹Ø¯ÙŠÙ„ Ø³Ø¹Ø± Ø§Ù„Ø£ØµÙ†Ø§Ù Ø§Ù„Ù…Ø·Ø§Ø¨Ù‚Ø© Ù„Ù„ÙÙ„Ø§ØªØ±")
+        _bs = ttk.Button(bar, text="ØªØ¹Ø¯ÙŠÙ„ Ø§Ù„Ù…ÙˆØ§ØµÙØ§Øªâ€¦", command=self._edit_specs_dialog); _bs.pack(side=tk.RIGHT, padx=(8, 0))
+        ToolTip(_bs, "ØªØ¹Ø¯ÙŠÙ„ Ø§Ù„Ù…Ø®Ø²Ù†/Ø§Ù„Ø¹Ø¨ÙˆØ©/Ø§Ù„Ø¨Ø§Ø¯Ø¬ Ù„Ù„Ø£ØµÙ†Ø§Ù Ø§Ù„Ù…Ø·Ø§Ø¨Ù‚Ø©")
+        _bd = ttk.Button(bar, text="Ø­Ø°Ù Ø§Ù„Ù…Ø­Ø¯Ø¯â€¦", command=self._remove_selected_dialog); _bd.pack(side=tk.RIGHT, padx=(8, 0))
+        ToolTip(_bd, "Ø­Ø°Ù Ø§Ù„ØµÙÙˆÙ Ø§Ù„Ù…Ø­Ø¯Ø¯Ø© Ù…Ù† Ø§Ù„Ù…Ø®Ø²ÙˆÙ†")
 
         self._refresh()
 
@@ -8633,13 +10366,50 @@ class InventoryWindow(tk.Toplevel):
 
         if len(keys) != 1:
             messagebox.showwarning(
-                "تحديد غير صالح",
-                "يجب أن تكون الصفوف المحددة من نفس (النوع، المدرسة، اللون).",
+                "ØªØ­Ø¯ÙŠØ¯ ØºÙŠØ± ØµØ§Ù„Ø­",
+                "ÙŠØ¬Ø¨ Ø£Ù† ØªÙƒÙˆÙ† Ø§Ù„ØµÙÙˆÙ Ø§Ù„Ù…Ø­Ø¯Ø¯Ø© Ù…Ù† Ù†ÙØ³ (Ø§Ù„Ù†ÙˆØ¹ØŒ Ø§Ù„Ù…Ø¯Ø±Ø³Ø©ØŒ Ø§Ù„Ù„ÙˆÙ†).",
                 parent=self
             )
             return None
 
         return keys.pop()
+
+    def _get_selected_price_profile_targets(self):
+        """
+        Price profiles can be assigned to mixed item types/colors, but
+        the selected rows must belong to one school.
+        """
+        sel = self.table.selection()
+        if not sel:
+            return None
+
+        schools = set()
+        targets = set()
+        for iid in sel:
+            vals = self.table.item(iid, "values")
+            if not vals:
+                continue
+            item_type = str(vals[1] or "").strip()
+            school = str(vals[2] or "").strip()
+            color = str(vals[3] or "").strip()
+            if school:
+                schools.add(school)
+            if item_type and school and color:
+                targets.add((item_type, school, color))
+
+        if not targets:
+            return None
+
+        if len(schools) != 1:
+            messagebox.showwarning(
+                "ØªØ­Ø¯ÙŠØ¯ ØºÙŠØ± ØµØ§Ù„Ø­",
+                "ÙŠØ¬Ø¨ Ø£Ù† ØªÙƒÙˆÙ† Ø§Ù„ØµÙÙˆÙ Ø§Ù„Ù…Ø­Ø¯Ø¯Ø© Ù…Ù† Ù†ÙØ³ Ø§Ù„Ù…Ø¯Ø±Ø³Ø©.",
+                parent=self
+            )
+            return None
+
+        return sorted(targets, key=lambda x: (x[1].casefold(), x[0].casefold(), x[2].casefold()))
+
     def _edit_size_ranges_dialog(self):
 
         # 1) Try to get from selected rows
@@ -8655,8 +10425,8 @@ class InventoryWindow(tk.Toplevel):
 
             if not (item_type and school and color):
                 messagebox.showwarning(
-                    "حدد الصنف",
-                    "حدد صفوفًا من الجدول أو اختر (النوع، المدرسة، اللون) أولاً.",
+                    "Ø­Ø¯Ø¯ Ø§Ù„ØµÙ†Ù",
+                    "Ø­Ø¯Ø¯ ØµÙÙˆÙÙ‹Ø§ Ù…Ù† Ø§Ù„Ø¬Ø¯ÙˆÙ„ Ø£Ùˆ Ø§Ø®ØªØ± (Ø§Ù„Ù†ÙˆØ¹ØŒ Ø§Ù„Ù…Ø¯Ø±Ø³Ø©ØŒ Ø§Ù„Ù„ÙˆÙ†) Ø£ÙˆÙ„Ø§Ù‹.",
                     parent=self
                 )
                 return
@@ -8665,7 +10435,7 @@ class InventoryWindow(tk.Toplevel):
         # Fetch existing profile (if any)
 
         dlg = tk.Toplevel(self)
-        dlg.title("تعديل نطاقات المقاسات")
+        dlg.title("ØªØ¹Ø¯ÙŠÙ„ Ù†Ø·Ø§Ù‚Ø§Øª Ø§Ù„Ù…Ù‚Ø§Ø³Ø§Øª")
         dlg.transient(self)
         dlg.grab_set()
 
@@ -8693,7 +10463,7 @@ class InventoryWindow(tk.Toplevel):
             ttk.Label(frm, text=lbl).grid(row=r, column=c, sticky="e", padx=4, pady=4)
             ttk.Entry(frm, textvariable=var, width=8).grid(row=r, column=c+1, sticky="w", padx=4)
 
-        ttk.Label(frm, text="النطاق الأول").grid(row=0, column=0, sticky="w")
+        ttk.Label(frm, text="Ø§Ù„Ù†Ø·Ø§Ù‚ Ø§Ù„Ø£ÙˆÙ„").grid(row=0, column=0, sticky="w")
 
         r1_var = tk.StringVar()
         r1_combo = ttk.Combobox(
@@ -8706,7 +10476,7 @@ class InventoryWindow(tk.Toplevel):
         r1_combo.grid(row=0, column=1, columnspan=2, sticky="w")
 
 
-        ttk.Label(frm, text="النطاق الثاني (اختياري)").grid(row=1, column=0, sticky="w")
+        ttk.Label(frm, text="Ø§Ù„Ù†Ø·Ø§Ù‚ Ø§Ù„Ø«Ø§Ù†ÙŠ (Ø§Ø®ØªÙŠØ§Ø±ÙŠ)").grid(row=1, column=0, sticky="w")
 
         r2_var = tk.StringVar()
         r2_combo = ttk.Combobox(
@@ -8723,16 +10493,16 @@ class InventoryWindow(tk.Toplevel):
             r1s, r1e, r2s, r2e, has_alpha = profile
 
             if r1s is not None and r1e is not None:
-                r1_var.set(f"{r1s} → {r1e}")
+                r1_var.set(f"{r1s} â†’ {r1e}")
 
             if r2s is not None and r2e is not None:
-                r2_var.set(f"{r2s} → {r2e}")
+                r2_var.set(f"{r2s} â†’ {r2e}")
 
             has_alpha_var.set(bool(has_alpha))
 
         ttk.Checkbutton(
             frm,
-            text="تفعيل المقاسات بالحروف (S / M / L ...)",
+            text="ØªÙØ¹ÙŠÙ„ Ø§Ù„Ù…Ù‚Ø§Ø³Ø§Øª Ø¨Ø§Ù„Ø­Ø±ÙˆÙ (S / M / L ...)",
             variable=has_alpha_var
         ).grid(row=2, column=0, columnspan=3, sticky="w")
 
@@ -8747,7 +10517,7 @@ class InventoryWindow(tk.Toplevel):
             v = (v or "").strip()
             if not v:
                 return None, None
-            a, b = v.split("→")
+            a, b = v.split("â†’")
             return int(a.strip()), int(b.strip())
 
 
@@ -8766,14 +10536,153 @@ class InventoryWindow(tk.Toplevel):
                     r2_end=r2e,
                     has_alpha=has_alpha_var.get(),
                 )
-                show_toast(dlg, "تم حفظ نطاقات المقاسات")
+                show_toast(dlg, "ØªÙ… Ø­ÙØ¸ Ù†Ø·Ø§Ù‚Ø§Øª Ø§Ù„Ù…Ù‚Ø§Ø³Ø§Øª")
                 dlg.destroy()
             except Exception as ex:
-                messagebox.showerror("خطأ", str(ex), parent=dlg)
+                messagebox.showerror("Ø®Ø·Ø£", str(ex), parent=dlg)
 
 
-        ttk.Button(btns, text="إلغاء", command=dlg.destroy).pack(side=tk.RIGHT)
-        ttk.Button(btns, text="حفظ", command=on_save).pack(side=tk.RIGHT, padx=6)
+        ttk.Button(btns, text="Ø¥Ù„ØºØ§Ø¡", command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Ø­ÙØ¸", command=on_save).pack(side=tk.RIGHT, padx=6)
+
+    def _edit_price_profile_assignment_dialog(self):
+        has_selection = bool(self.table.selection())
+        selected_stock_ids: List[int] = []
+        selected_inventory_filters: List[Dict[str, Any]] = []
+        for iid in self.table.selection():
+            vals = self.table.item(iid, "values")
+            stock_id = parse_int_text(vals[0]) if vals else None
+            if stock_id is not None:
+                selected_stock_ids.append(stock_id)
+            if vals:
+                selected_inventory_filters.append({
+                    "id": stock_id,
+                    "item_type": str(vals[1] or "").strip(),
+                    "school": str(vals[2] or "").strip(),
+                    "color": str(vals[3] or "").strip(),
+                    "size": _normalize_size_label(_strip_digit_marks(vals[4])),
+                    "warehouse_no": warehouse_numeric_value(vals[5]),
+                    "package_no": str(vals[6] or "").strip(),
+                })
+        targets = self._get_selected_price_profile_targets()
+        if has_selection and not targets:
+            return
+        picked = targets[0] if targets else None
+        if picked:
+            item_type, school, color = picked
+        else:
+            item_type = (self.f_type.get() or "").strip()
+            school = (self.f_school.get() or "").strip()
+            color = (self.f_color.get() or "").strip()
+            if not (item_type and school and color):
+                messagebox.showwarning(
+                    "Ø­Ø¯Ø¯ Ø§Ù„ØµÙ†Ù",
+                    "Ø­Ø¯Ø¯ ØµÙÙˆÙØ§Ù‹ Ù…Ù† Ø§Ù„Ø¬Ø¯ÙˆÙ„ Ø£Ùˆ Ø§Ø®ØªØ± (Ø§Ù„Ù†ÙˆØ¹ØŒ Ø§Ù„Ù…Ø¯Ø±Ø³Ø©ØŒ Ø§Ù„Ù„ÙˆÙ†) Ø£ÙˆÙ„Ø§Ù‹.",
+                    parent=self,
+                )
+                return
+            targets = [(item_type, school, color)]
+
+        profiles = self.db.list_price_profiles()
+        if not profiles:
+            if messagebox.askyesno(
+                "Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø±",
+                "Ù„Ø§ ØªÙˆØ¬Ø¯ Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø£Ø³Ø¹Ø§Ø± Ø¨Ø¹Ø¯. Ù‡Ù„ ØªØ±ÙŠØ¯ ÙØªØ­ Ù†Ø§ÙØ°Ø© Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø± Ø§Ù„Ø¢Ù†ØŸ",
+                parent=self,
+            ):
+                PriceProfileManagerWindow(self, self.db)
+            return
+
+        current_names = set()
+        for t_item, t_school, t_color in targets:
+            current = self.db.get_price_profile_assignment(t_item, t_school, t_color) or {}
+            current_name = str(current.get("profile_name") or "").strip()
+            if current_name:
+                current_names.add(current_name)
+        profile_names = [""] + [str(p.get("name") or "").strip() for p in profiles if str(p.get("name") or "").strip()]
+        profile_map = {str(p.get("name") or "").strip(): int(p["id"]) for p in profiles if str(p.get("name") or "").strip()}
+
+        dlg = tk.Toplevel(self)
+        dlg.title("ØªØ¹ÙŠÙŠÙ† Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø³Ø¹Ø±")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+        target_text = f"{item_type} / {school} / {color}"
+        if len(targets) > 1:
+            target_text = f"{school} - {len(targets)} Ù†ÙˆØ¹/Ù„ÙˆÙ† Ù…Ø­Ø¯Ø¯"
+        ttk.Label(frm, text=target_text, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 10))
+
+        selected_name = tk.StringVar(value=next(iter(current_names)) if len(current_names) == 1 else "")
+        ttk.Label(frm, text="Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø§Ù„Ø³Ø¹Ø±").pack(anchor="w")
+        combo = ttk.Combobox(frm, textvariable=selected_name, state="readonly", values=profile_names)
+        combo.pack(fill=tk.X, pady=(4, 8))
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill=tk.X, pady=(8, 0))
+
+        def _save():
+            label = (selected_name.get() or "").strip()
+            profile_id = profile_map.get(label)
+            if not profile_id:
+                messagebox.showwarning("Ø§Ø®ØªØ± Ø¨Ø±ÙˆÙØ§ÙŠÙ„", "Ø§Ø®ØªØ± Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø³Ø¹Ø± Ù‚Ø¨Ù„ Ø§Ù„Ø­ÙØ¸.", parent=dlg)
+                return
+            try:
+                for t_item, t_school, t_color in targets:
+                    self.db.assign_price_profile(t_item, t_school, t_color, profile_id)
+                if selected_inventory_filters:
+                    updated = 0
+                    skipped = 0
+                    for flt in selected_inventory_filters:
+                        price = self.db.get_price_profile_price(profile_id, flt.get("item_type"), flt.get("size"))
+                        if price is None:
+                            skipped += 1
+                            continue
+                        update_filter = {"id": int(flt["id"])} if flt.get("id") else {
+                            "item_type": flt.get("item_type"),
+                            "school": flt.get("school"),
+                            "color": flt.get("color"),
+                            "size": flt.get("size"),
+                            "warehouse_no": flt.get("warehouse_no"),
+                            "package_no": flt.get("package_no"),
+                        }
+                        updated += self.db.update_prices(
+                            update_filter,
+                            float(price),
+                            note=f"Price profile applied: {label}",
+                        )
+                    result = {"updated": updated, "skipped": skipped, "checked": len(selected_inventory_filters)}
+                else:
+                    result = self.db.apply_price_profile_to_stock(
+                        profile_id,
+                        targets,
+                        stock_ids=selected_stock_ids if selected_stock_ids else None,
+                        note=f"Price profile applied: {label}",
+                    )
+                show_toast(
+                    dlg,
+                    f"ØªÙ… Ø­ÙØ¸ Ø§Ù„Ø¨Ø±ÙˆÙØ§ÙŠÙ„ ÙˆØªØ­Ø¯ÙŠØ« {result.get('updated', 0)} ØµÙØŒ ÙˆØªØ®Ø·ÙŠ {result.get('skipped', 0)}",
+                    bg="#16a34a" if int(result.get("updated", 0) or 0) else "#f59e0b",
+                )
+                dlg.destroy()
+                self._refresh()
+            except Exception as ex:
+                messagebox.showerror("Ø®Ø·Ø£", str(ex), parent=dlg)
+
+        def _clear():
+            try:
+                for t_item, t_school, t_color in targets:
+                    self.db.clear_price_profile_assignment(t_item, t_school, t_color)
+                show_toast(dlg, f"ØªÙ… Ù…Ø³Ø­ Ø§Ù„Ø±Ø¨Ø· Ù…Ù† {len(targets)} Ù†ÙˆØ¹/Ù„ÙˆÙ†")
+                dlg.destroy()
+            except Exception as ex:
+                messagebox.showerror("Ø®Ø·Ø£", str(ex), parent=dlg)
+
+        ttk.Button(btns, text="Ø¥Ø¯Ø§Ø±Ø© Ø§Ù„Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øªâ€¦", command=lambda: PriceProfileManagerWindow(dlg, self.db)).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Ø¥Ù„ØºØ§Ø¡", command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Ø­ÙØ¸", command=_save).pack(side=tk.RIGHT, padx=6)
+        ttk.Button(btns, text="Ù…Ø³Ø­ Ø§Ù„Ø±Ø¨Ø·", command=_clear).pack(side=tk.RIGHT, padx=6)
 
     def _open_multi_dialog(self, field: str):
         # Source values for each field
@@ -8794,7 +10703,7 @@ class InventoryWindow(tk.Toplevel):
         preselected = [str(x) for x in self.multi[field]]
         if field == "warehouse_no":
             preselected = [warehouse_display_label(x) for x in preselected]
-        dlg = MultiSelectDialog(self, title="اختيار متعدد", values=values, preselected=preselected)
+        dlg = MultiSelectDialog(self, title="Ø§Ø®ØªÙŠØ§Ø± Ù…ØªØ¹Ø¯Ø¯", values=values, preselected=preselected)
         picked = dlg.run()
         if picked is None:
             return  # cancelled
@@ -8811,7 +10720,7 @@ class InventoryWindow(tk.Toplevel):
         # Update button label with count
         btn = self._multi_btns.get(field)
         if btn:
-            btn.configure(text=f"اختيار متعدد… ({len(self.multi[field])})" if self.multi[field] else "اختيار متعدد…")
+            btn.configure(text=f"Ø§Ø®ØªÙŠØ§Ø± Ù…ØªØ¹Ø¯Ø¯â€¦ ({len(self.multi[field])})" if self.multi[field] else "Ø§Ø®ØªÙŠØ§Ø± Ù…ØªØ¹Ø¯Ø¯â€¦")
 
         # Enforce single-active-field rule in the UI
         self._enforce_single_active_field()
@@ -8867,11 +10776,11 @@ class InventoryWindow(tk.Toplevel):
         try:
             rows = self.db.current_inventory(self._filters())
         except Exception as ex:
-            messagebox.showerror("فشل", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„", str(ex), parent=self)
             return
 
         if not rows:
-            show_toast(self, "لا توجد صفوف مطابقة للطباعة", bg="#f59e0b")
+            show_toast(self, "Ù„Ø§ ØªÙˆØ¬Ø¯ ØµÙÙˆÙ Ù…Ø·Ø§Ø¨Ù‚Ø© Ù„Ù„Ø·Ø¨Ø§Ø¹Ø©", bg="#f59e0b")
             return
         from collections import defaultdict, OrderedDict
 
@@ -8921,7 +10830,7 @@ class InventoryWindow(tk.Toplevel):
 
         tables_html = []
 
-        for sch, item_groups in school_groups.items():
+        for sch, item_groups in sorted(school_groups.items(), key=lambda kv: kv[0].casefold()):
             ordered_item_groups = sorted(
                 item_groups.items(),
                 key=lambda kv: _item_print_sort_key(kv[0][0], kv[0][1]),
@@ -8941,7 +10850,7 @@ class InventoryWindow(tk.Toplevel):
                 profile = self.db.get_size_profile(t, sch, clr)
                 numeric_tables, alpha_labels = build_size_ranges_from_profile(profile)
 
-                # 🔴 FALLBACK: no profile → use actual available sizes
+                # ðŸ”´ FALLBACK: no profile â†’ use actual available sizes
                 if not numeric_tables and not alpha_labels:
                     all_sizes = sorted(
                         { _normalize_size_label(r.get("size") or "") for r in items }
@@ -8964,9 +10873,9 @@ class InventoryWindow(tk.Toplevel):
 
                 head = f"""
                 <div class="hdr">
-                    <span>النوع: {_html(t)}</span>
-                    <span>المدرسة: {_html(sch)}</span>
-                    <span>اللون: {_html(clr)}</span>
+                    <span>Ø§Ù„Ù†ÙˆØ¹: {_html(t)}</span>
+                    <span>Ø§Ù„Ù…Ø¯Ø±Ø³Ø©: {_html(sch)}</span>
+                    <span>Ø§Ù„Ù„ÙˆÙ†: {_html(clr)}</span>
                 </div>
                 """
 
@@ -8991,7 +10900,7 @@ class InventoryWindow(tk.Toplevel):
                 # ---------- alpha table ----------
                 if alpha_labels:
                     tables.append("""
-                    <div style="margin-top:6px;font-weight:600">المقاسات بالحروف</div>
+                    <div style="margin-top:6px;font-weight:600">Ø§Ù„Ù…Ù‚Ø§Ø³Ø§Øª Ø¨Ø§Ù„Ø­Ø±ÙˆÙ</div>
                     """ + build_table(alpha_labels))
 
                 tables_html.append(f'<section class="sheet">{head}{"".join(tables)}</section>')
@@ -9002,7 +10911,7 @@ class InventoryWindow(tk.Toplevel):
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8" />
-<title>جداول المقاسات</title>
+<title>Ø¬Ø¯Ø§ÙˆÙ„ Ø§Ù„Ù…Ù‚Ø§Ø³Ø§Øª</title>
 <style>
 @page {{ size: A4; margin: 12mm; }}
 * {{ box-sizing: border-box; }}
@@ -9065,6 +10974,7 @@ try {{ window.print(); }} catch(e) {{}}
                 "warehouse_no": None, "package_no": None,
             }
             f[fld] = self.multi[fld][:]
+            f["hide_zero"] = not bool(self.show_zero_var.get())
             return f
 
         # No multi: build from single-value controls
@@ -9075,33 +10985,36 @@ try {{ window.print(); }} catch(e) {{}}
             "size": self.f_size.get() or None,
             "warehouse_no": (self.f_wh.get() or None),
             "package_no": (self.f_pkg.get() or None),
+            "hide_zero": not bool(self.show_zero_var.get()),
         }
 
     def _refresh(self):
         try:
             rows = self.db.current_inventory(self._filters())
         except Exception as ex:
-            messagebox.showerror("فشل البحث", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø¨Ø­Ø«", str(ex), parent=self)
             return
 
         self.table.delete(*self.table.get_children())
         total_qty = 0
         total_value = 0.0
         for r in rows:
+            tags = ("zero_stock",) if int(r.get("count") or 0) == 0 else ()
             self.table.insert(
                 "", tk.END,
                 values=(r["id"], r["item_type"], r["school"], r["color"], r["size"],
                         r["warehouse_no"], r["package_no"],
-                        ("✓" if int(r.get("has_badge") or 0) else ""),
-                        f"{float(r['unit_price']):.2f}",
-                        r["count"], f"{float(r['value']):.2f}")
+                        ("âœ“" if int(r.get("has_badge") or 0) else ""),
+                        f"{format_money(float(r['unit_price']))}",
+                        r["count"], f"{format_money(float(r['value']))}"),
+                tags=tags,
             )
 
             total_qty += int(r["count"])
             total_value += float(r["value"])
         self.sum_qty.set(str(total_qty))
-        self.sum_val.set(f"{total_value:.2f}")
-        apply_zebra_tags(self.table)
+        self.sum_val.set(f"{format_money(total_value)}")
+        apply_zebra_tags(self.table, skip_tags={"zero_stock"})
 
     def _clear_all(self):
         # Clear single inputs
@@ -9114,7 +11027,7 @@ try {{ window.print(); }} catch(e) {{}}
         for k in self.multi.keys():
             self.multi[k] = []
         for b in self._multi_btns.values():
-            b.configure(text="اختيار متعدد…")
+            b.configure(text="Ø§Ø®ØªÙŠØ§Ø± Ù…ØªØ¹Ø¯Ø¯â€¦")
 
         # Re-enable everything
         self._enforce_single_active_field()
@@ -9126,11 +11039,11 @@ try {{ window.print(); }} catch(e) {{}}
         try:
             db_rows = self.db.current_inventory(self._filters())
         except Exception as ex:
-            messagebox.showerror("فشل التصدير", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„ØªØµØ¯ÙŠØ±", str(ex), parent=self)
             return
 
         path = filedialog.asksaveasfilename(
-            title="تصدير المخزون إلى إكسل",
+            title="ØªØµØ¯ÙŠØ± Ø§Ù„Ù…Ø®Ø²ÙˆÙ† Ø¥Ù„Ù‰ Ø¥ÙƒØ³Ù„",
             defaultextension=".xlsx",
             filetypes=[("Excel Workbook", "*.xlsx"), ("Excel 97-2003 XML", "*.xls"), ("All files", "*.*")],
             initialfile=f"inventory_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
@@ -9140,16 +11053,16 @@ try {{ window.print(); }} catch(e) {{}}
             return
         try:
             self.db.export_inventory_excel(path, db_rows)
-            show_toast(self, f"تم حفظ المخزون إلى إكسل بنجاح")
+            show_toast(self, f"ØªÙ… Ø­ÙØ¸ Ø§Ù„Ù…Ø®Ø²ÙˆÙ† Ø¥Ù„Ù‰ Ø¥ÙƒØ³Ù„ Ø¨Ù†Ø¬Ø§Ø­")
         except Exception as ex:
-            messagebox.showerror("فشل التصدير", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„ØªØµØ¯ÙŠØ±", str(ex), parent=self)
 
     def _remove_selected_dialog(self):
         sel = self.table.selection()
         if not sel:
             messagebox.showwarning(
-                "لم يتم التحديد",
-                "اختر صفًا واحدًا أو أكثر من المخزون أولًا.",
+                "Ù„Ù… ÙŠØªÙ… Ø§Ù„ØªØ­Ø¯ÙŠØ¯",
+                "Ø§Ø®ØªØ± ØµÙÙ‹Ø§ ÙˆØ§Ø­Ø¯Ù‹Ø§ Ø£Ùˆ Ø£ÙƒØ«Ø± Ù…Ù† Ø§Ù„Ù…Ø®Ø²ÙˆÙ† Ø£ÙˆÙ„Ù‹Ø§.",
                 parent=self
             )
             return
@@ -9163,11 +11076,11 @@ try {{ window.print(); }} catch(e) {{}}
             r = rows[0]
             label = f"{r[1]} / {r[2]} / {r[3]} / {r[4]}"
             available = int(r[9])
-            title = "حذف من المخزون (يتطلب كلمة مرور)"
+            title = "Ø­Ø°Ù Ù…Ù† Ø§Ù„Ù…Ø®Ø²ÙˆÙ† (ÙŠØªØ·Ù„Ø¨ ÙƒÙ„Ù…Ø© Ù…Ø±ÙˆØ±)"
         else:
-            label = f"عدد الصفوف المحددة: {len(rows)}"
+            label = f"Ø¹Ø¯Ø¯ Ø§Ù„ØµÙÙˆÙ Ø§Ù„Ù…Ø­Ø¯Ø¯Ø©: {len(rows)}"
             available = sum(int(r[9]) for r in rows)
-            title = "حذف متعدد من المخزون (يتطلب كلمة مرور)"
+            title = "Ø­Ø°Ù Ù…ØªØ¹Ø¯Ø¯ Ù…Ù† Ø§Ù„Ù…Ø®Ø²ÙˆÙ† (ÙŠØªØ·Ù„Ø¨ ÙƒÙ„Ù…Ø© Ù…Ø±ÙˆØ±)"
 
         dlg = tk.Toplevel(self)
         dlg.title(title)
@@ -9180,17 +11093,17 @@ try {{ window.print(); }} catch(e) {{}}
         ttk.Label(frm, text=label, font=("Segoe UI", 10, "bold"))\
             .grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
-        ttk.Label(frm, text=f"إجمالي المتوفر: {available}")\
+        ttk.Label(frm, text=f"Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…ØªÙˆÙØ±: {available}")\
             .grid(row=1, column=0, columnspan=2, sticky="w")
 
-        ttk.Label(frm, text="الكمية المطلوب حذفها (فارغ = الكل):")\
+        ttk.Label(frm, text="Ø§Ù„ÙƒÙ…ÙŠØ© Ø§Ù„Ù…Ø·Ù„ÙˆØ¨ Ø­Ø°ÙÙ‡Ø§ (ÙØ§Ø±Øº = Ø§Ù„ÙƒÙ„):")\
             .grid(row=2, column=0, sticky="e", padx=4, pady=8)
 
         qty_var = tk.StringVar()
         ttk.Entry(frm, textvariable=qty_var, width=12)\
             .grid(row=2, column=1, sticky="w", padx=4, pady=8)
 
-        ttk.Label(frm, text="كلمة المرور:")\
+        ttk.Label(frm, text="ÙƒÙ„Ù…Ø© Ø§Ù„Ù…Ø±ÙˆØ±:")\
             .grid(row=3, column=0, sticky="e", padx=4, pady=4)
 
         pw_var = tk.StringVar()
@@ -9202,20 +11115,17 @@ try {{ window.print(); }} catch(e) {{}}
 
         def on_ok():
             if not self.db.verify_admin_password(pw_var.get()):
-                messagebox.showerror("مرفوض", "كلمة المرور غير صحيحة.", parent=dlg)
+                messagebox.showerror("Ù…Ø±ÙÙˆØ¶", "ÙƒÙ„Ù…Ø© Ø§Ù„Ù…Ø±ÙˆØ± ØºÙŠØ± ØµØ­ÙŠØ­Ø©.", parent=dlg)
                 return
 
             qtext = qty_var.get().strip()
             qty = None
             if qtext:
-                try:
-                    qty = int(qtext)
-                    if qty <= 0:
-                        raise ValueError
-                except ValueError:
+                qty = parse_int_text(qtext)
+                if qty is None or qty <= 0:
                     messagebox.showerror(
-                        "كمية غير صالحة",
-                        "أدخل عددًا موجبًا أو اتركه فارغًا للكل.",
+                        "ÙƒÙ…ÙŠØ© ØºÙŠØ± ØµØ§Ù„Ø­Ø©",
+                        "Ø£Ø¯Ø®Ù„ Ø¹Ø¯Ø¯Ù‹Ø§ Ù…ÙˆØ¬Ø¨Ù‹Ø§ Ø£Ùˆ Ø§ØªØ±ÙƒÙ‡ ÙØ§Ø±ØºÙ‹Ø§ Ù„Ù„ÙƒÙ„.",
                         parent=dlg
                     )
                     return
@@ -9228,14 +11138,14 @@ try {{ window.print(); }} catch(e) {{}}
                     )
 
                 dlg.destroy()
-                show_toast(self, f"تم حذف {total_removed} وحدة من {len(ids)} صف(وف)")
+                show_toast(self, f"ØªÙ… Ø­Ø°Ù {total_removed} ÙˆØ­Ø¯Ø© Ù…Ù† {len(ids)} ØµÙ(ÙˆÙ)")
                 self._refresh()
 
             except Exception as ex:
-                messagebox.showerror("خطأ", str(ex), parent=dlg)
+                messagebox.showerror("Ø®Ø·Ø£", str(ex), parent=dlg)
 
-        ttk.Button(btns, text="إلغاء", command=dlg.destroy).pack(side=tk.RIGHT)
-        ttk.Button(btns, text="حذف", command=on_ok).pack(side=tk.RIGHT, padx=6)
+        ttk.Button(btns, text="Ø¥Ù„ØºØ§Ø¡", command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Ø­Ø°Ù", command=on_ok).pack(side=tk.RIGHT, padx=6)
 
     # file: ui/edit_price_dialog.py
 
@@ -9243,17 +11153,17 @@ try {{ window.print(); }} catch(e) {{}}
         row = 0
         sel = self.table.selection()
         if not sel:
-            messagebox.showwarning("لم يتم التحديد", "اختر صفًا من المخزون أولًا.", parent=self)
+            messagebox.showwarning("Ù„Ù… ÙŠØªÙ… Ø§Ù„ØªØ­Ø¯ÙŠØ¯", "Ø§Ø®ØªØ± ØµÙÙ‹Ø§ Ù…Ù† Ø§Ù„Ù…Ø®Ø²ÙˆÙ† Ø£ÙˆÙ„Ù‹Ø§.", parent=self)
             return
 
         rows = [self.table.item(i, "values") for i in sel]
         first = rows[0]
 
-        current_price = float(first[8])
+        current_price = parse_float_text(first[8], 0.0) or 0.0
         multi = len(rows) > 1
 
         dlg = tk.Toplevel(self)
-        dlg.title("تعديل السعر")
+        dlg.title("ØªØ¹Ø¯ÙŠÙ„ Ø§Ù„Ø³Ø¹Ø±")
         dlg.transient(self)
         dlg.grab_set()
 
@@ -9264,13 +11174,13 @@ try {{ window.print(); }} catch(e) {{}}
         if multi:
             ttk.Label(
                 frm,
-                text=f"عدد الصفوف المحددة: {len(rows)}",
+                text=f"Ø¹Ø¯Ø¯ Ø§Ù„ØµÙÙˆÙ Ø§Ù„Ù…Ø­Ø¯Ø¯Ø©: {len(rows)}",
                 font=("Segoe UI", 10, "bold")
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 2))
             row += 1
             ttk.Label(
                 frm,
-                text="يمكنك تحديد صفوف بنفس النوع والمدرسة ومقاسات مختلفة؛ سيتم تحديث كل صف ومزامنة الفروع لكل مقاس على حدة عند تفعيل المزامنة.",
+                text="ÙŠÙ…ÙƒÙ†Ùƒ ØªØ­Ø¯ÙŠØ¯ ØµÙÙˆÙ Ø¨Ù†ÙØ³ Ø§Ù„Ù†ÙˆØ¹ ÙˆØ§Ù„Ù…Ø¯Ø±Ø³Ø© ÙˆÙ…Ù‚Ø§Ø³Ø§Øª Ù…Ø®ØªÙ„ÙØ©Ø› Ø³ÙŠØªÙ… ØªØ­Ø¯ÙŠØ« ÙƒÙ„ ØµÙ ÙˆÙ…Ø²Ø§Ù…Ù†Ø© Ø§Ù„ÙØ±ÙˆØ¹ Ù„ÙƒÙ„ Ù…Ù‚Ø§Ø³ Ø¹Ù„Ù‰ Ø­Ø¯Ø© Ø¹Ù†Ø¯ ØªÙØ¹ÙŠÙ„ Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø©.",
                 wraplength=520,
                 foreground="#64748B",
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6))
@@ -9278,25 +11188,25 @@ try {{ window.print(); }} catch(e) {{}}
         else:
             ttk.Label(
                 frm,
-                text=f"الصنف: {first[1]} / {first[2]} / {first[3]} / {first[4]}"
+                text=f"Ø§Ù„ØµÙ†Ù: {first[1]} / {first[2]} / {first[3]} / {first[4]}"
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6))
             row += 1
 
             ttk.Label(
                 frm,
-                text=f"المخزن/العبوة: {first[5]} / {first[6]}"
+                text=f"Ø§Ù„Ù…Ø®Ø²Ù†/Ø§Ù„Ø¹Ø¨ÙˆØ©: {first[5]} / {first[6]}"
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6))
             row += 1
 
             ttk.Label(
                 frm,
-                text=f"السعر الحالي: {current_price:.2f}"
+                text=f"Ø§Ù„Ø³Ø¹Ø± Ø§Ù„Ø­Ø§Ù„ÙŠ: {format_money(current_price)}"
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
             row += 1
 
         # ---- New price ----
-        ttk.Label(frm, text="السعر الجديد:").grid(row=row, column=0, sticky="e", padx=4, pady=6)
-        price_var = tk.StringVar(value=f"{current_price:.2f}")
+        ttk.Label(frm, text="Ø§Ù„Ø³Ø¹Ø± Ø§Ù„Ø¬Ø¯ÙŠØ¯:").grid(row=row, column=0, sticky="e", padx=4, pady=6)
+        price_var = tk.StringVar(value=f"{format_money(current_price)}")
         ttk.Entry(frm, textvariable=price_var, width=16).grid(
             row=row, column=1, sticky="w", padx=4, pady=6
         )
@@ -9309,20 +11219,20 @@ try {{ window.print(); }} catch(e) {{}}
         except Exception:
             pos_names = []
 
-        sync_box = ttk.LabelFrame(frm, text="مزامنة سعر الفروع (POS)")
+        sync_box = ttk.LabelFrame(frm, text="Ù…Ø²Ø§Ù…Ù†Ø© Ø³Ø¹Ø± Ø§Ù„ÙØ±ÙˆØ¹ (POS)")
         sync_box.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(6, 10))
         pos_sync_var = tk.StringVar(value="all-pos")
 
         ttk.Radiobutton(
             sync_box,
-            text="كل فروع البيع",
+            text="ÙƒÙ„ ÙØ±ÙˆØ¹ Ø§Ù„Ø¨ÙŠØ¹",
             variable=pos_sync_var,
             value="all-pos",
         ).pack(anchor="w", padx=8, pady=(6, 2))
 
         ttk.Radiobutton(
             sync_box,
-            text="فروع محددة…",
+            text="ÙØ±ÙˆØ¹ Ù…Ø­Ø¯Ø¯Ø©â€¦",
             variable=pos_sync_var,
             value="selected-pos",
         ).pack(anchor="w", padx=8, pady=2)
@@ -9340,7 +11250,7 @@ try {{ window.print(); }} catch(e) {{}}
 
         ttk.Radiobutton(
             sync_box,
-            text="لا (تحديث المخزن فقط)",
+            text="Ù„Ø§ (ØªØ­Ø¯ÙŠØ« Ø§Ù„Ù…Ø®Ø²Ù† ÙÙ‚Ø·)",
             variable=pos_sync_var,
             value="none",
         ).pack(anchor="w", padx=8, pady=(2, 8))
@@ -9364,19 +11274,19 @@ try {{ window.print(); }} catch(e) {{}}
 
         # ---- Scope (single-row only) ----
         if not multi:
-            scope_box = ttk.LabelFrame(frm, text="النطاق")
+            scope_box = ttk.LabelFrame(frm, text="Ø§Ù„Ù†Ø·Ø§Ù‚")
             scope_box.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(6, 10))
 
             ttk.Radiobutton(
                 scope_box,
-                text="الصف المحدد فقط",
+                text="Ø§Ù„ØµÙ Ø§Ù„Ù…Ø­Ø¯Ø¯ ÙÙ‚Ø·",
                 variable=scope_var,
                 value="row"
             ).pack(anchor="w", padx=8, pady=4)
 
             ttk.Radiobutton(
                 scope_box,
-                text="كل الصفوف بنفس (النوع/المدرسة/المقاس) داخل نفس المخزن/العبوة",
+                text="ÙƒÙ„ Ø§Ù„ØµÙÙˆÙ Ø¨Ù†ÙØ³ (Ø§Ù„Ù†ÙˆØ¹/Ø§Ù„Ù…Ø¯Ø±Ø³Ø©/Ø§Ù„Ù…Ù‚Ø§Ø³) Ø¯Ø§Ø®Ù„ Ù†ÙØ³ Ø§Ù„Ù…Ø®Ø²Ù†/Ø§Ù„Ø¹Ø¨ÙˆØ©",
                 variable=scope_var,
                 value="same_pkg"
             ).pack(anchor="w", padx=8, pady=4)
@@ -9386,7 +11296,7 @@ try {{ window.print(); }} catch(e) {{}}
         # ---- OK handler ----
         def on_ok():
             def _single_int_or_none(value: Any) -> Optional[int]:
-                txt = str(value or "").strip()
+                txt = _strip_digit_marks(value).strip()
                 if not txt or "," in txt:
                     return None
                 try:
@@ -9395,22 +11305,25 @@ try {{ window.print(); }} catch(e) {{}}
                     return None
 
             def _visible_row_filter(values: Sequence[Any]) -> Dict[str, Any]:
+                row_id = _single_int_or_none(values[0])
+                if row_id is not None:
+                    return {"id": row_id}
                 return {
                     "item_type": values[1],
                     "school": values[2],
                     "color": values[3],
                     "size": values[4],
-                    "warehouse_no": values[5],
-                    "package_no": values[6],
-                    "unit_price": float(values[8]),
+                    "warehouse_no": _single_int_or_none(values[5]),
+                    "package_no": _single_int_or_none(values[6]),
+                    "unit_price": parse_float_text(values[8], 0.0) or 0.0,
                 }
 
             try:
-                new_price = float(price_var.get())
+                new_price = parse_float_text(price_var.get())
                 if new_price < 0:
                     raise ValueError
             except Exception:
-                messagebox.showerror("قيمة غير صالحة", "أدخل سعرًا رقميًا غير سالب.", parent=dlg)
+                messagebox.showerror("Ù‚ÙŠÙ…Ø© ØºÙŠØ± ØµØ§Ù„Ø­Ø©", "Ø£Ø¯Ø®Ù„ Ø³Ø¹Ø±Ù‹Ø§ Ø±Ù‚Ù…ÙŠÙ‹Ø§ ØºÙŠØ± Ø³Ø§Ù„Ø¨.", parent=dlg)
                 return
 
             try:
@@ -9431,8 +11344,8 @@ try {{ window.print(); }} catch(e) {{}}
                             selected_pos.append(txt)
                     if not selected_pos:
                         messagebox.showwarning(
-                            "اختر الفروع",
-                            "اختر فرعًا واحدًا على الأقل من قائمة فروع البيع، أو غيّر خيار المزامنة إلى «كل الفروع».",
+                            "Ø§Ø®ØªØ± Ø§Ù„ÙØ±ÙˆØ¹",
+                            "Ø§Ø®ØªØ± ÙØ±Ø¹Ù‹Ø§ ÙˆØ§Ø­Ø¯Ù‹Ø§ Ø¹Ù„Ù‰ Ø§Ù„Ø£Ù‚Ù„ Ù…Ù† Ù‚Ø§Ø¦Ù…Ø© ÙØ±ÙˆØ¹ Ø§Ù„Ø¨ÙŠØ¹ØŒ Ø£Ùˆ ØºÙŠÙ‘Ø± Ø®ÙŠØ§Ø± Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø© Ø¥Ù„Ù‰ Â«ÙƒÙ„ Ø§Ù„ÙØ±ÙˆØ¹Â».",
                             parent=dlg,
                         )
                         return
@@ -9468,8 +11381,8 @@ try {{ window.print(); }} catch(e) {{}}
                         pkg_value = _single_int_or_none(first[6])
                         if pkg_value is None:
                             messagebox.showwarning(
-                                "نطاق غير صالح",
-                                "هذا الصف يعرض أكثر من عبوة مجمعة، لذلك لا يمكن استخدام خيار «نفس المخزن/العبوة» معه. استخدم «الصف المحدد فقط».",
+                                "Ù†Ø·Ø§Ù‚ ØºÙŠØ± ØµØ§Ù„Ø­",
+                                "Ù‡Ø°Ø§ Ø§Ù„ØµÙ ÙŠØ¹Ø±Ø¶ Ø£ÙƒØ«Ø± Ù…Ù† Ø¹Ø¨ÙˆØ© Ù…Ø¬Ù…Ø¹Ø©ØŒ Ù„Ø°Ù„Ùƒ Ù„Ø§ ÙŠÙ…ÙƒÙ† Ø§Ø³ØªØ®Ø¯Ø§Ù… Ø®ÙŠØ§Ø± Â«Ù†ÙØ³ Ø§Ù„Ù…Ø®Ø²Ù†/Ø§Ù„Ø¹Ø¨ÙˆØ©Â» Ù…Ø¹Ù‡. Ø§Ø³ØªØ®Ø¯Ù… Â«Ø§Ù„ØµÙ Ø§Ù„Ù…Ø­Ø¯Ø¯ ÙÙ‚Ø·Â».",
                                 parent=dlg,
                             )
                             return
@@ -9490,20 +11403,20 @@ try {{ window.print(); }} catch(e) {{}}
 
                 dlg.destroy()
                 if updated_total == 0:
-                    show_toast(self, "لم يتم العثور على صفوف مطابقة", bg="#f59e0b")
+                    show_toast(self, "Ù„Ù… ÙŠØªÙ… Ø§Ù„Ø¹Ø«ÙˆØ± Ø¹Ù„Ù‰ ØµÙÙˆÙ Ù…Ø·Ø§Ø¨Ù‚Ø©", bg="#f59e0b")
                 else:
-                    show_toast(self, f"تم تحديث السعر في {updated_total} صف(وف)")
+                    show_toast(self, f"ØªÙ… ØªØ­Ø¯ÙŠØ« Ø§Ù„Ø³Ø¹Ø± ÙÙŠ {updated_total} ØµÙ(ÙˆÙ)")
                 self._refresh()
 
             except Exception as ex:
-                messagebox.showerror("فشل التحديث", str(ex), parent=dlg)
+                messagebox.showerror("ÙØ´Ù„ Ø§Ù„ØªØ­Ø¯ÙŠØ«", str(ex), parent=dlg)
 
         # ---- Buttons (ONCE, ALWAYS) ----
         btns = ttk.Frame(frm)
         btns.grid(row=row, column=0, columnspan=2, sticky="e", pady=(12, 0))
 
-        ttk.Button(btns, text="إلغاء", command=dlg.destroy).pack(side=tk.RIGHT)
-        ttk.Button(btns, text="حفظ", command=on_ok).pack(side=tk.RIGHT, padx=6)
+        ttk.Button(btns, text="Ø¥Ù„ØºØ§Ø¡", command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Ø­ÙØ¸", command=on_ok).pack(side=tk.RIGHT, padx=6)
 
         dlg.update_idletasks()
 
@@ -9520,8 +11433,11 @@ try {{ window.print(); }} catch(e) {{}}
             # target selected rows
             for iid in sel:
                 vals = self.table.item(iid, "values")
-                ids.append(int(vals[0]))
-            scope_text = f"عدد الصفوف المحددة: {len(ids)}"
+                stock_id = parse_int_text(vals[0])
+                if stock_id is None:
+                    raise ValueError(f"Ù…Ø¹Ø±Ù ØµÙ ØºÙŠØ± ØµØ§Ù„Ø­: {vals[0]}")
+                ids.append(stock_id)
+            scope_text = f"Ø¹Ø¯Ø¯ Ø§Ù„ØµÙÙˆÙ Ø§Ù„Ù…Ø­Ø¯Ø¯Ø©: {len(ids)}"
             scope_mode = "ids"
         else:
             # fall back to package filters
@@ -9529,19 +11445,19 @@ try {{ window.print(); }} catch(e) {{}}
             pkg_txt = (self.f_pkg.get() or "").strip()
             if not (wh_txt and pkg_txt and wh_txt.isdigit() and pkg_txt.isdigit()):
                 messagebox.showwarning(
-                    "حدد النطاق",
-                    "اختر صفوفًا من الجدول أو أدخل (المخزن/العبوة) في أعلى الشاشة لتطبيق التعديل على العبوة كلها.",
+                    "Ø­Ø¯Ø¯ Ø§Ù„Ù†Ø·Ø§Ù‚",
+                    "Ø§Ø®ØªØ± ØµÙÙˆÙÙ‹Ø§ Ù…Ù† Ø§Ù„Ø¬Ø¯ÙˆÙ„ Ø£Ùˆ Ø£Ø¯Ø®Ù„ (Ø§Ù„Ù…Ø®Ø²Ù†/Ø§Ù„Ø¹Ø¨ÙˆØ©) ÙÙŠ Ø£Ø¹Ù„Ù‰ Ø§Ù„Ø´Ø§Ø´Ø© Ù„ØªØ·Ø¨ÙŠÙ‚ Ø§Ù„ØªØ¹Ø¯ÙŠÙ„ Ø¹Ù„Ù‰ Ø§Ù„Ø¹Ø¨ÙˆØ© ÙƒÙ„Ù‡Ø§.",
                     parent=self,
                 )
                 return
             w = int(wh_txt); p = int(pkg_txt)
-            scope_text = f"النطاق: المخزن {w} / العبوة {p}"
+            scope_text = f"Ø§Ù„Ù†Ø·Ø§Ù‚: Ø§Ù„Ù…Ø®Ø²Ù† {w} / Ø§Ù„Ø¹Ø¨ÙˆØ© {p}"
             scope_mode = "pkg"
             ids = [w, p]  # stash just to reuse locals (won't be used as ids)
 
         # --- Dialog UI ---
         dlg = tk.Toplevel(self)
-        dlg.title("تعديل المواصفات")
+        dlg.title("ØªØ¹Ø¯ÙŠÙ„ Ø§Ù„Ù…ÙˆØ§ØµÙØ§Øª")
         dlg.transient(self)
         dlg.grab_set()
 
@@ -9549,27 +11465,27 @@ try {{ window.print(); }} catch(e) {{}}
         frm.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(frm, text=scope_text, font=("", 10, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0,8))
-        ttk.Label(frm, text="اترك الحقل فارغًا إذا كنت لا تريد تغييره.").grid(row=1, column=0, columnspan=2, sticky="w", pady=(0,10))
+        ttk.Label(frm, text="Ø§ØªØ±Ùƒ Ø§Ù„Ø­Ù‚Ù„ ÙØ§Ø±ØºÙ‹Ø§ Ø¥Ø°Ø§ ÙƒÙ†Øª Ù„Ø§ ØªØ±ÙŠØ¯ ØªØºÙŠÙŠØ±Ù‡.").grid(row=1, column=0, columnspan=2, sticky="w", pady=(0,10))
 
         it_var = tk.StringVar()
         sc_var = tk.StringVar()
         cl_var = tk.StringVar()
         sz_var = tk.StringVar()
 
-        ttk.Label(frm, text="النوع (جديد):").grid(row=2, column=0, sticky="e", padx=6, pady=4)
+        ttk.Label(frm, text="Ø§Ù„Ù†ÙˆØ¹ (Ø¬Ø¯ÙŠØ¯):").grid(row=2, column=0, sticky="e", padx=6, pady=4)
         ttk.Entry(frm, textvariable=it_var, width=28).grid(row=2, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Label(frm, text="المدرسة (جديد):").grid(row=3, column=0, sticky="e", padx=6, pady=4)
+        ttk.Label(frm, text="Ø§Ù„Ù…Ø¯Ø±Ø³Ø© (Ø¬Ø¯ÙŠØ¯):").grid(row=3, column=0, sticky="e", padx=6, pady=4)
         ttk.Entry(frm, textvariable=sc_var, width=28).grid(row=3, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Label(frm, text="اللون (جديد):").grid(row=4, column=0, sticky="e", padx=6, pady=4)
+        ttk.Label(frm, text="Ø§Ù„Ù„ÙˆÙ† (Ø¬Ø¯ÙŠØ¯):").grid(row=4, column=0, sticky="e", padx=6, pady=4)
         ttk.Entry(frm, textvariable=cl_var, width=28).grid(row=4, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Label(frm, text="المقاس (جديد):").grid(row=5, column=0, sticky="e", padx=6, pady=4)
+        ttk.Label(frm, text="Ø§Ù„Ù…Ù‚Ø§Ø³ (Ø¬Ø¯ÙŠØ¯):").grid(row=5, column=0, sticky="e", padx=6, pady=4)
         ttk.Entry(frm, textvariable=sz_var, width=28).grid(row=5, column=1, sticky="w", padx=6, pady=4)
 
         btns = ttk.Frame(frm); btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(10,0))
-        ttk.Button(btns, text="إلغاء", command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Ø¥Ù„ØºØ§Ø¡", command=dlg.destroy).pack(side=tk.RIGHT)
 
         def on_ok():
             # Gather non-empty changes
@@ -9580,26 +11496,28 @@ try {{ window.print(); }} catch(e) {{}}
             if sz_var.get().strip(): changes["size"]      = sz_var.get().strip()
 
             if not changes:
-                messagebox.showwarning("لا تغييرات", "لم تُدخل أي قيم جديدة.", parent=dlg)
+                messagebox.showwarning("Ù„Ø§ ØªØºÙŠÙŠØ±Ø§Øª", "Ù„Ù… ØªÙØ¯Ø®Ù„ Ø£ÙŠ Ù‚ÙŠÙ… Ø¬Ø¯ÙŠØ¯Ø©.", parent=dlg)
                 return
 
             try:
                 if scope_mode == "ids":
                     updated = self.db.update_specs_by_ids(ids, **changes)
                 else:
-                    w, p = int(self.f_wh.get()), int(self.f_pkg.get())
+                    w, p = parse_int_text(self.f_wh.get()), parse_int_text(self.f_pkg.get())
+                    if w is None or p is None:
+                        raise ValueError("Invalid warehouse or package number")
                     updated = self.db.update_specs_in_package(w, p, **changes)
 
                 dlg.destroy()
                 if updated == 0:
-                    show_toast(self, "لم يتم العثور على صفوف مطابقة", bg="#f59e0b")
+                    show_toast(self, "Ù„Ù… ÙŠØªÙ… Ø§Ù„Ø¹Ø«ÙˆØ± Ø¹Ù„Ù‰ ØµÙÙˆÙ Ù…Ø·Ø§Ø¨Ù‚Ø©", bg="#f59e0b")
                 else:
-                    show_toast(self, f"تم تعديل المواصفات في {updated} صف(وف)")
+                    show_toast(self, f"ØªÙ… ØªØ¹Ø¯ÙŠÙ„ Ø§Ù„Ù…ÙˆØ§ØµÙØ§Øª ÙÙŠ {updated} ØµÙ(ÙˆÙ)")
                 self._refresh()
             except Exception as ex:
-                messagebox.showerror("فشل التحديث", str(ex), parent=dlg)
+                messagebox.showerror("ÙØ´Ù„ Ø§Ù„ØªØ­Ø¯ÙŠØ«", str(ex), parent=dlg)
 
-        ttk.Button(btns, text="حفظ", command=on_ok).pack(side=tk.RIGHT, padx=6)
+        ttk.Button(btns, text="Ø­ÙØ¸", command=on_ok).pack(side=tk.RIGHT, padx=6)
 
 class MultiSelectDialog(tk.Toplevel):
     def __init__(self, master, title: str, values: List[str], preselected: Optional[List[str]] = None):
@@ -9629,7 +11547,7 @@ class MultiSelectDialog(tk.Toplevel):
         # Filter box
         frow = ttk.Frame(frm)
         frow.pack(fill=tk.X, pady=(0,6))
-        ttk.Label(frow, text="بحث:").pack(side=tk.LEFT)
+        ttk.Label(frow, text="Ø¨Ø­Ø«:").pack(side=tk.LEFT)
         self.q = tk.StringVar()
         ent = ttk.Entry(frow, textvariable=self.q)
         ent.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6,0))
@@ -9645,9 +11563,9 @@ class MultiSelectDialog(tk.Toplevel):
         # Buttons
         btns = ttk.Frame(frm)
         btns.pack(fill=tk.X, pady=(8,0))
-        ttk.Button(btns, text="مسح التحديد", command=self._clear_sel).pack(side=tk.LEFT)
-        ttk.Button(btns, text="إلغاء", command=self._on_cancel).pack(side=tk.RIGHT)
-        ttk.Button(btns, text="موافق", command=self._on_ok).pack(side=tk.RIGHT, padx=6)
+        ttk.Button(btns, text="Ù…Ø³Ø­ Ø§Ù„ØªØ­Ø¯ÙŠØ¯", command=self._clear_sel).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Ø¥Ù„ØºØ§Ø¡", command=self._on_cancel).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Ù…ÙˆØ§ÙÙ‚", command=self._on_ok).pack(side=tk.RIGHT, padx=6)
 
         self._refill()
 
@@ -9727,40 +11645,40 @@ class BillsHistoryWindow(tk.Toplevel):
     def __init__(self, master, db: SqliteDatabase):
         super().__init__(master)
         self.db = db
-        self.title("سجل الفواتير")
+        self.title("Ø³Ø¬Ù„ Ø§Ù„ÙÙˆØ§ØªÙŠØ±")
         self.geometry("1000x560")
         self.configure(bg=_UI["BG"])
         _wh = tk.Frame(self, bg=_UI["ACCENT"], height=44); _wh.pack(fill=tk.X); _wh.pack_propagate(False)
-        tk.Label(_wh, text="  سجل الفواتير", bg=_UI["ACCENT"], fg="#FFFFFF", font=_FONTS["h3"]).pack(side=tk.RIGHT, padx=12)
+        tk.Label(_wh, text="  Ø³Ø¬Ù„ Ø§Ù„ÙÙˆØ§ØªÙŠØ±", bg=_UI["ACCENT"], fg="#FFFFFF", font=_FONTS["h3"]).pack(side=tk.RIGHT, padx=12)
         self._build()
 
     def _build(self):
         top = ttk.Frame(self)
         top.pack(fill=tk.X, padx=8, pady=8)
-        ttk.Label(top, text="سجل الفواتير", font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT)
-        _br = ttk.Button(top, text="تحديث", command=self._refresh); _br.pack(side=tk.RIGHT)
-        ToolTip(_br, "تحديث قائمة الفواتير")
-        _bo = ttk.Button(top, text="فتح", command=self._print_selected); _bo.pack(side=tk.RIGHT, padx=8)
-        ToolTip(_bo, "فتح الفاتورة المحددة للطباعة")
-        _be = ttk.Button(top, text="تصدير المحدد إلى إكسل", command=self._export_selected); _be.pack(side=tk.RIGHT)
-        ToolTip(_be, "تصدير الفاتورة المحددة إلى ملف إكسل")
+        ttk.Label(top, text="Ø³Ø¬Ù„ Ø§Ù„ÙÙˆØ§ØªÙŠØ±", font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT)
+        _br = ttk.Button(top, text="ØªØ­Ø¯ÙŠØ«", command=self._refresh); _br.pack(side=tk.RIGHT)
+        ToolTip(_br, "ØªØ­Ø¯ÙŠØ« Ù‚Ø§Ø¦Ù…Ø© Ø§Ù„ÙÙˆØ§ØªÙŠØ±")
+        _bo = ttk.Button(top, text="ÙØªØ­", command=self._print_selected); _bo.pack(side=tk.RIGHT, padx=8)
+        ToolTip(_bo, "ÙØªØ­ Ø§Ù„ÙØ§ØªÙˆØ±Ø© Ø§Ù„Ù…Ø­Ø¯Ø¯Ø© Ù„Ù„Ø·Ø¨Ø§Ø¹Ø©")
+        _be = ttk.Button(top, text="ØªØµØ¯ÙŠØ± Ø§Ù„Ù…Ø­Ø¯Ø¯ Ø¥Ù„Ù‰ Ø¥ÙƒØ³Ù„", command=self._export_selected); _be.pack(side=tk.RIGHT)
+        ToolTip(_be, "ØªØµØ¯ÙŠØ± Ø§Ù„ÙØ§ØªÙˆØ±Ø© Ø§Ù„Ù…Ø­Ø¯Ø¯Ø© Ø¥Ù„Ù‰ Ù…Ù„Ù Ø¥ÙƒØ³Ù„")
 
         # Bill lifecycle buttons
-        _bc = ttk.Button(top, text="تأكيد المسودة", command=self._confirm_draft); _bc.pack(side=tk.RIGHT, padx=4)
-        ToolTip(_bc, "تأكيد المسودة وخصم الكميات من المخزون")
-        _bv = ttk.Button(top, text="إلغاء الفاتورة", command=self._void_bill); _bv.pack(side=tk.RIGHT, padx=4)
-        ToolTip(_bv, "إلغاء فاتورة مؤكدة وإرجاع الكميات")
-        _bdel = ttk.Button(top, text="حذف المسودة", command=self._delete_draft); _bdel.pack(side=tk.RIGHT, padx=4)
-        ToolTip(_bdel, "حذف المسودة نهائياً")
-        _bret = ttk.Button(top, text="مرتجع", command=self._process_return); _bret.pack(side=tk.RIGHT, padx=4)
-        ToolTip(_bret, "معالجة مرتجع لفاتورة مؤكدة")
+        _bc = ttk.Button(top, text="ØªØ£ÙƒÙŠØ¯ Ø§Ù„Ù…Ø³ÙˆØ¯Ø©", command=self._confirm_draft); _bc.pack(side=tk.RIGHT, padx=4)
+        ToolTip(_bc, "ØªØ£ÙƒÙŠØ¯ Ø§Ù„Ù…Ø³ÙˆØ¯Ø© ÙˆØ®ØµÙ… Ø§Ù„ÙƒÙ…ÙŠØ§Øª Ù…Ù† Ø§Ù„Ù…Ø®Ø²ÙˆÙ†")
+        _bv = ttk.Button(top, text="Ø¥Ù„ØºØ§Ø¡ Ø§Ù„ÙØ§ØªÙˆØ±Ø©", command=self._void_bill); _bv.pack(side=tk.RIGHT, padx=4)
+        ToolTip(_bv, "Ø¥Ù„ØºØ§Ø¡ ÙØ§ØªÙˆØ±Ø© Ù…Ø¤ÙƒØ¯Ø© ÙˆØ¥Ø±Ø¬Ø§Ø¹ Ø§Ù„ÙƒÙ…ÙŠØ§Øª")
+        _bdel = ttk.Button(top, text="Ø­Ø°Ù Ø§Ù„Ù…Ø³ÙˆØ¯Ø©", command=self._delete_draft); _bdel.pack(side=tk.RIGHT, padx=4)
+        ToolTip(_bdel, "Ø­Ø°Ù Ø§Ù„Ù…Ø³ÙˆØ¯Ø© Ù†Ù‡Ø§Ø¦ÙŠØ§Ù‹")
+        _bret = ttk.Button(top, text="Ù…Ø±ØªØ¬Ø¹", command=self._process_return); _bret.pack(side=tk.RIGHT, padx=4)
+        ToolTip(_bret, "Ù…Ø¹Ø§Ù„Ø¬Ø© Ù…Ø±ØªØ¬Ø¹ Ù„ÙØ§ØªÙˆØ±Ø© Ù…Ø¤ÙƒØ¯Ø©")
 
         bills_wrap = ttk.Frame(self)
         bills_wrap.pack(fill=tk.BOTH, expand=False, padx=8, pady=(0, 6))
         self.bills_table = ttk.Treeview(
             bills_wrap, columns=("id", "created_at", "kind", "customer", "total", "status"), show="headings", height=10
         )
-        for col, txt, w in [("id","المعرّف",80), ("created_at","التاريخ",180), ("kind","النوع",120), ("customer","العميل",200), ("total","الإجمالي",120), ("status","الحالة",90)]:
+        for col, txt, w in [("id","Ø§Ù„Ù…Ø¹Ø±Ù‘Ù",80), ("created_at","Ø§Ù„ØªØ§Ø±ÙŠØ®",180), ("kind","Ø§Ù„Ù†ÙˆØ¹",120), ("customer","Ø§Ù„Ø¹Ù…ÙŠÙ„",200), ("total","Ø§Ù„Ø¥Ø¬Ù…Ø§Ù„ÙŠ",120), ("status","Ø§Ù„Ø­Ø§Ù„Ø©",90)]:
             self.bills_table.heading(col, text=txt)
             self.bills_table.column(col, width=w, anchor="center")
         bills_ysb = ttk.Scrollbar(bills_wrap, orient="vertical", command=self.bills_table.yview)
@@ -9773,7 +11691,7 @@ class BillsHistoryWindow(tk.Toplevel):
         add_context_menu(self.bills_table)
         _bind_mousewheel(self.bills_table)
 
-        ttk.Label(self, text="بنود الفاتورة").pack(anchor="w", padx=8)
+        ttk.Label(self, text="Ø¨Ù†ÙˆØ¯ Ø§Ù„ÙØ§ØªÙˆØ±Ø©").pack(anchor="w", padx=8)
 
         items_wrap = ttk.Frame(self)
         items_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
@@ -9785,9 +11703,9 @@ class BillsHistoryWindow(tk.Toplevel):
             height=12,
         )
         for col, txt, w in [
-            ("type","النوع",140), ("school","المدرسة",160), ("color","اللون",80), ("size","المقاس",70),
-            ("origin","المصدر",90), ("badge","بادج",60), ("wh","المخزن",50), ("pkg","العبوة",60), ("price","السعر",80),
-            ("qty","الكمية",60), ("total","إجمالي ",100),
+            ("type","Ø§Ù„Ù†ÙˆØ¹",140), ("school","Ø§Ù„Ù…Ø¯Ø±Ø³Ø©",160), ("color","Ø§Ù„Ù„ÙˆÙ†",80), ("size","Ø§Ù„Ù…Ù‚Ø§Ø³",70),
+            ("origin","Ø§Ù„Ù…ØµØ¯Ø±",90), ("badge","Ø¨Ø§Ø¯Ø¬",60), ("wh","Ø§Ù„Ù…Ø®Ø²Ù†",50), ("pkg","Ø§Ù„Ø¹Ø¨ÙˆØ©",60), ("price","Ø§Ù„Ø³Ø¹Ø±",80),
+            ("qty","Ø§Ù„ÙƒÙ…ÙŠØ©",60), ("total","Ø¥Ø¬Ù…Ø§Ù„ÙŠ ",100),
         ]:
             self.items_table.heading(col, text=txt)
             self.items_table.column(col, width=w, anchor="center")
@@ -9804,14 +11722,14 @@ class BillsHistoryWindow(tk.Toplevel):
 
     def _refresh(self):
         self.bills_table.delete(*self.bills_table.get_children())
-        status_map = {"DRAFT": "مسودة", "CONFIRMED": "مؤكدة", "VOID": "ملغاة"}
+        status_map = {"DRAFT": "Ù…Ø³ÙˆØ¯Ø©", "CONFIRMED": "Ù…Ø¤ÙƒØ¯Ø©", "VOID": "Ù…Ù„ØºØ§Ø©"}
         for b in self.db.list_bills():
             status_txt = status_map.get(b.get("status", "CONFIRMED"), b.get("status", ""))
-            kind_txt = "شحن فرع" if b.get("bill_kind") == "BRANCH_SHIPMENT" else "فاتورة"
+            kind_txt = "Ø´Ø­Ù† ÙØ±Ø¹" if b.get("bill_kind") == "BRANCH_SHIPMENT" else "ÙØ§ØªÙˆØ±Ø©"
             self.bills_table.insert(
                 "", tk.END, iid=str(b["id"]),
                 values=(b["id"], fmt_local_ts(b["created_at"], ""), kind_txt, b.get("customer") or "",
-                        f"{float(b['total']):.2f}", status_txt)
+                        f"{format_money(float(b['total']))}", status_txt)
             )
         apply_zebra_tags(self.bills_table)
         # Color-code by status
@@ -9820,58 +11738,58 @@ class BillsHistoryWindow(tk.Toplevel):
         for child in self.bills_table.get_children():
             vals = self.bills_table.item(child, "values")
             if len(vals) >= 5:
-                if vals[4] == "مسودة":
+                if vals[4] == "Ù…Ø³ÙˆØ¯Ø©":
                     self.bills_table.item(child, tags=("draft",))
-                elif vals[4] == "ملغاة":
+                elif vals[4] == "Ù…Ù„ØºØ§Ø©":
                     self.bills_table.item(child, tags=("void",))
         self.items_table.delete(*self.items_table.get_children())
 
     def _confirm_draft(self):
         bill_id = self._get_selected_bill_id()
         if bill_id is None:
-            messagebox.showwarning("لم يتم التحديد", "اختر فاتورة أولاً.", parent=self)
+            messagebox.showwarning("Ù„Ù… ÙŠØªÙ… Ø§Ù„ØªØ­Ø¯ÙŠØ¯", "Ø§Ø®ØªØ± ÙØ§ØªÙˆØ±Ø© Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
             return
-        if not messagebox.askyesno("تأكيد", "هل تريد تأكيد هذه المسودة وخصم الكميات من المخزون؟", parent=self):
+        if not messagebox.askyesno("ØªØ£ÙƒÙŠØ¯", "Ù‡Ù„ ØªØ±ÙŠØ¯ ØªØ£ÙƒÙŠØ¯ Ù‡Ø°Ù‡ Ø§Ù„Ù…Ø³ÙˆØ¯Ø© ÙˆØ®ØµÙ… Ø§Ù„ÙƒÙ…ÙŠØ§Øª Ù…Ù† Ø§Ù„Ù…Ø®Ø²ÙˆÙ†ØŸ", parent=self):
             return
         try:
             self.db.confirm_draft_bill(bill_id)
-            show_toast(self, f"تم تأكيد الفاتورة #{bill_id}")
+            show_toast(self, f"ØªÙ… ØªØ£ÙƒÙŠØ¯ Ø§Ù„ÙØ§ØªÙˆØ±Ø© #{bill_id}")
             self._refresh()
         except Exception as ex:
-            messagebox.showerror("فشل التأكيد", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„ØªØ£ÙƒÙŠØ¯", str(ex), parent=self)
 
     def _void_bill(self):
         bill_id = self._get_selected_bill_id()
         if bill_id is None:
-            messagebox.showwarning("لم يتم التحديد", "اختر فاتورة أولاً.", parent=self)
+            messagebox.showwarning("Ù„Ù… ÙŠØªÙ… Ø§Ù„ØªØ­Ø¯ÙŠØ¯", "Ø§Ø®ØªØ± ÙØ§ØªÙˆØ±Ø© Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
             return
-        if not messagebox.askyesno("تأكيد الإلغاء", "هل تريد إلغاء هذه الفاتورة وإرجاع الكميات؟", parent=self):
+        if not messagebox.askyesno("ØªØ£ÙƒÙŠØ¯ Ø§Ù„Ø¥Ù„ØºØ§Ø¡", "Ù‡Ù„ ØªØ±ÙŠØ¯ Ø¥Ù„ØºØ§Ø¡ Ù‡Ø°Ù‡ Ø§Ù„ÙØ§ØªÙˆØ±Ø© ÙˆØ¥Ø±Ø¬Ø§Ø¹ Ø§Ù„ÙƒÙ…ÙŠØ§ØªØŸ", parent=self):
             return
         try:
             self.db.void_bill(bill_id)
-            show_toast(self, f"تم إلغاء الفاتورة #{bill_id}")
+            show_toast(self, f"ØªÙ… Ø¥Ù„ØºØ§Ø¡ Ø§Ù„ÙØ§ØªÙˆØ±Ø© #{bill_id}")
             self._refresh()
         except Exception as ex:
-            messagebox.showerror("فشل الإلغاء", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø¥Ù„ØºØ§Ø¡", str(ex), parent=self)
 
     def _delete_draft(self):
         bill_id = self._get_selected_bill_id()
         if bill_id is None:
-            messagebox.showwarning("لم يتم التحديد", "اختر فاتورة أولاً.", parent=self)
+            messagebox.showwarning("Ù„Ù… ÙŠØªÙ… Ø§Ù„ØªØ­Ø¯ÙŠØ¯", "Ø§Ø®ØªØ± ÙØ§ØªÙˆØ±Ø© Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
             return
-        if not messagebox.askyesno("تأكيد الحذف", "هل تريد حذف هذه المسودة نهائياً؟", parent=self):
+        if not messagebox.askyesno("ØªØ£ÙƒÙŠØ¯ Ø§Ù„Ø­Ø°Ù", "Ù‡Ù„ ØªØ±ÙŠØ¯ Ø­Ø°Ù Ù‡Ø°Ù‡ Ø§Ù„Ù…Ø³ÙˆØ¯Ø© Ù†Ù‡Ø§Ø¦ÙŠØ§Ù‹ØŸ", parent=self):
             return
         try:
             self.db.delete_draft_bill(bill_id)
-            show_toast(self, f"تم حذف المسودة #{bill_id}")
+            show_toast(self, f"ØªÙ… Ø­Ø°Ù Ø§Ù„Ù…Ø³ÙˆØ¯Ø© #{bill_id}")
             self._refresh()
         except Exception as ex:
-            messagebox.showerror("فشل الحذف", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø­Ø°Ù", str(ex), parent=self)
 
     def _process_return(self):
         bill_id = self._get_selected_bill_id()
         if bill_id is None:
-            messagebox.showwarning("لم يتم التحديد", "اختر فاتورة أولاً.", parent=self)
+            messagebox.showwarning("Ù„Ù… ÙŠØªÙ… Ø§Ù„ØªØ­Ø¯ÙŠØ¯", "Ø§Ø®ØªØ± ÙØ§ØªÙˆØ±Ø© Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
             return
         bill = None
         for b in self.db.list_bills():
@@ -9879,7 +11797,7 @@ class BillsHistoryWindow(tk.Toplevel):
                 bill = b
                 break
         if not bill or bill.get("status") != "CONFIRMED":
-            messagebox.showwarning("غير متاح", "المرتجعات متاحة فقط للفواتير المؤكدة.", parent=self)
+            messagebox.showwarning("ØºÙŠØ± Ù…ØªØ§Ø­", "Ø§Ù„Ù…Ø±ØªØ¬Ø¹Ø§Øª Ù…ØªØ§Ø­Ø© ÙÙ‚Ø· Ù„Ù„ÙÙˆØ§ØªÙŠØ± Ø§Ù„Ù…Ø¤ÙƒØ¯Ø©.", parent=self)
             return
         ReturnDialog(self, self.db, bill_id, on_done=self._refresh)
 
@@ -9887,39 +11805,39 @@ class BillsHistoryWindow(tk.Toplevel):
         sel = self.bills_table.selection()
         if not sel:
             return None
-        return int(sel[0])
+        return parse_int_text(sel[0])
 
     def _load_items(self):
         bill_id = self._get_selected_bill_id()
         self.items_table.delete(*self.items_table.get_children())
         if bill_id is None:
-            messagebox.showwarning("لم يتم التحديد", "اختر فاتورة أولًا.")
+            messagebox.showwarning("Ù„Ù… ÙŠØªÙ… Ø§Ù„ØªØ­Ø¯ÙŠØ¯", "Ø§Ø®ØªØ± ÙØ§ØªÙˆØ±Ø© Ø£ÙˆÙ„Ù‹Ø§.")
             return
         items = self.db.list_bill_items(bill_id)
         for ln in items:
-            origin_txt = "من المخزون" if ln.get("origin") == "STOCK" else ("من المصنع" if ln.get("origin") == "FACTORY" else "")
+            origin_txt = "Ù…Ù† Ø§Ù„Ù…Ø®Ø²ÙˆÙ†" if ln.get("origin") == "STOCK" else ("Ù…Ù† Ø§Ù„Ù…ØµÙ†Ø¹" if ln.get("origin") == "FACTORY" else "")
             wh_txt  = "" if (ln.get("warehouse_no") in (None, "", 0, "0")) else ln.get("warehouse_no")
             pkg_txt = "" if (ln.get("package_no")  in (None, "", 0, "0")) else ln.get("package_no")
             self.items_table.insert(
                 "", tk.END,
                 values=(ln["item_type"], ln["school"], ln["color"], ln["size"], origin_txt,
-                        "✓" if int(ln.get("has_badge") or 0) else "",
-                        wh_txt, pkg_txt, f"{float(ln['unit_price']):.2f}",
-                        ln["qty"], f"{float(ln['line_total']):.2f}")
+                        "âœ“" if int(ln.get("has_badge") or 0) else "",
+                        wh_txt, pkg_txt, f"{format_money(float(ln['unit_price']))}",
+                        ln["qty"], f"{format_money(float(ln['line_total']))}")
             )
         apply_zebra_tags(self.items_table)
 
     def _export_selected(self):
         bill_id = self._get_selected_bill_id()
         if bill_id is None:
-            messagebox.showwarning("لم يتم التحديد", "اختر فاتورة أولًا.")
+            messagebox.showwarning("Ù„Ù… ÙŠØªÙ… Ø§Ù„ØªØ­Ø¯ÙŠØ¯", "Ø§Ø®ØªØ± ÙØ§ØªÙˆØ±Ø© Ø£ÙˆÙ„Ù‹Ø§.")
             return
         items = self.db.list_bill_items(bill_id)
         if not items:
-            messagebox.showwarning("فارغ", "لا تحتوي هذه الفاتورة على بنود.")
+            messagebox.showwarning("ÙØ§Ø±Øº", "Ù„Ø§ ØªØ­ØªÙˆÙŠ Ù‡Ø°Ù‡ Ø§Ù„ÙØ§ØªÙˆØ±Ø© Ø¹Ù„Ù‰ Ø¨Ù†ÙˆØ¯.")
             return
         path = filedialog.asksaveasfilename(
-            title="تصدير الفاتورة إلى إكسل",
+            title="ØªØµØ¯ÙŠØ± Ø§Ù„ÙØ§ØªÙˆØ±Ø© Ø¥Ù„Ù‰ Ø¥ÙƒØ³Ù„",
             defaultextension=".xlsx",
             filetypes=[("Excel Workbook", "*.xlsx"), ("Excel 97-2003 XML", "*.xls"), ("All files", "*.*")],
             initialfile=f"bill_{bill_id}.xlsx",
@@ -9928,11 +11846,11 @@ class BillsHistoryWindow(tk.Toplevel):
             return
         headers = ["type", "school", "color", "size", "origin", "has_badge", "warehouse_no", "package_no", "unit_price", "qty", "line_total"]
         def _origin_txt(o: Optional[str]) -> str:
-            return "من المخزون" if o == "STOCK" else ("من المصنع" if o == "FACTORY" else "")
+            return "Ù…Ù† Ø§Ù„Ù…Ø®Ø²ÙˆÙ†" if o == "STOCK" else ("Ù…Ù† Ø§Ù„Ù…ØµÙ†Ø¹" if o == "FACTORY" else "")
         rows = [
             [
                 ln["item_type"], ln["school"], ln["color"], ln["size"],
-                _origin_txt(ln.get("origin")), ("✓" if int(ln.get("has_badge") or 0) else ""),
+                _origin_txt(ln.get("origin")), ("âœ“" if int(ln.get("has_badge") or 0) else ""),
                 ln["warehouse_no"], ln["package_no"],
                 float(ln["unit_price"]), int(ln["qty"]), float(ln["line_total"]),
             ]
@@ -9940,20 +11858,20 @@ class BillsHistoryWindow(tk.Toplevel):
         ]
         try:
             export_to_excel(path, headers, rows)
-            show_toast(self, "تم تصدير الفاتورة إلى إكسل بنجاح")
+            show_toast(self, "ØªÙ… ØªØµØ¯ÙŠØ± Ø§Ù„ÙØ§ØªÙˆØ±Ø© Ø¥Ù„Ù‰ Ø¥ÙƒØ³Ù„ Ø¨Ù†Ø¬Ø§Ø­")
         except Exception as ex:
-            messagebox.showerror("فشل التصدير", str(ex))
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„ØªØµØ¯ÙŠØ±", str(ex))
 
     def _print_selected(self):
         bill_id = self._get_selected_bill_id()
         if bill_id is None:
-            messagebox.showwarning("لم يتم التحديد", "اختر فاتورة أولًا.")
+            messagebox.showwarning("Ù„Ù… ÙŠØªÙ… Ø§Ù„ØªØ­Ø¯ÙŠØ¯", "Ø§Ø®ØªØ± ÙØ§ØªÙˆØ±Ø© Ø£ÙˆÙ„Ù‹Ø§.")
             return
         try:
             bill = next(b for b in self.db.list_bills() if int(b["id"]) == bill_id)
             items = self.db.list_bill_items(bill_id)
         except StopIteration:
-            messagebox.showerror("فشل الطباعة", "لم يتم العثور على الفاتورة.")
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø·Ø¨Ø§Ø¹Ø©", "Ù„Ù… ÙŠØªÙ… Ø§Ù„Ø¹Ø«ÙˆØ± Ø¹Ù„Ù‰ Ø§Ù„ÙØ§ØªÙˆØ±Ø©.")
             return
         tmp_dir = tempfile.gettempdir()
         path = os.path.join(tmp_dir, f"bill_{bill_id}.html")
@@ -9970,7 +11888,7 @@ class ReturnDialog(tk.Toplevel):
         self.db = db
         self.bill_id = bill_id
         self.on_done = on_done
-        self.title(f"مرتجع - فاتورة #{bill_id}")
+        self.title(f"Ù…Ø±ØªØ¬Ø¹ - ÙØ§ØªÙˆØ±Ø© #{bill_id}")
         self.geometry("800x500")
         self.transient(master)
         self.grab_set()
@@ -9978,15 +11896,15 @@ class ReturnDialog(tk.Toplevel):
         self._build()
 
     def _build(self):
-        ttk.Label(self, text=f"اختر الأصناف والكميات المرتجعة من الفاتورة #{self.bill_id}",
+        ttk.Label(self, text=f"Ø§Ø®ØªØ± Ø§Ù„Ø£ØµÙ†Ø§Ù ÙˆØ§Ù„ÙƒÙ…ÙŠØ§Øª Ø§Ù„Ù…Ø±ØªØ¬Ø¹Ø© Ù…Ù† Ø§Ù„ÙØ§ØªÙˆØ±Ø© #{self.bill_id}",
                   font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=8, pady=8)
 
         cols = ("idx", "type", "school", "color", "size", "qty_orig", "return_qty")
         self.tree = ttk.Treeview(self, columns=cols, show="headings", height=14)
         for col, txt, w in [
-            ("idx", "#", 40), ("type", "النوع", 140), ("school", "المدرسة", 140),
-            ("color", "اللون", 80), ("size", "المقاس", 70),
-            ("qty_orig", "الكمية الأصلية", 90), ("return_qty", "كمية الإرجاع", 90)
+            ("idx", "#", 40), ("type", "Ø§Ù„Ù†ÙˆØ¹", 140), ("school", "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", 140),
+            ("color", "Ø§Ù„Ù„ÙˆÙ†", 80), ("size", "Ø§Ù„Ù…Ù‚Ø§Ø³", 70),
+            ("qty_orig", "Ø§Ù„ÙƒÙ…ÙŠØ© Ø§Ù„Ø£ØµÙ„ÙŠØ©", 90), ("return_qty", "ÙƒÙ…ÙŠØ© Ø§Ù„Ø¥Ø±Ø¬Ø§Ø¹", 90)
         ]:
             self.tree.heading(col, text=txt)
             self.tree.column(col, width=w, anchor="center")
@@ -10003,25 +11921,29 @@ class ReturnDialog(tk.Toplevel):
 
         edit_frame = ttk.Frame(self)
         edit_frame.pack(fill=tk.X, padx=8, pady=4)
-        ttk.Label(edit_frame, text="كمية الإرجاع للبند المحدد:").pack(side=tk.LEFT)
+        ttk.Label(edit_frame, text="ÙƒÙ…ÙŠØ© Ø§Ù„Ø¥Ø±Ø¬Ø§Ø¹ Ù„Ù„Ø¨Ù†Ø¯ Ø§Ù„Ù…Ø­Ø¯Ø¯:").pack(side=tk.LEFT)
         self._ret_var = tk.StringVar(value="0")
         self._ret_entry = ttk.Entry(edit_frame, textvariable=self._ret_var, width=8)
         self._ret_entry.pack(side=tk.LEFT, padx=4)
-        ttk.Button(edit_frame, text="تعيين", command=self._set_return_qty).pack(side=tk.LEFT, padx=4)
-        ttk.Button(edit_frame, text="إرجاع الكل", command=self._return_all).pack(side=tk.LEFT, padx=4)
+        ttk.Button(edit_frame, text="ØªØ¹ÙŠÙŠÙ†", command=self._set_return_qty).pack(side=tk.LEFT, padx=4)
+        ttk.Button(edit_frame, text="Ø¥Ø±Ø¬Ø§Ø¹ Ø§Ù„ÙƒÙ„", command=self._return_all).pack(side=tk.LEFT, padx=4)
 
         btns = ttk.Frame(self)
         btns.pack(fill=tk.X, padx=8, pady=8)
-        ttk.Button(btns, text="إلغاء", command=self.destroy).pack(side=tk.LEFT)
-        ttk.Button(btns, text="تأكيد المرتجع", command=self._confirm).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Ø¥Ù„ØºØ§Ø¡", command=self.destroy).pack(side=tk.LEFT)
+        ttk.Button(btns, text="ØªØ£ÙƒÙŠØ¯ Ø§Ù„Ù…Ø±ØªØ¬Ø¹", command=self._confirm).pack(side=tk.RIGHT)
 
     def _set_return_qty(self):
         sel = self.tree.selection()
         if not sel:
             return
-        idx = int(sel[0])
+        idx = parse_int_text(sel[0])
+        if idx is None:
+            return
         try:
-            ret_qty = int(self._ret_var.get())
+            ret_qty = parse_int_text(self._ret_var.get())
+            if ret_qty is None:
+                raise ValueError
         except ValueError:
             return
         orig_qty = int(self._items[idx]["qty"])
@@ -10040,10 +11962,13 @@ class ReturnDialog(tk.Toplevel):
         return_lines = []
         for child in self.tree.get_children():
             vals = self.tree.item(child, "values")
-            ret_qty = int(vals[6])
+            ret_qty = parse_int_text(vals[6], 0) or 0
             if ret_qty <= 0:
                 continue
-            idx = int(vals[0]) - 1
+            row_no = parse_int_text(vals[0])
+            if row_no is None:
+                continue
+            idx = row_no - 1
             item = self._items[idx]
             return_lines.append({
                 "item_type": item["item_type"],
@@ -10057,16 +11982,16 @@ class ReturnDialog(tk.Toplevel):
                 "has_badge": item.get("has_badge", 0),
             })
         if not return_lines:
-            messagebox.showwarning("لا شيء", "لم يتم تحديد أي كميات للإرجاع.", parent=self)
+            messagebox.showwarning("Ù„Ø§ Ø´ÙŠØ¡", "Ù„Ù… ÙŠØªÙ… ØªØ­Ø¯ÙŠØ¯ Ø£ÙŠ ÙƒÙ…ÙŠØ§Øª Ù„Ù„Ø¥Ø±Ø¬Ø§Ø¹.", parent=self)
             return
         try:
             ret_id = self.db.process_return(self.bill_id, return_lines)
-            show_toast(self, f"تم المرتجع #{ret_id} بنجاح")
+            show_toast(self, f"ØªÙ… Ø§Ù„Ù…Ø±ØªØ¬Ø¹ #{ret_id} Ø¨Ù†Ø¬Ø§Ø­")
             self.destroy()
             if self.on_done:
                 self.on_done()
         except Exception as ex:
-            messagebox.showerror("فشل المرتجع", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ù…Ø±ØªØ¬Ø¹", str(ex), parent=self)
 
 # ------------------- Movements Window -------------------
 
@@ -10120,23 +12045,23 @@ class MovementsWindow(tk.Toplevel):
     def __init__(self, master, db: SqliteDatabase):
         super().__init__(master)
         self.db = db
-        self.title("سجل الحركات")
+        self.title("Ø³Ø¬Ù„ Ø§Ù„Ø­Ø±ÙƒØ§Øª")
         self.geometry("1180x620")
         self.configure(bg=_UI["BG"])
         _wh = tk.Frame(self, bg=_UI["ACCENT"], height=44); _wh.pack(fill=tk.X); _wh.pack_propagate(False)
-        tk.Label(_wh, text="  سجل الحركات", bg=_UI["ACCENT"], fg="#FFFFFF", font=_FONTS["h3"]).pack(side=tk.RIGHT, padx=12)
+        tk.Label(_wh, text="  Ø³Ø¬Ù„ Ø§Ù„Ø­Ø±ÙƒØ§Øª", bg=_UI["ACCENT"], fg="#FFFFFF", font=_FONTS["h3"]).pack(side=tk.RIGHT, padx=12)
         self._build()
 
     def _build(self):
-        top = ttk.LabelFrame(self, text="تصنيف")
+        top = ttk.LabelFrame(self, text="ØªØµÙ†ÙŠÙ")
         top.pack(fill=tk.X, padx=8, pady=8)
-        self.ftype  = LabeledCombobox(top, "النوع",   self.db, "item_type");  self.ftype.grid(row=0, column=0, padx=6, pady=4, sticky="ew")
-        self.fsch   = LabeledCombobox(top, "المدرسة", self.db, "school");     self.fsch.grid(row=0, column=1, padx=6, pady=4, sticky="ew")
-        self.fclr   = LabeledCombobox(top, "اللون",   self.db, "color");      self.fclr.grid(row=0, column=2, padx=6, pady=4, sticky="ew")
-        self.fsiz   = LabeledCombobox(top, "المقاس",  self.db, "size");       self.fsiz.grid(row=0, column=3, padx=6, pady=4, sticky="ew")
+        self.ftype  = LabeledCombobox(top, "Ø§Ù„Ù†ÙˆØ¹",   self.db, "item_type");  self.ftype.grid(row=0, column=0, padx=6, pady=4, sticky="ew")
+        self.fsch   = LabeledCombobox(top, "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", self.db, "school");     self.fsch.grid(row=0, column=1, padx=6, pady=4, sticky="ew")
+        self.fclr   = LabeledCombobox(top, "Ø§Ù„Ù„ÙˆÙ†",   self.db, "color");      self.fclr.grid(row=0, column=2, padx=6, pady=4, sticky="ew")
+        self.fsiz   = LabeledCombobox(top, "Ø§Ù„Ù…Ù‚Ø§Ø³",  self.db, "size");       self.fsiz.grid(row=0, column=3, padx=6, pady=4, sticky="ew")
         branch_vals = [""] + [branch_display_name(n) for n in DEFAULT_BRANCH_POS_NAMES]
         branch_map = {n: branch_display_name(n) for n in DEFAULT_BRANCH_POS_NAMES}
-        self.fbranch = LabeledStaticCombo(top, "الفرع", branch_vals, value_map=branch_map, width=18)
+        self.fbranch = LabeledStaticCombo(top, "Ø§Ù„ÙØ±Ø¹", branch_vals, value_map=branch_map, width=18)
         self.fbranch.grid(row=0, column=4, padx=6, pady=4, sticky="ew")
         def _constraints(exclude: Optional[str] = None) -> Dict[str, Any]:
             data = {
@@ -10161,11 +12086,11 @@ class MovementsWindow(tk.Toplevel):
             for ev in ("<<ComboboxSelected>>", "<KeyRelease>"):
                 widget.cb.bind(ev, lambda _e: (_refresh_filter_values(), self._refresh()), add="+")
 
-        self.df = DateField(top, "من (YYYY-MM-DD)"); self.df.grid(row=1, column=0, padx=6, pady=4, sticky="w")
-        self.dt = DateField(top, "إلى");             self.dt.grid(row=1, column=1, padx=6, pady=4, sticky="w")
+        self.df = DateField(top, "Ù…Ù† (YYYY-MM-DD)"); self.df.grid(row=1, column=0, padx=6, pady=4, sticky="w")
+        self.dt = DateField(top, "Ø¥Ù„Ù‰");             self.dt.grid(row=1, column=1, padx=6, pady=4, sticky="w")
 
 
-        ttk.Label(top, text="بحث").grid(row=1, column=2, sticky="e", padx=4, pady=4)
+        ttk.Label(top, text="Ø¨Ø­Ø«").grid(row=1, column=2, sticky="e", padx=4, pady=4)
         self.txt = ttk.Entry(top); self.txt.grid(row=1, column=3, sticky="ew", padx=6, pady=4)
         for w in (self.df.entry, self.dt.entry):
             w.bind("<Return>", lambda _e: self._refresh(), add="+")
@@ -10175,14 +12100,14 @@ class MovementsWindow(tk.Toplevel):
 
         btns = ttk.Frame(top)
         btns.grid(row=0, column=5, rowspan=2, sticky="e", padx=6, pady=4)
-        _mr = ttk.Button(btns, text="تحديث", command=self._refresh); _mr.pack(side=tk.LEFT)
-        ToolTip(_mr, "تحديث قائمة الحركات")
-        _mc = ttk.Button(btns, text="مسح", command=self._clear); _mc.pack(side=tk.LEFT, padx=6)
-        ToolTip(_mc, "مسح جميع الفلاتر")
-        _mp = ttk.Button(btns, text="طباعة", command=self._print_report); _mp.pack(side=tk.LEFT, padx=6)
-        ToolTip(_mp, "طباعة التقرير التجميعي المعروض")
-        _me = ttk.Button(btns, text="تصدير إلى إكسل", command=self._export); _me.pack(side=tk.LEFT)
-        ToolTip(_me, "تصدير الحركات إلى ملف إكسل")
+        _mr = ttk.Button(btns, text="ØªØ­Ø¯ÙŠØ«", command=self._refresh); _mr.pack(side=tk.LEFT)
+        ToolTip(_mr, "ØªØ­Ø¯ÙŠØ« Ù‚Ø§Ø¦Ù…Ø© Ø§Ù„Ø­Ø±ÙƒØ§Øª")
+        _mc = ttk.Button(btns, text="Ù…Ø³Ø­", command=self._clear); _mc.pack(side=tk.LEFT, padx=6)
+        ToolTip(_mc, "Ù…Ø³Ø­ Ø¬Ù…ÙŠØ¹ Ø§Ù„ÙÙ„Ø§ØªØ±")
+        _mp = ttk.Button(btns, text="Ø·Ø¨Ø§Ø¹Ø©", command=self._print_report); _mp.pack(side=tk.LEFT, padx=6)
+        ToolTip(_mp, "Ø·Ø¨Ø§Ø¹Ø© Ø§Ù„ØªÙ‚Ø±ÙŠØ± Ø§Ù„ØªØ¬Ù…ÙŠØ¹ÙŠ Ø§Ù„Ù…Ø¹Ø±ÙˆØ¶")
+        _me = ttk.Button(btns, text="ØªØµØ¯ÙŠØ± Ø¥Ù„Ù‰ Ø¥ÙƒØ³Ù„", command=self._export); _me.pack(side=tk.LEFT)
+        ToolTip(_me, "ØªØµØ¯ÙŠØ± Ø§Ù„Ø­Ø±ÙƒØ§Øª Ø¥Ù„Ù‰ Ù…Ù„Ù Ø¥ÙƒØ³Ù„")
 
         table_wrap = ttk.Frame(self)
         table_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0,8))
@@ -10194,8 +12119,8 @@ class MovementsWindow(tk.Toplevel):
             height=14,
         )
         for col, txt, w in [
-            ("type","النوع",160), ("school","المدرسة",170), ("color","اللون",120), ("size","المقاس",90),
-            ("incoming","وارد",95), ("sold","مباع",95), ("remaining","متبقي",95), ("requested","المطلوب",95), ("reserved","حجوزات",90),
+            ("type","Ø§Ù„Ù†ÙˆØ¹",160), ("school","Ø§Ù„Ù…Ø¯Ø±Ø³Ø©",170), ("color","Ø§Ù„Ù„ÙˆÙ†",120), ("size","Ø§Ù„Ù…Ù‚Ø§Ø³",90),
+            ("incoming","ÙˆØ§Ø±Ø¯",95), ("sold","Ù…Ø¨Ø§Ø¹",95), ("remaining","Ù…ØªØ¨Ù‚ÙŠ",95), ("requested","Ø§Ù„Ù…Ø·Ù„ÙˆØ¨",95), ("reserved","Ø­Ø¬ÙˆØ²Ø§Øª",90),
         ]:
             self.table.heading(col, text=txt)
             self.table.column(col, width=w, anchor="center")
@@ -10208,7 +12133,7 @@ class MovementsWindow(tk.Toplevel):
         add_context_menu(self.table)
         _bind_mousewheel(self.table)
 
-        sum_fr = ttk.LabelFrame(self, text="ملخص النتائج المعروضة (تجميعي حسب المنتج)")
+        sum_fr = ttk.LabelFrame(self, text="Ù…Ù„Ø®Øµ Ø§Ù„Ù†ØªØ§Ø¦Ø¬ Ø§Ù„Ù…Ø¹Ø±ÙˆØ¶Ø© (ØªØ¬Ù…ÙŠØ¹ÙŠ Ø­Ø³Ø¨ Ø§Ù„Ù…Ù†ØªØ¬)")
         sum_fr.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._summary_var = tk.StringVar(value="")
         ttk.Label(
@@ -10235,7 +12160,7 @@ class MovementsWindow(tk.Toplevel):
         try:
             rows = self.db.list_movement_item_totals(self._filters())
         except Exception as ex:
-            messagebox.showerror("فشل البحث", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø¨Ø­Ø«", str(ex), parent=self)
             self._summary_var.set("")
             return
 
@@ -10266,20 +12191,20 @@ class MovementsWindow(tk.Toplevel):
             "remaining_total_qty": sum(int((r.get("remaining_branch_qty") if use_branch_only else r.get("remaining_total_qty")) or 0) for r in rows),
             "requested_qty": sum(int(r.get("requested_qty") or 0) for r in rows),
         }
-        sold_label = "إجمالي مباع الفرع" if use_branch_only else "إجمالي المباع"
-        rem_label = "إجمالي متبقي الفرع" if use_branch_only else "إجمالي المتبقي (المخزن + الفروع)"
-        req_label = "إجمالي المطلوب للفرع" if use_branch_only else "إجمالي المطلوب"
+        sold_label = "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ù…Ø¨Ø§Ø¹ Ø§Ù„ÙØ±Ø¹" if use_branch_only else "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø¨Ø§Ø¹"
+        rem_label = "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ù…ØªØ¨Ù‚ÙŠ Ø§Ù„ÙØ±Ø¹" if use_branch_only else "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…ØªØ¨Ù‚ÙŠ (Ø§Ù„Ù…Ø®Ø²Ù† + Ø§Ù„ÙØ±ÙˆØ¹)"
+        req_label = "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø·Ù„ÙˆØ¨ Ù„Ù„ÙØ±Ø¹" if use_branch_only else "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø·Ù„ÙˆØ¨"
         branch_prefix = ""
         if use_branch_only:
-            branch_prefix = f"الفرع المحدد: {branch_display_name(branch_selected)}  |  "
+            branch_prefix = f"Ø§Ù„ÙØ±Ø¹ Ø§Ù„Ù…Ø­Ø¯Ø¯: {branch_display_name(branch_selected)}  |  "
         self._summary_var.set(
             f"{branch_prefix}"
-            f"عدد المنتجات المعروضة: {s['n']}  |  "
-            f"إجمالي الوارد: {s['incoming_qty']}  |  "
+            f"Ø¹Ø¯Ø¯ Ø§Ù„Ù…Ù†ØªØ¬Ø§Øª Ø§Ù„Ù…Ø¹Ø±ÙˆØ¶Ø©: {s['n']}  |  "
+            f"Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„ÙˆØ§Ø±Ø¯: {s['incoming_qty']}  |  "
             f"{sold_label}: {s['sold_total_qty']}  |  "
             f"{rem_label}: {s['remaining_total_qty']}  |  "
             f"{req_label}: {s['requested_qty']}  |  "
-            f"إجمالي الحجوزات: {s['reserved_qty']}"
+            f"Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ø­Ø¬ÙˆØ²Ø§Øª: {s['reserved_qty']}"
         )
 
     def _clear(self):
@@ -10294,10 +12219,10 @@ class MovementsWindow(tk.Toplevel):
     def _export(self):
         rows = self.db.list_movement_item_totals(self._filters())
         if not rows:
-            messagebox.showwarning("فارغ", "لا توجد صفوف للتصدير.", parent=self)
+            messagebox.showwarning("ÙØ§Ø±Øº", "Ù„Ø§ ØªÙˆØ¬Ø¯ ØµÙÙˆÙ Ù„Ù„ØªØµØ¯ÙŠØ±.", parent=self)
             return
         path = filedialog.asksaveasfilename(
-            title="تصدير الحركات إلى إكسل",
+            title="ØªØµØ¯ÙŠØ± Ø§Ù„Ø­Ø±ÙƒØ§Øª Ø¥Ù„Ù‰ Ø¥ÙƒØ³Ù„",
             defaultextension=".xlsx",
             filetypes=[("Excel Workbook", "*.xlsx"), ("Excel 97-2003 XML", "*.xls"), ("All files", "*.*")],
             initialfile=f"movement_totals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
@@ -10319,14 +12244,14 @@ class MovementsWindow(tk.Toplevel):
         ] for m in rows]
         try:
             export_to_excel(path, headers, table)
-            show_toast(self, "تم حفظ الحركات إلى إكسل بنجاح")
+            show_toast(self, "ØªÙ… Ø­ÙØ¸ Ø§Ù„Ø­Ø±ÙƒØ§Øª Ø¥Ù„Ù‰ Ø¥ÙƒØ³Ù„ Ø¨Ù†Ø¬Ø§Ø­")
         except Exception as ex:
-            messagebox.showerror("فشل التصدير", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„ØªØµØ¯ÙŠØ±", str(ex), parent=self)
 
     def _print_report(self):
         rows = self.db.list_movement_item_totals(self._filters())
         if not rows:
-            messagebox.showwarning("فارغ", "لا توجد صفوف للطباعة.", parent=self)
+            messagebox.showwarning("ÙØ§Ø±Øº", "Ù„Ø§ ØªÙˆØ¬Ø¯ ØµÙÙˆÙ Ù„Ù„Ø·Ø¨Ø§Ø¹Ø©.", parent=self)
             return
 
         def _h(v: Any) -> str:
@@ -10341,19 +12266,19 @@ class MovementsWindow(tk.Toplevel):
         f = self._filters()
         filter_bits = []
         for label, key in (
-            ("الفرع", "branch_device"),
-            ("النوع", "item_type"),
-            ("المدرسة", "school"),
-            ("اللون", "color"),
-            ("المقاس", "size"),
-            ("من", "date_from"),
-            ("إلى", "date_to"),
-            ("بحث", "text"),
+            ("Ø§Ù„ÙØ±Ø¹", "branch_device"),
+            ("Ø§Ù„Ù†ÙˆØ¹", "item_type"),
+            ("Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", "school"),
+            ("Ø§Ù„Ù„ÙˆÙ†", "color"),
+            ("Ø§Ù„Ù…Ù‚Ø§Ø³", "size"),
+            ("Ù…Ù†", "date_from"),
+            ("Ø¥Ù„Ù‰", "date_to"),
+            ("Ø¨Ø­Ø«", "text"),
         ):
             val = str(f.get(key) or "").strip()
             if val:
                 filter_bits.append(f"{label}: {_h(val)}")
-        filters_html = " | ".join(filter_bits) if filter_bits else "بدون فلاتر"
+        filters_html = " | ".join(filter_bits) if filter_bits else "Ø¨Ø¯ÙˆÙ† ÙÙ„Ø§ØªØ±"
 
         totals = {
             "incoming": sum(int(r.get("incoming_qty") or 0) for r in rows),
@@ -10383,7 +12308,7 @@ class MovementsWindow(tk.Toplevel):
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8" />
-<title>تقرير حركة الأصناف - تجميعي</title>
+<title>ØªÙ‚Ø±ÙŠØ± Ø­Ø±ÙƒØ© Ø§Ù„Ø£ØµÙ†Ø§Ù - ØªØ¬Ù…ÙŠØ¹ÙŠ</title>
 <style>
 @page {{ size: A4 landscape; margin: 10mm; }}
 * {{ box-sizing: border-box; }}
@@ -10427,29 +12352,29 @@ tbody tr:nth-child(even) {{ background: #f8fafc; }}
 </head>
 <body>
   <div class="wrap">
-    <div class="title">تقرير حركة الأصناف (تجميعي)</div>
-    <div class="meta">وقت التقرير: {_h(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))}</div>
-    <div class="meta">الفلاتر: {filters_html}</div>
+    <div class="title">ØªÙ‚Ø±ÙŠØ± Ø­Ø±ÙƒØ© Ø§Ù„Ø£ØµÙ†Ø§Ù (ØªØ¬Ù…ÙŠØ¹ÙŠ)</div>
+    <div class="meta">ÙˆÙ‚Øª Ø§Ù„ØªÙ‚Ø±ÙŠØ±: {_h(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))}</div>
+    <div class="meta">Ø§Ù„ÙÙ„Ø§ØªØ±: {filters_html}</div>
     <div class="summary">
-      عدد المنتجات: {len(rows)} |
-      إجمالي الوارد: {totals['incoming']} |
-      إجمالي المباع: {totals['sold']} |
-      إجمالي المتبقي: {totals['remaining']} |
-      إجمالي المطلوب: {totals['requested']} |
-      إجمالي الحجوزات: {totals['reserved']}
+      Ø¹Ø¯Ø¯ Ø§Ù„Ù…Ù†ØªØ¬Ø§Øª: {len(rows)} |
+      Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„ÙˆØ§Ø±Ø¯: {totals['incoming']} |
+      Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø¨Ø§Ø¹: {totals['sold']} |
+      Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…ØªØ¨Ù‚ÙŠ: {totals['remaining']} |
+      Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø·Ù„ÙˆØ¨: {totals['requested']} |
+      Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ø­Ø¬ÙˆØ²Ø§Øª: {totals['reserved']}
     </div>
     <table>
       <thead>
         <tr>
-          <th>النوع</th>
-          <th>المدرسة</th>
-          <th>اللون</th>
-          <th>المقاس</th>
-          <th>وارد</th>
-          <th>مباع</th>
-          <th>متبقي</th>
-          <th>المطلوب</th>
-          <th>حجوزات</th>
+          <th>Ø§Ù„Ù†ÙˆØ¹</th>
+          <th>Ø§Ù„Ù…Ø¯Ø±Ø³Ø©</th>
+          <th>Ø§Ù„Ù„ÙˆÙ†</th>
+          <th>Ø§Ù„Ù…Ù‚Ø§Ø³</th>
+          <th>ÙˆØ§Ø±Ø¯</th>
+          <th>Ù…Ø¨Ø§Ø¹</th>
+          <th>Ù…ØªØ¨Ù‚ÙŠ</th>
+          <th>Ø§Ù„Ù…Ø·Ù„ÙˆØ¨</th>
+          <th>Ø­Ø¬ÙˆØ²Ø§Øª</th>
         </tr>
       </thead>
       <tbody>
@@ -10477,55 +12402,55 @@ class AdminWindow(tk.Toplevel):
     def __init__(self, master, db: SqliteDatabase):
         super().__init__(master)
         self.db = db
-        self.title("إعدادات المدير")
+        self.title("Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª Ø§Ù„Ù…Ø¯ÙŠØ±")
         self.geometry("520x380")
         self.resizable(False, False)
         self.configure(bg=_UI["BG"])
         _wh = tk.Frame(self, bg=_UI["ACCENT"], height=44); _wh.pack(fill=tk.X); _wh.pack_propagate(False)
-        tk.Label(_wh, text="  إعدادات المدير", bg=_UI["ACCENT"], fg="#FFFFFF", font=_FONTS["h3"]).pack(side=tk.RIGHT, padx=12)
+        tk.Label(_wh, text="  Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª Ø§Ù„Ù…Ø¯ÙŠØ±", bg=_UI["ACCENT"], fg="#FFFFFF", font=_FONTS["h3"]).pack(side=tk.RIGHT, padx=12)
         self._build()
 
     def _build(self):
         # Password gate at top
-        gate = ttk.LabelFrame(self, text="التحقق من كلمة المرور")
+        gate = ttk.LabelFrame(self, text="Ø§Ù„ØªØ­Ù‚Ù‚ Ù…Ù† ÙƒÙ„Ù…Ø© Ø§Ù„Ù…Ø±ÙˆØ±")
         gate.pack(fill=tk.X, padx=10, pady=(10, 8))
-        ttk.Label(gate, text="كلمة المرور:").grid(row=0, column=0, sticky="e", padx=6, pady=8)
+        ttk.Label(gate, text="ÙƒÙ„Ù…Ø© Ø§Ù„Ù…Ø±ÙˆØ±:").grid(row=0, column=0, sticky="e", padx=6, pady=8)
         self.pw_var = tk.StringVar()
         pw_entry = ttk.Entry(gate, textvariable=self.pw_var, show="*")
         pw_entry.grid(row=0, column=1, sticky="ew", padx=6, pady=8)
         gate.columnconfigure(1, weight=1)
 
         # Section: Reopen package
-        rp = ttk.LabelFrame(self, text="إعادة فتح حاوية")
+        rp = ttk.LabelFrame(self, text="Ø¥Ø¹Ø§Ø¯Ø© ÙØªØ­ Ø­Ø§ÙˆÙŠØ©")
         rp.pack(fill=tk.X, padx=10, pady=(0, 8))
 
         self.wh_var  = tk.StringVar()
         self.pkg_var = tk.StringVar()
         self.empty_only = tk.BooleanVar(value=False)
 
-        ttk.Label(rp, text="رقم المخزن:").grid(row=0, column=0, sticky="e", padx=6, pady=6)
+        ttk.Label(rp, text="Ø±Ù‚Ù… Ø§Ù„Ù…Ø®Ø²Ù†:").grid(row=0, column=0, sticky="e", padx=6, pady=6)
         ttk.Entry(rp, textvariable=self.wh_var, width=10).grid(row=0, column=1, sticky="w", padx=6, pady=6)
 
-        ttk.Label(rp, text="رقم العبوة:").grid(row=0, column=2, sticky="e", padx=6, pady=6)
+        ttk.Label(rp, text="Ø±Ù‚Ù… Ø§Ù„Ø¹Ø¨ÙˆØ©:").grid(row=0, column=2, sticky="e", padx=6, pady=6)
         ttk.Entry(rp, textvariable=self.pkg_var, width=12).grid(row=0, column=3, sticky="w", padx=6, pady=6)
 
-        ttk.Checkbutton(rp, text="إعادة الفتح إذا كانت فارغة فقط", variable=self.empty_only).grid(
+        ttk.Checkbutton(rp, text="Ø¥Ø¹Ø§Ø¯Ø© Ø§Ù„ÙØªØ­ Ø¥Ø°Ø§ ÙƒØ§Ù†Øª ÙØ§Ø±ØºØ© ÙÙ‚Ø·", variable=self.empty_only).grid(
             row=1, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 6)
         )
 
         act = ttk.Frame(rp); act.grid(row=2, column=0, columnspan=4, sticky="e", padx=6, pady=(6, 6))
-        _arp = ttk.Button(act, text="إعادة فتح", command=self._do_reopen); _arp.pack(side=tk.RIGHT)
-        ToolTip(_arp, "إعادة فتح العبوة المغلقة للإضافة عليها")
+        _arp = ttk.Button(act, text="Ø¥Ø¹Ø§Ø¯Ø© ÙØªØ­", command=self._do_reopen); _arp.pack(side=tk.RIGHT)
+        ToolTip(_arp, "Ø¥Ø¹Ø§Ø¯Ø© ÙØªØ­ Ø§Ù„Ø¹Ø¨ÙˆØ© Ø§Ù„Ù…ØºÙ„Ù‚Ø© Ù„Ù„Ø¥Ø¶Ø§ÙØ© Ø¹Ù„ÙŠÙ‡Ø§")
 
         # Future admin tools can go in more frames below...
             # -------- Purge definition (HARD DELETE) --------
-        pd = ttk.LabelFrame(self, text="حذف تعريف نهائي (إزالة من النظام)")
+        pd = ttk.LabelFrame(self, text="Ø­Ø°Ù ØªØ¹Ø±ÙŠÙ Ù†Ù‡Ø§Ø¦ÙŠ (Ø¥Ø²Ø§Ù„Ø© Ù…Ù† Ø§Ù„Ù†Ø¸Ø§Ù…)")
         pd.pack(fill=tk.X, padx=10, pady=(0, 10))
 
         self.purge_field = tk.StringVar(value="color")
         self.purge_value = tk.StringVar()
 
-        ttk.Label(pd, text="الحقل:").grid(row=0, column=0, sticky="e", padx=6, pady=6)
+        ttk.Label(pd, text="Ø§Ù„Ø­Ù‚Ù„:").grid(row=0, column=0, sticky="e", padx=6, pady=6)
         ttk.Combobox(
             pd,
             textvariable=self.purge_field,
@@ -10534,54 +12459,54 @@ class AdminWindow(tk.Toplevel):
             width=14
         ).grid(row=0, column=1, sticky="w", padx=6, pady=6)
 
-        ttk.Label(pd, text="القيمة:").grid(row=0, column=2, sticky="e", padx=6, pady=6)
+        ttk.Label(pd, text="Ø§Ù„Ù‚ÙŠÙ…Ø©:").grid(row=0, column=2, sticky="e", padx=6, pady=6)
         ttk.Entry(pd, textvariable=self.purge_value, width=26)\
             .grid(row=0, column=3, sticky="w", padx=6, pady=6)
 
-        _apd = ttk.Button(pd, text="حذف نهائي", command=self._purge_definition); _apd.grid(row=0, column=4, padx=8)
-        ToolTip(_apd, "حذف القيمة نهائياً من المخزون (لا يمكن التراجع!)")
+        _apd = ttk.Button(pd, text="Ø­Ø°Ù Ù†Ù‡Ø§Ø¦ÙŠ", command=self._purge_definition); _apd.grid(row=0, column=4, padx=8)
+        ToolTip(_apd, "Ø­Ø°Ù Ø§Ù„Ù‚ÙŠÙ…Ø© Ù†Ù‡Ø§Ø¦ÙŠØ§Ù‹ Ù…Ù† Ø§Ù„Ù…Ø®Ø²ÙˆÙ† (Ù„Ø§ ÙŠÙ…ÙƒÙ† Ø§Ù„ØªØ±Ø§Ø¬Ø¹!)")
 
 
     def _do_reopen(self):
         # Verify password
         if not self.db.verify_admin_password(self.pw_var.get()):
-            messagebox.showerror("مرفوض", "كلمة المرور غير صحيحة.", parent=self)
+            messagebox.showerror("Ù…Ø±ÙÙˆØ¶", "ÙƒÙ„Ù…Ø© Ø§Ù„Ù…Ø±ÙˆØ± ØºÙŠØ± ØµØ­ÙŠØ­Ø©.", parent=self)
             return
 
         # Parse inputs
         try:
-            w = int((self.wh_var.get() or "").strip())
-            p = int((self.pkg_var.get() or "").strip())
+            w = parse_int_text(self.wh_var.get(), 0) or 0
+            p = parse_int_text(self.pkg_var.get(), 0) or 0
             if w < 1 or p < 1:
                 raise ValueError
         except Exception:
-            messagebox.showerror("بيانات غير صالحة", "أدخل أرقامًا صحيحة للمخزن والعبوة (>= 1).", parent=self)
+            messagebox.showerror("Ø¨ÙŠØ§Ù†Ø§Øª ØºÙŠØ± ØµØ§Ù„Ø­Ø©", "Ø£Ø¯Ø®Ù„ Ø£Ø±Ù‚Ø§Ù…Ù‹Ø§ ØµØ­ÙŠØ­Ø© Ù„Ù„Ù…Ø®Ø²Ù† ÙˆØ§Ù„Ø¹Ø¨ÙˆØ© (>= 1).", parent=self)
             return
 
         # Perform action
         try:
             self.db.reopen_package(w, p, require_empty=bool(self.empty_only.get()), note="Admin manual reopen")
-            show_toast(self, f"تمت إعادة فتح العبوة {p} في المخزن {w}")
+            show_toast(self, f"ØªÙ…Øª Ø¥Ø¹Ø§Ø¯Ø© ÙØªØ­ Ø§Ù„Ø¹Ø¨ÙˆØ© {p} ÙÙŠ Ø§Ù„Ù…Ø®Ø²Ù† {w}")
         except Exception as ex:
-            messagebox.showerror("فشل", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„", str(ex), parent=self)
     def _purge_definition(self):
         # Verify admin password
         if not self.db.verify_admin_password(self.pw_var.get()):
-            messagebox.showerror("مرفوض", "كلمة المرور غير صحيحة.", parent=self)
+            messagebox.showerror("Ù…Ø±ÙÙˆØ¶", "ÙƒÙ„Ù…Ø© Ø§Ù„Ù…Ø±ÙˆØ± ØºÙŠØ± ØµØ­ÙŠØ­Ø©.", parent=self)
             return
 
         field = self.purge_field.get()
         value = (self.purge_value.get() or "").strip()
 
         if not value:
-            messagebox.showerror("بيانات ناقصة", "أدخل قيمة للحذف.", parent=self)
+            messagebox.showerror("Ø¨ÙŠØ§Ù†Ø§Øª Ù†Ø§Ù‚ØµØ©", "Ø£Ø¯Ø®Ù„ Ù‚ÙŠÙ…Ø© Ù„Ù„Ø­Ø°Ù.", parent=self)
             return
 
         if not messagebox.askyesno(
-            "تأكيد الحذف النهائي",
-            f"سيتم حذف '{value}' من '{field}' نهائيًا.\n\n"
-            "⚠ هذا سيحذف كل الصفوف المرتبطة به من المخزون.\n\n"
-            "هل أنت متأكد؟",
+            "ØªØ£ÙƒÙŠØ¯ Ø§Ù„Ø­Ø°Ù Ø§Ù„Ù†Ù‡Ø§Ø¦ÙŠ",
+            f"Ø³ÙŠØªÙ… Ø­Ø°Ù '{value}' Ù…Ù† '{field}' Ù†Ù‡Ø§Ø¦ÙŠÙ‹Ø§.\n\n"
+            "âš  Ù‡Ø°Ø§ Ø³ÙŠØ­Ø°Ù ÙƒÙ„ Ø§Ù„ØµÙÙˆÙ Ø§Ù„Ù…Ø±ØªØ¨Ø·Ø© Ø¨Ù‡ Ù…Ù† Ø§Ù„Ù…Ø®Ø²ÙˆÙ†.\n\n"
+            "Ù‡Ù„ Ø£Ù†Øª Ù…ØªØ£ÙƒØ¯ØŸ",
             parent=self
         ):
             return
@@ -10589,12 +12514,12 @@ class AdminWindow(tk.Toplevel):
         try:
             removed = self.db.purge_definition(field, value)
             if removed == 0:
-                show_toast(self, "القيمة غير موجودة في المخزون", bg="#f59e0b")
+                show_toast(self, "Ø§Ù„Ù‚ÙŠÙ…Ø© ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯Ø© ÙÙŠ Ø§Ù„Ù…Ø®Ø²ÙˆÙ†", bg="#f59e0b")
             else:
-                show_toast(self, f"تم حذف {removed} صف(وف) من المخزون نهائياً")
+                show_toast(self, f"ØªÙ… Ø­Ø°Ù {removed} ØµÙ(ÙˆÙ) Ù…Ù† Ø§Ù„Ù…Ø®Ø²ÙˆÙ† Ù†Ù‡Ø§Ø¦ÙŠØ§Ù‹")
             self.purge_value.set("")
         except Exception as ex:
-            messagebox.showerror("فشل الحذف", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø­Ø°Ù", str(ex), parent=self)
 
 
 
@@ -10605,39 +12530,39 @@ class TransferWindow(tk.Toplevel):
     def __init__(self, master, db: SqliteDatabase):
         super().__init__(master)
         self.db = db
-        self.title("تحويل بين المخازن")
+        self.title("ØªØ­ÙˆÙŠÙ„ Ø¨ÙŠÙ† Ø§Ù„Ù…Ø®Ø§Ø²Ù†")
         self.geometry("950x560")
         self.configure(bg=_UI["BG"])
         _wh = tk.Frame(self, bg=_UI["ACCENT"], height=44); _wh.pack(fill=tk.X); _wh.pack_propagate(False)
-        tk.Label(_wh, text="  تحويل بين المخازن", bg=_UI["ACCENT"], fg="#FFFFFF", font=_FONTS["h3"]).pack(side=tk.RIGHT, padx=12)
+        tk.Label(_wh, text="  ØªØ­ÙˆÙŠÙ„ Ø¨ÙŠÙ† Ø§Ù„Ù…Ø®Ø§Ø²Ù†", bg=_UI["ACCENT"], fg="#FFFFFF", font=_FONTS["h3"]).pack(side=tk.RIGHT, padx=12)
         self._build()
 
     def _build(self):
         # Source filters
-        src_frame = ttk.LabelFrame(self, text="اختر المصدر")
+        src_frame = ttk.LabelFrame(self, text="Ø§Ø®ØªØ± Ø§Ù„Ù…ØµØ¯Ø±")
         src_frame.pack(fill=tk.X, padx=8, pady=8)
 
         row1 = ttk.Frame(src_frame)
         row1.pack(fill=tk.X, padx=4, pady=4)
-        self.f_type = LabeledCombobox(row1, "النوع", self.db, "item_type")
+        self.f_type = LabeledCombobox(row1, "Ø§Ù„Ù†ÙˆØ¹", self.db, "item_type")
         self.f_type.pack(side=tk.LEFT, padx=4)
-        self.f_school = LabeledCombobox(row1, "المدرسة", self.db, "school")
+        self.f_school = LabeledCombobox(row1, "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", self.db, "school")
         self.f_school.pack(side=tk.LEFT, padx=4)
-        self.f_color = LabeledCombobox(row1, "اللون", self.db, "color")
+        self.f_color = LabeledCombobox(row1, "Ø§Ù„Ù„ÙˆÙ†", self.db, "color")
         self.f_color.pack(side=tk.LEFT, padx=4)
-        self.f_size = LabeledCombobox(row1, "المقاس", self.db, "size")
+        self.f_size = LabeledCombobox(row1, "Ø§Ù„Ù…Ù‚Ø§Ø³", self.db, "size")
         self.f_size.pack(side=tk.LEFT, padx=4)
 
         row2 = ttk.Frame(src_frame)
         row2.pack(fill=tk.X, padx=4, pady=4)
-        ttk.Label(row2, text="المخزن:").pack(side=tk.LEFT)
+        ttk.Label(row2, text="Ø§Ù„Ù…Ø®Ø²Ù†:").pack(side=tk.LEFT)
         self.f_wh = ttk.Combobox(row2, values=["", "1", "2", "3", "4"], width=5, state="readonly")
         self.f_wh.pack(side=tk.LEFT, padx=4)
-        ttk.Label(row2, text="العبوة:").pack(side=tk.LEFT)
+        ttk.Label(row2, text="Ø§Ù„Ø¹Ø¨ÙˆØ©:").pack(side=tk.LEFT)
         self.f_pkg = ttk.Entry(row2, width=8)
         self.f_pkg.pack(side=tk.LEFT, padx=4)
-        _bsrc = ttk.Button(row2, text="بحث", command=self._load_source); _bsrc.pack(side=tk.LEFT, padx=8)
-        ToolTip(_bsrc, "عرض الأصناف المتاحة للتحويل")
+        _bsrc = ttk.Button(row2, text="Ø¨Ø­Ø«", command=self._load_source); _bsrc.pack(side=tk.LEFT, padx=8)
+        ToolTip(_bsrc, "Ø¹Ø±Ø¶ Ø§Ù„Ø£ØµÙ†Ø§Ù Ø§Ù„Ù…ØªØ§Ø­Ø© Ù„Ù„ØªØ­ÙˆÙŠÙ„")
 
         # Source table
         table_wrap = ttk.Frame(self)
@@ -10647,10 +12572,10 @@ class TransferWindow(tk.Toplevel):
             columns=("id", "type", "school", "color", "size", "wh", "pkg", "badge", "price", "count"),
             show="headings", height=10)
         for col, txt, w in [
-            ("id", "ID", 50), ("type", "النوع", 120), ("school", "المدرسة", 120),
-            ("color", "اللون", 70), ("size", "المقاس", 60), ("wh", "المخزن", 50),
-            ("pkg", "العبوة", 50), ("badge", "بادج", 40), ("price", "السعر", 70),
-            ("count", "الكمية", 60),
+            ("id", "ID", 50), ("type", "Ø§Ù„Ù†ÙˆØ¹", 120), ("school", "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", 120),
+            ("color", "Ø§Ù„Ù„ÙˆÙ†", 70), ("size", "Ø§Ù„Ù…Ù‚Ø§Ø³", 60), ("wh", "Ø§Ù„Ù…Ø®Ø²Ù†", 50),
+            ("pkg", "Ø§Ù„Ø¹Ø¨ÙˆØ©", 50), ("badge", "Ø¨Ø§Ø¯Ø¬", 40), ("price", "Ø§Ù„Ø³Ø¹Ø±", 70),
+            ("count", "Ø§Ù„ÙƒÙ…ÙŠØ©", 60),
         ]:
             self.src_table.heading(col, text=txt)
             self.src_table.column(col, width=w, anchor="center")
@@ -10662,21 +12587,21 @@ class TransferWindow(tk.Toplevel):
         _bind_mousewheel(self.src_table)
 
         # Destination
-        dest_frame = ttk.LabelFrame(self, text="الوجهة")
+        dest_frame = ttk.LabelFrame(self, text="Ø§Ù„ÙˆØ¬Ù‡Ø©")
         dest_frame.pack(fill=tk.X, padx=8, pady=4)
         drow = ttk.Frame(dest_frame)
         drow.pack(fill=tk.X, padx=4, pady=4)
-        ttk.Label(drow, text="مخزن الوجهة:").pack(side=tk.LEFT)
+        ttk.Label(drow, text="Ù…Ø®Ø²Ù† Ø§Ù„ÙˆØ¬Ù‡Ø©:").pack(side=tk.LEFT)
         self.dest_wh = ttk.Combobox(drow, values=WAREHOUSE_NUMBER_DISPLAY_VALUES, width=14, state="readonly")
         self.dest_wh.pack(side=tk.LEFT, padx=4)
-        ttk.Label(drow, text="عبوة الوجهة:").pack(side=tk.LEFT)
+        ttk.Label(drow, text="Ø¹Ø¨ÙˆØ© Ø§Ù„ÙˆØ¬Ù‡Ø©:").pack(side=tk.LEFT)
         self.dest_pkg = ttk.Entry(drow, width=8)
         self.dest_pkg.pack(side=tk.LEFT, padx=4)
-        ttk.Label(drow, text="الكمية:").pack(side=tk.LEFT)
+        ttk.Label(drow, text="Ø§Ù„ÙƒÙ…ÙŠØ©:").pack(side=tk.LEFT)
         self.transfer_qty = ttk.Entry(drow, width=8)
         self.transfer_qty.pack(side=tk.LEFT, padx=4)
-        _bt = ttk.Button(drow, text="تحويل", command=self._do_transfer); _bt.pack(side=tk.LEFT, padx=8)
-        ToolTip(_bt, "تحويل الكمية المحددة إلى الوجهة")
+        _bt = ttk.Button(drow, text="ØªØ­ÙˆÙŠÙ„", command=self._do_transfer); _bt.pack(side=tk.LEFT, padx=8)
+        ToolTip(_bt, "ØªØ­ÙˆÙŠÙ„ Ø§Ù„ÙƒÙ…ÙŠØ© Ø§Ù„Ù…Ø­Ø¯Ø¯Ø© Ø¥Ù„Ù‰ Ø§Ù„ÙˆØ¬Ù‡Ø©")
 
     def _load_source(self):
         filters = {
@@ -10690,78 +12615,209 @@ class TransferWindow(tk.Toplevel):
         try:
             rows = self.db.current_inventory(filters)
         except Exception as ex:
-            messagebox.showerror("فشل البحث", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø¨Ø­Ø«", str(ex), parent=self)
             return
         self.src_table.delete(*self.src_table.get_children())
         for r in rows:
             self.src_table.insert("", tk.END, iid=str(r["id"]), values=(
                 r["id"], r["item_type"], r["school"], r["color"], r["size"],
                 r["warehouse_no"], r["package_no"],
-                ("✓" if int(r.get("has_badge") or 0) else ""),
-                f"{float(r['unit_price']):.2f}", r["count"]
+                ("âœ“" if int(r.get("has_badge") or 0) else ""),
+                f"{format_money(float(r['unit_price']))}", r["count"]
             ))
         apply_zebra_tags(self.src_table)
 
     def _do_transfer(self):
         sel = self.src_table.selection()
         if not sel:
-            messagebox.showwarning("لم يتم التحديد", "اختر صف مخزون أولاً.", parent=self)
+            messagebox.showwarning("Ù„Ù… ÙŠØªÙ… Ø§Ù„ØªØ­Ø¯ÙŠØ¯", "Ø§Ø®ØªØ± ØµÙ Ù…Ø®Ø²ÙˆÙ† Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
             return
-        stock_id = int(sel[0])
+        stock_id = parse_int_text(sel[0])
+        if stock_id is None:
+            messagebox.showerror("Ø¨ÙŠØ§Ù†Ø§Øª ØºÙŠØ± ØµØ§Ù„Ø­Ø©", "Ù…Ø¹Ø±Ù ØµÙ Ø§Ù„Ù…Ø®Ø²ÙˆÙ† ØºÙŠØ± ØµØ§Ù„Ø­.", parent=self)
+            return
         try:
             dest_wh = int(warehouse_numeric_value(self.dest_wh.get()))
-            dest_pkg = int(self.dest_pkg.get().strip())
-            qty = int(self.transfer_qty.get().strip())
+            dest_pkg = parse_int_text(self.dest_pkg.get())
+            qty = parse_int_text(self.transfer_qty.get())
+            if dest_pkg is None or qty is None:
+                raise ValueError
             if dest_wh < 1 or dest_pkg < 1 or qty < 1:
                 raise ValueError
         except (ValueError, TypeError):
-            messagebox.showerror("بيانات غير صالحة",
-                                 "أدخل مخزن وعبوة وكمية صحيحة (>= 1).", parent=self)
+            messagebox.showerror("Ø¨ÙŠØ§Ù†Ø§Øª ØºÙŠØ± ØµØ§Ù„Ø­Ø©",
+                                 "Ø£Ø¯Ø®Ù„ Ù…Ø®Ø²Ù† ÙˆØ¹Ø¨ÙˆØ© ÙˆÙƒÙ…ÙŠØ© ØµØ­ÙŠØ­Ø© (>= 1).", parent=self)
             return
-        if not messagebox.askyesno("تأكيد التحويل",
-                                   f"تحويل {qty} وحدة إلى المخزن {dest_wh} / العبوة {dest_pkg}؟",
+        if not messagebox.askyesno("ØªØ£ÙƒÙŠØ¯ Ø§Ù„ØªØ­ÙˆÙŠÙ„",
+                                   f"ØªØ­ÙˆÙŠÙ„ {qty} ÙˆØ­Ø¯Ø© Ø¥Ù„Ù‰ Ø§Ù„Ù…Ø®Ø²Ù† {dest_wh} / Ø§Ù„Ø¹Ø¨ÙˆØ© {dest_pkg}ØŸ",
                                    parent=self):
             return
         try:
             self.db.transfer_stock(stock_id, qty, dest_wh, dest_pkg)
-            show_toast(self, f"تم التحويل بنجاح ({qty} وحدة)")
+            show_toast(self, f"ØªÙ… Ø§Ù„ØªØ­ÙˆÙŠÙ„ Ø¨Ù†Ø¬Ø§Ø­ ({qty} ÙˆØ­Ø¯Ø©)")
             self._load_source()
         except Exception as ex:
-            messagebox.showerror("فشل التحويل", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„ØªØ­ÙˆÙŠÙ„", str(ex), parent=self)
 
 # ------------------- Stock Audit Window -------------------
+
+def _stock_audit_report_totals(rows: Sequence[Dict[str, Any]]) -> Tuple[int, float]:
+    return (
+        sum(int(r.get("diff") or 0) for r in rows),
+        sum(float(r.get("diff_value") or 0.0) for r in rows),
+    )
+
+
+def _export_stock_audit_report_rows(path: str, rows: Sequence[Dict[str, Any]]) -> None:
+    headers = [
+        "id", "item_type", "school", "color", "size", "warehouse_no", "package_no",
+        "expected", "actual", "diff", "unit_price", "diff_value",
+    ]
+    table = [[
+        r.get("id") or "", r.get("item_type") or "", r.get("school") or "",
+        r.get("color") or "", r.get("size") or "", r.get("warehouse_no") or "",
+        r.get("package_no") or "", int(r.get("expected") or 0),
+        int(r.get("actual") or 0), int(r.get("diff") or 0),
+        float(r.get("unit_price") or 0.0), float(r.get("diff_value") or 0.0),
+    ] for r in rows]
+    total_qty, total_value = _stock_audit_report_totals(rows)
+    table.append(["", "", "", "", "", "", "", "", "Ø§Ù„Ø¥Ø¬Ù…Ø§Ù„ÙŠ", total_qty, "", total_value])
+    export_to_excel(path, headers, table)
+
+
+def _stock_audit_report_html(rows: Sequence[Dict[str, Any]], title: str = "ØªÙ‚Ø±ÙŠØ± ÙØ±ÙˆÙ‚ Ø§Ù„Ø¬Ø±Ø¯") -> str:
+    total_qty, total_value = _stock_audit_report_totals(rows)
+    body = []
+    for r in rows:
+        diff = int(r.get("diff") or 0)
+        cls = "surplus" if diff > 0 else "deficit"
+        body.append(
+            f"<tr class='{cls}'>"
+            f"<td>{_html(r.get('item_type') or '')}</td>"
+            f"<td>{_html(r.get('school') or '')}</td>"
+            f"<td>{_html(r.get('color') or '')}</td>"
+            f"<td>{_html(r.get('size') or '')}</td>"
+            f"<td>{_html(r.get('warehouse_no') or '')}</td>"
+            f"<td>{_html(r.get('package_no') or '')}</td>"
+            f"<td>{int(r.get('expected') or 0)}</td>"
+            f"<td>{int(r.get('actual') or 0)}</td>"
+            f"<td>{diff:+d}</td>"
+            f"<td>{format_money(r.get('unit_price') or 0)}</td>"
+            f"<td>{format_money(r.get('diff_value') or 0)}</td>"
+            f"</tr>"
+        )
+    return f"""<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<title>{_html(title)}</title>
+<style>
+@page {{ size: A4 landscape; margin: 10mm; }}
+body {{ font-family: "Segoe UI", Tahoma, Arial, sans-serif; direction: rtl; }}
+.title {{ font-size: 20px; font-weight: 700; margin-bottom: 4px; }}
+.meta {{ color: #334155; margin-bottom: 10px; }}
+table {{ border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 12px; }}
+th, td {{ border: 1px solid #94a3b8; padding: 6px 4px; text-align: center; }}
+th {{ background: #e2e8f0; }}
+.surplus td {{ background: #dcfce7; }}
+.deficit td {{ background: #fee2e2; }}
+tfoot td {{ background: #f8fafc; font-weight: 700; }}
+</style>
+</head>
+<body>
+<div class="title">{_html(title)}</div>
+<div class="meta">ØªØ§Ø±ÙŠØ® Ø§Ù„ØªÙ‚Ø±ÙŠØ±: {western_digits(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}</div>
+<table>
+<thead>
+<tr>
+<th>Ø§Ù„Ù†ÙˆØ¹</th><th>Ø§Ù„Ù…Ø¯Ø±Ø³Ø©</th><th>Ø§Ù„Ù„ÙˆÙ†</th><th>Ø§Ù„Ù…Ù‚Ø§Ø³</th><th>Ø§Ù„Ù…Ø®Ø²Ù†</th><th>Ø§Ù„Ø¹Ø¨ÙˆØ©</th>
+<th>Ø§Ù„Ù…ØªÙˆÙ‚Ø¹</th><th>Ø§Ù„ÙØ¹Ù„ÙŠ</th><th>Ø§Ù„ÙØ±Ù‚</th><th>Ø§Ù„Ø³Ø¹Ø±</th><th>Ù‚ÙŠÙ…Ø© Ø§Ù„ÙØ±Ù‚</th>
+</tr>
+</thead>
+<tbody>
+{''.join(body)}
+</tbody>
+<tfoot>
+<tr>
+<td colspan="8">Ø§Ù„Ø¥Ø¬Ù…Ø§Ù„ÙŠ</td><td>{total_qty:+d}</td><td></td><td>{format_money(total_value)}</td>
+</tr>
+</tfoot>
+</table>
+</body>
+</html>
+"""
+
 
 class StockAuditWindow(tk.Toplevel):
     """Physical stock count and adjustment."""
     def __init__(self, master, db: SqliteDatabase):
         super().__init__(master)
         self.db = db
-        self.title("جرد المخزون")
+        self.title("Ø¬Ø±Ø¯ Ø§Ù„Ù…Ø®Ø²ÙˆÙ†")
         self.geometry("1050x620")
         self.configure(bg=_UI["BG"])
         _wh = tk.Frame(self, bg=_UI["ACCENT"], height=44); _wh.pack(fill=tk.X); _wh.pack_propagate(False)
-        tk.Label(_wh, text="  جرد المخزون", bg=_UI["ACCENT"], fg="#FFFFFF", font=_FONTS["h3"]).pack(side=tk.RIGHT, padx=12)
+        tk.Label(_wh, text="  Ø¬Ø±Ø¯ Ø§Ù„Ù…Ø®Ø²ÙˆÙ†", bg=_UI["ACCENT"], fg="#FFFFFF", font=_FONTS["h3"]).pack(side=tk.RIGHT, padx=12)
         self._stock_rows: List[Dict[str, Any]] = []
+        self._audit_rows_by_iid: Dict[str, Dict[str, Any]] = {}
+        self._history_touched_keys: set[Tuple[str, str, str, str, str, str]] = set()
+        self._current_touched_iids: set[str] = set()
         self._build()
 
     def _build(self):
         # Filters
-        filters = ttk.LabelFrame(self, text="تصفية الجرد")
+        filters = ttk.LabelFrame(self, text="ØªØµÙÙŠØ© Ø§Ù„Ø¬Ø±Ø¯")
         filters.pack(fill=tk.X, padx=8, pady=8)
         frow = ttk.Frame(filters)
         frow.pack(fill=tk.X, padx=4, pady=4)
-        ttk.Label(frow, text="المخزن:").pack(side=tk.LEFT)
-        self.f_wh = ttk.Combobox(frow, values=["", "1", "2", "3", "4"], width=5, state="readonly")
+        ttk.Label(frow, text="Ø§Ù„Ù…Ø®Ø²Ù†:").pack(side=tk.LEFT)
+        self.f_wh = ttk.Combobox(frow, values=["", *WAREHOUSE_NUMBER_DISPLAY_VALUES], width=14, state="readonly")
         self.f_wh.pack(side=tk.LEFT, padx=4)
-        ttk.Label(frow, text="العبوة:").pack(side=tk.LEFT)
+        ttk.Label(frow, text="Ø§Ù„Ø¹Ø¨ÙˆØ©:").pack(side=tk.LEFT)
         self.f_pkg = ttk.Entry(frow, width=8)
         self.f_pkg.pack(side=tk.LEFT, padx=4)
-        self.f_type = LabeledCombobox(frow, "النوع", self.db, "item_type")
+        self.f_type = LabeledCombobox(frow, "Ø§Ù„Ù†ÙˆØ¹", self.db, "item_type")
         self.f_type.pack(side=tk.LEFT, padx=4)
-        self.f_school = LabeledCombobox(frow, "المدرسة", self.db, "school")
+        self.f_school = LabeledCombobox(frow, "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", self.db, "school")
         self.f_school.pack(side=tk.LEFT, padx=4)
-        _bl = ttk.Button(frow, text="تحميل المخزون", command=self._load_stock); _bl.pack(side=tk.LEFT, padx=8)
-        ToolTip(_bl, "تحميل الأصناف المطابقة للجرد")
+        self.f_color = LabeledCombobox(frow, "Ø§Ù„Ù„ÙˆÙ†", self.db, "color")
+        self.f_color.pack(side=tk.LEFT, padx=4)
+
+        def _constraints(exclude: Optional[str] = None) -> Dict[str, Any]:
+            warehouse_no = parse_int_text(warehouse_numeric_value(self.f_wh.get()))
+            package_no = parse_int_text(self.f_pkg.get().strip())
+            values = {
+                "item_type": self.f_type.get() or None,
+                "school": self.f_school.get() or None,
+                "color": self.f_color.get() or None,
+                "warehouse_no": warehouse_no,
+                "package_no": package_no,
+            }
+            if exclude:
+                values[exclude] = None
+            return values
+
+        self.f_type.set_supplier(lambda: self.db.get_distinct_filtered("item_type", _constraints("item_type")))
+        self.f_school.set_supplier(lambda: self.db.get_distinct_filtered("school", _constraints("school")))
+        self.f_color.set_supplier(lambda: self.db.get_distinct_filtered("color", _constraints("color")))
+
+        def _refresh_filter_options(*_, clear_invalid_color: bool = False):
+            self.f_type.refresh_values()
+            self.f_school.refresh_values()
+            self.f_color.refresh_values()
+            color = self.f_color.get()
+            if clear_invalid_color and color and color not in self.db.get_distinct_filtered("color", _constraints("color")):
+                self.f_color.set("")
+
+        for widget in (self.f_type, self.f_school):
+            widget.cb.bind("<<ComboboxSelected>>", lambda _e: _refresh_filter_options(clear_invalid_color=True), add="+")
+            widget.cb.bind("<KeyRelease>", lambda _e: _refresh_filter_options(), add="+")
+        self.f_color.cb.bind("<<ComboboxSelected>>", lambda _e: _refresh_filter_options(), add="+")
+        self.f_color.cb.bind("<KeyRelease>", lambda _e: self.f_color.refresh_values(), add="+")
+        self.f_wh.bind("<<ComboboxSelected>>", lambda _e: _refresh_filter_options(clear_invalid_color=True), add="+")
+        self.f_pkg.bind("<KeyRelease>", lambda _e: _refresh_filter_options(clear_invalid_color=True), add="+")
+        _bl = ttk.Button(frow, text="ØªØ­Ù…ÙŠÙ„ Ø§Ù„Ù…Ø®Ø²ÙˆÙ†", command=self._load_stock); _bl.pack(side=tk.LEFT, padx=8)
+        ToolTip(_bl, "ØªØ­Ù…ÙŠÙ„ Ø§Ù„Ø£ØµÙ†Ø§Ù Ø§Ù„Ù…Ø·Ø§Ø¨Ù‚Ø© Ù„Ù„Ø¬Ø±Ø¯")
 
         # Audit table
         table_wrap = ttk.Frame(self)
@@ -10769,13 +12825,14 @@ class StockAuditWindow(tk.Toplevel):
         self.table = ttk.Treeview(
             table_wrap,
             columns=("id", "type", "school", "color", "size", "wh", "pkg",
-                     "expected", "actual", "diff"),
+                     "expected", "actual", "diff", "price", "diff_value"),
             show="headings", height=16, selectmode="browse")
         for col, txt, w in [
-            ("id", "ID", 50), ("type", "النوع", 110), ("school", "المدرسة", 110),
-            ("color", "اللون", 70), ("size", "المقاس", 60), ("wh", "المخزن", 50),
-            ("pkg", "العبوة", 50), ("expected", "الكمية المتوقعة", 100),
-            ("actual", "الكمية الفعلية", 100), ("diff", "الفرق", 70),
+            ("id", "ID", 50), ("type", "Ø§Ù„Ù†ÙˆØ¹", 110), ("school", "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", 110),
+            ("color", "Ø§Ù„Ù„ÙˆÙ†", 70), ("size", "Ø§Ù„Ù…Ù‚Ø§Ø³", 60), ("wh", "Ø§Ù„Ù…Ø®Ø²Ù†", 50),
+            ("pkg", "Ø§Ù„Ø¹Ø¨ÙˆØ©", 50), ("expected", "Ø§Ù„ÙƒÙ…ÙŠØ© Ø§Ù„Ù…ØªÙˆÙ‚Ø¹Ø©", 100),
+            ("actual", "Ø§Ù„ÙƒÙ…ÙŠØ© Ø§Ù„ÙØ¹Ù„ÙŠØ©", 100), ("diff", "Ø§Ù„ÙØ±Ù‚", 70),
+            ("price", "Ø§Ù„Ø³Ø¹Ø±", 80), ("diff_value", "Ù‚ÙŠÙ…Ø© Ø§Ù„ÙØ±Ù‚", 100),
         ]:
             self.table.heading(col, text=txt)
             self.table.column(col, width=w, anchor="center")
@@ -10787,94 +12844,606 @@ class StockAuditWindow(tk.Toplevel):
         _bind_mousewheel(self.table)
         self.table.tag_configure("surplus", background="#dcfce7")
         self.table.tag_configure("deficit", background="#fee2e2")
+        self.table.tag_configure("current_touched", background="#fef3c7")
+        self.table.tag_configure("history_touched", background="#dbeafe")
 
         # Edit actual qty
         edit_frame = ttk.Frame(self)
         edit_frame.pack(fill=tk.X, padx=8, pady=4)
-        ttk.Label(edit_frame, text="الكمية الفعلية للبند المحدد:").pack(side=tk.LEFT)
+        ttk.Label(edit_frame, text="Ø£Ø²Ø±Ù‚: ØªÙ… Ø¬Ø±Ø¯Ù‡ Ø³Ø§Ø¨Ù‚Ø§Ù‹   Ø£ØµÙØ±: ØªÙ… ØªØ¹Ø¯ÙŠÙ„Ù‡ Ø§Ù„Ø¢Ù†").pack(side=tk.RIGHT, padx=8)
+        ttk.Label(edit_frame, text="Ø§Ù„ÙƒÙ…ÙŠØ© Ø§Ù„ÙØ¹Ù„ÙŠØ© Ù„Ù„Ø¨Ù†Ø¯ Ø§Ù„Ù…Ø­Ø¯Ø¯:").pack(side=tk.LEFT)
         self._actual_var = tk.StringVar(value="0")
         self._actual_entry = ttk.Entry(edit_frame, textvariable=self._actual_var, width=8)
         self._actual_entry.pack(side=tk.LEFT, padx=4)
-        ttk.Button(edit_frame, text="تعيين", command=self._set_actual).pack(side=tk.LEFT, padx=4)
-        ttk.Button(edit_frame, text="مطابق (الكل)", command=self._mark_all_matched).pack(side=tk.LEFT, padx=4)
+        ttk.Button(edit_frame, text="ØªØ¹ÙŠÙŠÙ†", command=self._set_actual).pack(side=tk.LEFT, padx=4)
+        ttk.Button(edit_frame, text="Ù…Ø·Ø§Ø¨Ù‚ (Ø§Ù„ÙƒÙ„)", command=self._mark_all_matched).pack(side=tk.LEFT, padx=4)
 
         # Action buttons
         btns = ttk.Frame(self)
         btns.pack(fill=tk.X, padx=8, pady=8)
-        ttk.Button(btns, text="تطبيق التسويات", command=self._apply).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="ØªØ·Ø¨ÙŠÙ‚ Ø§Ù„ØªØ³ÙˆÙŠØ§Øª", command=self._apply).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="ØªØµØ¯ÙŠØ± ØªÙ‚Ø±ÙŠØ± Ø§Ù„ÙØ±ÙˆÙ‚", command=self._export_conflict_report).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Ø·Ø¨Ø§Ø¹Ø© ØªÙ‚Ø±ÙŠØ± Ø§Ù„ÙØ±ÙˆÙ‚", command=self._print_conflict_report).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Ø³Ø¬Ù„ ØªÙ‚Ø§Ø±ÙŠØ± Ø§Ù„Ø¬Ø±Ø¯", command=self._open_report_history).pack(side=tk.LEFT, padx=4)
 
-    def _load_stock(self):
-        filters = {
+    def _filters(self) -> Dict[str, Any]:
+        return {
             "item_type": self.f_type.get() or None,
             "school": self.f_school.get() or None,
-            "warehouse_no": self.f_wh.get() or None,
+            "color": self.f_color.get() or None,
+            "warehouse_no": warehouse_numeric_value(self.f_wh.get()) or None,
             "package_no": self.f_pkg.get().strip() or None,
         }
+
+    def _size_labels_for_specs(self, item_type: str, school: str, color: str) -> List[str]:
+        profile = self.db.get_size_profile(item_type, school, color)
+        if not profile:
+            return []
+        r1_start, r1_end, r2_start, r2_end, has_alpha = profile
+        labels = merged_numeric_size_labels_from_profile(r1_start, r1_end, r2_start, r2_end)
+        if has_alpha:
+            labels.extend(ALPHA_SIZES)
+        labels = list(dict.fromkeys([str(label).strip() for label in labels if str(label).strip()]))
+        labels.sort(key=warehouse_size_sort_key)
+        return labels
+
+    def _audit_key_for_row(self, row: Dict[str, Any]) -> Tuple[str, str, str, str, str, str]:
+        return (
+            str(row.get("item_type") or "").strip().casefold(),
+            str(row.get("school") or "").strip().casefold(),
+            str(row.get("color") or "").strip().casefold(),
+            _normalize_size_label(row.get("size") or "").casefold(),
+            str(row.get("warehouse_no") or "").strip(),
+            str(row.get("package_no") or "").strip(),
+        )
+
+    def _expanded_audit_rows(
+        self,
+        rows: Sequence[Dict[str, Any]],
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        expanded: List[Dict[str, Any]] = []
+        seen: set[Tuple[str, str, str, str, str, str]] = set()
+        groups: Dict[Tuple[str, str, str, str, str], Dict[str, Any]] = {}
+        group_sizes: Dict[Tuple[str, str, str, str, str], set[str]] = {}
+
+        for row in rows:
+            item_type = str(row.get("item_type") or "").strip()
+            school = str(row.get("school") or "").strip()
+            color = str(row.get("color") or "").strip()
+            size = _normalize_size_label(row.get("size") or "")
+            warehouse_no = str(row.get("warehouse_no") or "").strip()
+            package_no = str(row.get("package_no") or "").strip()
+            unit_price = float(row.get("unit_price") or 0)
+            key = (item_type, school, color, warehouse_no, package_no, size)
+            seen.add(key)
+            expanded.append(dict(row, size=size, _synthetic=False))
+            if parse_int_text(warehouse_no) is not None and parse_int_text(package_no) is not None:
+                group_key = (item_type, school, color, warehouse_no, package_no)
+                groups.setdefault(
+                    group_key,
+                    {
+                        "item_type": item_type,
+                        "school": school,
+                        "color": color,
+                        "warehouse_no": warehouse_no,
+                        "package_no": package_no,
+                        "unit_price": unit_price,
+                        "has_badge": int(row.get("has_badge") or 0),
+                    },
+                )
+                group_sizes.setdefault(group_key, set()).add(size)
+
+        filters = filters or {}
+        if not groups:
+            item_type = str(filters.get("item_type") or "").strip()
+            school = str(filters.get("school") or "").strip()
+            color = str(filters.get("color") or "").strip()
+            warehouse_no = parse_int_text(filters.get("warehouse_no"))
+            package_no = parse_int_text(filters.get("package_no"))
+            if item_type and school and color and warehouse_no is not None and package_no is not None:
+                group_key = (item_type, school, color, str(warehouse_no), str(package_no))
+                groups[group_key] = {
+                    "item_type": item_type,
+                    "school": school,
+                    "color": color,
+                    "warehouse_no": str(warehouse_no),
+                    "package_no": str(package_no),
+                    "unit_price": 0.0,
+                    "has_badge": 0,
+                }
+                group_sizes.setdefault(group_key, set())
+
+        for (item_type, school, color, warehouse_no, package_no), sample in groups.items():
+            labels = self._size_labels_for_specs(item_type, school, color)
+            if any(size and not size.isdigit() for size in group_sizes.get((item_type, school, color, warehouse_no, package_no), set())):
+                labels = list(dict.fromkeys(labels + ALPHA_SIZES))
+                labels.sort(key=warehouse_size_sort_key)
+            for size in labels:
+                key = (item_type, school, color, warehouse_no, package_no, _normalize_size_label(size))
+                if key in seen:
+                    continue
+                unit_price = self.db.get_effective_price(item_type, school, color, size)
+                if unit_price is None:
+                    unit_price = sample.get("unit_price") or 0
+                expanded.append({
+                    "id": None,
+                    "item_type": item_type,
+                    "school": school,
+                    "color": color,
+                    "size": _normalize_size_label(size),
+                    "warehouse_no": warehouse_no,
+                    "package_no": package_no,
+                    "unit_price": float(unit_price or 0),
+                    "count": 0,
+                    "value": 0.0,
+                    "has_badge": int(sample.get("has_badge") or 0),
+                    "_synthetic": True,
+                })
+                seen.add(key)
+
+        expanded.sort(
+            key=lambda r: (
+                (r.get("school") or "").casefold(),
+                warehouse_item_sort_key(r.get("item_type"), r.get("color")),
+                warehouse_size_sort_key(r.get("size")),
+                str(r.get("warehouse_no") or ""),
+                str(r.get("package_no") or ""),
+                1 if r.get("_synthetic") else 0,
+            )
+        )
+        return expanded
+
+    def _load_stock(self):
+        filters = self._filters()
         try:
             rows = self.db.current_inventory(filters)
         except Exception as ex:
-            messagebox.showerror("فشل التحميل", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„ØªØ­Ù…ÙŠÙ„", str(ex), parent=self)
             return
-        self._stock_rows = list(rows)
+        try:
+            self._history_touched_keys = self.db.stock_audit_touched_keys()
+        except Exception:
+            self._history_touched_keys = set()
+        self._current_touched_iids = set()
+        self._stock_rows = self._expanded_audit_rows(rows, filters)
+        self._audit_rows_by_iid = {}
         self.table.delete(*self.table.get_children())
-        for r in self._stock_rows:
+        for idx, r in enumerate(self._stock_rows):
             count = int(r["count"])
-            self.table.insert("", tk.END, iid=str(r["id"]), values=(
-                r["id"], r["item_type"], r["school"], r["color"], r["size"],
-                r["warehouse_no"], r["package_no"], count, count, 0
+            price = float(r.get("unit_price") or 0)
+            iid = str(r["id"]) if r.get("id") not in (None, "") else f"missing-{idx}"
+            self._audit_rows_by_iid[iid] = dict(r)
+            display_id = r.get("id") if r.get("id") not in (None, "") else ""
+            self.table.insert("", tk.END, iid=iid, values=(
+                display_id, r["item_type"], r["school"], r["color"], r["size"],
+                r["warehouse_no"], r["package_no"], count, count, 0,
+                format_money(price), format_money(0),
             ))
         apply_zebra_tags(self.table)
+        self._retag_all_audit_rows()
+
+    def _stock_row_by_id(self, stock_id: int) -> Dict[str, Any]:
+        for row in self._stock_rows:
+            if row.get("id") not in (None, "") and int(row.get("id") or 0) == int(stock_id):
+                return row
+        return {}
+
+    def _retag_audit_row(self, iid: str):
+        vals = self.table.item(iid, "values")
+        row = self._audit_rows_by_iid.get(iid, {})
+        diff = parse_int_text(vals[9], 0) if vals else 0
+        if diff and diff > 0:
+            tag = "surplus"
+        elif diff and diff < 0:
+            tag = "deficit"
+        elif iid in self._current_touched_iids:
+            tag = "current_touched"
+        elif self._audit_key_for_row(row) in self._history_touched_keys:
+            tag = "history_touched"
+        else:
+            siblings = list(self.table.get_children(""))
+            idx = siblings.index(iid) if iid in siblings else 0
+            tag = "evenrow" if idx % 2 == 0 else "oddrow"
+        self.table.item(iid, tags=(tag,))
+
+    def _retag_all_audit_rows(self):
+        for iid in self.table.get_children(""):
+            self._retag_audit_row(iid)
 
     def _set_actual(self):
         sel = self.table.selection()
         if not sel:
             return
+        iid = sel[0]
         try:
-            actual = int(self._actual_var.get())
-            if actual < 0:
+            actual = parse_int_text(self._actual_var.get())
+            if actual is None or actual < 0:
                 raise ValueError
         except ValueError:
             return
-        vals = list(self.table.item(sel[0], "values"))
-        expected = int(vals[7])
+        vals = list(self.table.item(iid, "values"))
+        expected = parse_int_text(vals[7], 0) or 0
         diff = actual - expected
+        stock_row = self._audit_rows_by_iid.get(iid, {})
+        unit_price = float(stock_row.get("unit_price") or parse_float_text(vals[10], 0) or 0)
         vals[8] = actual
         vals[9] = diff
-        tag = "surplus" if diff > 0 else ("deficit" if diff < 0 else "")
-        self.table.item(sel[0], values=vals, tags=(tag,) if tag else ())
+        vals[11] = format_money(diff * unit_price)
+        self.table.item(iid, values=vals)
+        self._current_touched_iids.add(iid)
+        self._retag_audit_row(iid)
+        if diff != 0:
+            self._auto_apply_row(iid)
 
     def _mark_all_matched(self):
         for child in self.table.get_children():
             vals = list(self.table.item(child, "values"))
             vals[8] = vals[7]
             vals[9] = 0
-            self.table.item(child, values=vals, tags=())
+            vals[11] = format_money(0)
+            self.table.item(child, values=vals)
+        self._current_touched_iids = set()
+        self._retag_all_audit_rows()
 
-    def _apply(self):
-        adjustments = []
+    def _conflict_report_rows(self) -> List[Dict[str, Any]]:
+        report_rows: List[Dict[str, Any]] = []
         for child in self.table.get_children():
             vals = self.table.item(child, "values")
-            expected = int(vals[7])
-            actual = int(vals[8])
-            if actual != expected:
-                adjustments.append({
-                    "stock_id": int(vals[0]),
-                    "expected": expected,
-                    "actual": actual,
-                })
-        if not adjustments:
-            show_toast(self, "لا توجد تسويات للتطبيق", bg="#f59e0b")
+            if not vals:
+                continue
+            stock_row = self._audit_rows_by_iid.get(child, {})
+            stock_id = parse_int_text(stock_row.get("id"))
+            expected = parse_int_text(vals[7], 0) or 0
+            actual = parse_int_text(vals[8], expected)
+            if actual is None:
+                continue
+            diff = actual - expected
+            if diff == 0:
+                continue
+            unit_price = float(stock_row.get("unit_price") or parse_float_text(vals[10], 0) or 0)
+            diff_value = float(diff) * unit_price
+            report_rows.append({
+                "id": stock_id,
+                "item_type": vals[1],
+                "school": vals[2],
+                "color": vals[3],
+                "size": vals[4],
+                "warehouse_no": vals[5],
+                "package_no": vals[6],
+                "expected": expected,
+                "actual": actual,
+                "diff": diff,
+                "unit_price": unit_price,
+                "diff_value": diff_value,
+            })
+        return report_rows
+
+    def _save_current_report_snapshot(self, source: str) -> Tuple[Optional[int], List[Dict[str, Any]]]:
+        rows = self._conflict_report_rows()
+        if not rows:
+            return None, []
+        report_id = self.db.create_stock_audit_report(
+            rows,
+            filters=self._filters(),
+            source=source,
+        )
+        return report_id, rows
+
+    def _report_row_for_iid(self, iid: str) -> Optional[Dict[str, Any]]:
+        vals = self.table.item(iid, "values")
+        if not vals:
+            return None
+        stock_row = self._audit_rows_by_iid.get(iid, {})
+        expected = parse_int_text(vals[7], 0) or 0
+        actual = parse_int_text(vals[8], expected)
+        if actual is None:
+            return None
+        diff = actual - expected
+        if diff == 0:
+            return None
+        unit_price = float(stock_row.get("unit_price") or parse_float_text(vals[10], 0) or 0)
+        return {
+            "id": parse_int_text(stock_row.get("id")),
+            "item_type": stock_row.get("item_type") or vals[1],
+            "school": stock_row.get("school") or vals[2],
+            "color": stock_row.get("color") or vals[3],
+            "size": stock_row.get("size") or vals[4],
+            "warehouse_no": stock_row.get("warehouse_no") or vals[5],
+            "package_no": stock_row.get("package_no") or vals[6],
+            "expected": expected,
+            "actual": actual,
+            "diff": diff,
+            "unit_price": unit_price,
+            "diff_value": float(diff) * unit_price,
+        }
+
+    def _adjustment_for_iid(self, iid: str) -> Optional[Dict[str, Any]]:
+        row = self._report_row_for_iid(iid)
+        if not row:
+            return None
+        stock_row = self._audit_rows_by_iid.get(iid, {})
+        return {
+            "stock_id": row.get("id"),
+            "expected": row["expected"],
+            "actual": row["actual"],
+            "item_type": row["item_type"],
+            "school": row["school"],
+            "color": row["color"],
+            "size": row["size"],
+            "warehouse_no": row["warehouse_no"],
+            "package_no": row["package_no"],
+            "unit_price": row["unit_price"],
+            "has_badge": int(stock_row.get("has_badge") or 0),
+        }
+
+    def _auto_apply_row(self, iid: str):
+        report_row = self._report_row_for_iid(iid)
+        adjustment = self._adjustment_for_iid(iid)
+        if not report_row or not adjustment:
             return
-        if not messagebox.askyesno("تأكيد التسوية",
-                                   f"سيتم تطبيق {len(adjustments)} تسوية على المخزون.\nهل أنت متأكد؟",
+        try:
+            report_id = self.db.append_stock_audit_report_bucket(
+                [report_row],
+                filters=self._filters(),
+                source="auto-equalization",
+                bucket_key=now_iso()[:13],
+            )
+            count = self.db.apply_stock_adjustments([adjustment])
+            if count:
+                show_toast(self, f"ØªÙ… ØªØ·Ø¨ÙŠÙ‚ Ø§Ù„ØªØ³ÙˆÙŠØ© ØªÙ„Ù‚Ø§Ø¦ÙŠØ§Ù‹ ÙˆØ­ÙØ¸ ØªÙ‚Ø±ÙŠØ± #{report_id}")
+                self._load_stock()
+            else:
+                show_toast(self, "Ù„Ù… ÙŠØªÙ… ØªØ·Ø¨ÙŠÙ‚ Ø§Ù„ØªØ³ÙˆÙŠØ© ØªÙ„Ù‚Ø§Ø¦ÙŠØ§Ù‹", bg="#f59e0b")
+        except Exception as ex:
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„ØªØ³ÙˆÙŠØ© Ø§Ù„ØªÙ„Ù‚Ø§Ø¦ÙŠØ©", str(ex), parent=self)
+
+    def _open_report_history(self):
+        StockAuditReportHistoryWindow(self, self.db)
+
+    def _export_conflict_report(self):
+        report_id, rows = self._save_current_report_snapshot("export")
+        if not rows:
+            show_toast(self, "Ù„Ø§ ØªÙˆØ¬Ø¯ ÙØ±ÙˆÙ‚ Ù„Ù„ØªÙ‚Ø±ÙŠØ±", bg="#f59e0b")
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="ØªØµØ¯ÙŠØ± ØªÙ‚Ø±ÙŠØ± ÙØ±ÙˆÙ‚ Ø§Ù„Ø¬Ø±Ø¯",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Workbook", "*.xlsx"), ("Excel 97-2003 XML", "*.xls"), ("All files", "*.*")],
+            initialfile=f"stock_audit_conflicts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        )
+        if not path:
+            return
+        try:
+            _export_stock_audit_report_rows(path, rows)
+            suffix = f" #{report_id}" if report_id else ""
+            show_toast(self, f"ØªÙ… Ø­ÙØ¸ ÙˆØªØµØ¯ÙŠØ± ØªÙ‚Ø±ÙŠØ± ÙØ±ÙˆÙ‚ Ø§Ù„Ø¬Ø±Ø¯{suffix}")
+        except Exception as ex:
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„ØªØµØ¯ÙŠØ±", str(ex), parent=self)
+
+    def _print_conflict_report(self):
+        report_id, rows = self._save_current_report_snapshot("print")
+        if not rows:
+            show_toast(self, "Ù„Ø§ ØªÙˆØ¬Ø¯ ÙØ±ÙˆÙ‚ Ù„Ù„Ø·Ø¨Ø§Ø¹Ø©", bg="#f59e0b")
+            return
+        title = f"ØªÙ‚Ø±ÙŠØ± ÙØ±ÙˆÙ‚ Ø§Ù„Ø¬Ø±Ø¯ #{report_id}" if report_id else "ØªÙ‚Ø±ÙŠØ± ÙØ±ÙˆÙ‚ Ø§Ù„Ø¬Ø±Ø¯"
+        html = _stock_audit_report_html(rows, title=title)
+        path = os.path.join(
+            tempfile.gettempdir(),
+            f"stock_audit_conflicts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+        )
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(html)
+            _print_html_auto(path, copies=1, parent=self)
+        except Exception as ex:
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø·Ø¨Ø§Ø¹Ø©", str(ex), parent=self)
+
+    def _apply(self):
+        snapshot_id, snapshot_rows = self._save_current_report_snapshot("equalization")
+        adjustments = []
+        for child in self.table.get_children():
+            adjustment = self._adjustment_for_iid(child)
+            if adjustment:
+                adjustments.append(adjustment)
+        if not adjustments:
+            show_toast(self, "Ù„Ø§ ØªÙˆØ¬Ø¯ ØªØ³ÙˆÙŠØ§Øª Ù„Ù„ØªØ·Ø¨ÙŠÙ‚", bg="#f59e0b")
+            return
+        if not messagebox.askyesno("ØªØ£ÙƒÙŠØ¯ Ø§Ù„ØªØ³ÙˆÙŠØ©",
+                                   f"Ø³ÙŠØªÙ… ØªØ·Ø¨ÙŠÙ‚ {len(adjustments)} ØªØ³ÙˆÙŠØ© Ø¹Ù„Ù‰ Ø§Ù„Ù…Ø®Ø²ÙˆÙ†.\nÙ‡Ù„ Ø£Ù†Øª Ù…ØªØ£ÙƒØ¯ØŸ",
                                    parent=self):
             return
         try:
             count = self.db.apply_stock_adjustments(adjustments)
-            show_toast(self, f"تم تطبيق {count} تسوية بنجاح")
+            suffix = f" ÙˆØ­ÙØ¸ ØªÙ‚Ø±ÙŠØ± #{snapshot_id}" if snapshot_id and snapshot_rows else ""
+            show_toast(self, f"ØªÙ… ØªØ·Ø¨ÙŠÙ‚ {count} ØªØ³ÙˆÙŠØ© Ø¨Ù†Ø¬Ø§Ø­{suffix}")
             self._load_stock()
         except Exception as ex:
-            messagebox.showerror("فشل التسوية", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„ØªØ³ÙˆÙŠØ©", str(ex), parent=self)
+
+
+class StockAuditReportHistoryWindow(tk.Toplevel):
+    def __init__(self, master, db: SqliteDatabase):
+        super().__init__(master)
+        self.db = db
+        self.title("Ø³Ø¬Ù„ ØªÙ‚Ø§Ø±ÙŠØ± Ø§Ù„Ø¬Ø±Ø¯")
+        self.geometry("980x620")
+        self.configure(bg=_UI["BG"])
+        self._reports: List[Dict[str, Any]] = []
+        self._build()
+        self._refresh()
+
+    def _build(self):
+        top = ttk.Frame(self, padding=8)
+        top.pack(fill=tk.X)
+        ttk.Button(top, text="ØªØ­Ø¯ÙŠØ«", command=self._refresh).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="Ø§Ø³ØªÙŠØ±Ø§Ø¯ Ø§Ù„ØªØ³ÙˆÙŠØ§Øª Ø§Ù„Ù‚Ø¯ÙŠÙ…Ø©", command=self._backfill_legacy_reports).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="Ø·Ø¨Ø§Ø¹Ø© Ø§Ù„Ù…Ø­Ø¯Ø¯", command=self._print_selected).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="ØªØµØ¯ÙŠØ± Ø§Ù„Ù…Ø­Ø¯Ø¯", command=self._export_selected).pack(side=tk.LEFT, padx=4)
+
+        wrap = ttk.Frame(self)
+        wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        cols = ("id", "created_at", "source", "lines", "total_diff", "total_value")
+        self._tree = ttk.Treeview(wrap, columns=cols, show="headings", height=16)
+        for col, txt, w in [
+            ("id", "Ø±Ù‚Ù… Ø§Ù„ØªÙ‚Ø±ÙŠØ±", 90),
+            ("created_at", "Ø§Ù„ØªØ§Ø±ÙŠØ®", 170),
+            ("source", "Ø§Ù„Ø³Ø¨Ø¨", 110),
+            ("lines", "Ø¹Ø¯Ø¯ Ø§Ù„ÙØ±ÙˆÙ‚", 100),
+            ("total_diff", "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„ÙØ±Ù‚", 110),
+            ("total_value", "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù‚ÙŠÙ…Ø©", 130),
+        ]:
+            self._tree.heading(col, text=txt)
+            self._tree.column(col, width=w, anchor="center")
+        ysb = ttk.Scrollbar(wrap, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=ysb.set)
+        self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ysb.pack(side=tk.RIGHT, fill=tk.Y)
+        add_context_menu(self._tree)
+        _bind_mousewheel(self._tree)
+
+        detail_wrap = ttk.LabelFrame(self, text="ØªÙØ§ØµÙŠÙ„ Ø§Ù„ØªÙ‚Ø±ÙŠØ± Ø§Ù„Ù…Ø­Ø¯Ø¯")
+        detail_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        dcols = ("type", "school", "color", "size", "wh", "pkg", "expected", "actual", "diff", "price", "value")
+        self._detail = ttk.Treeview(detail_wrap, columns=dcols, show="headings", height=9)
+        for col, txt, w in [
+            ("type", "Ø§Ù„Ù†ÙˆØ¹", 120), ("school", "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", 120), ("color", "Ø§Ù„Ù„ÙˆÙ†", 110),
+            ("size", "Ø§Ù„Ù…Ù‚Ø§Ø³", 70), ("wh", "Ø§Ù„Ù…Ø®Ø²Ù†", 70), ("pkg", "Ø§Ù„Ø¹Ø¨ÙˆØ©", 80),
+            ("expected", "Ø§Ù„Ù…ØªÙˆÙ‚Ø¹", 80), ("actual", "Ø§Ù„ÙØ¹Ù„ÙŠ", 80), ("diff", "Ø§Ù„ÙØ±Ù‚", 70),
+            ("price", "Ø§Ù„Ø³Ø¹Ø±", 80), ("value", "Ù‚ÙŠÙ…Ø© Ø§Ù„ÙØ±Ù‚", 100),
+        ]:
+            self._detail.heading(col, text=txt)
+            self._detail.column(col, width=w, anchor="center")
+        dysb = ttk.Scrollbar(detail_wrap, orient="vertical", command=self._detail.yview)
+        self._detail.configure(yscrollcommand=dysb.set)
+        self._detail.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        dysb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._detail.tag_configure("surplus", background="#dcfce7")
+        self._detail.tag_configure("deficit", background="#fee2e2")
+        self._tree.bind("<<TreeviewSelect>>", lambda _e: self._load_selected_details())
+
+    def _source_label(self, source: Any) -> str:
+        labels = {
+            "equalization": "ØªØ³ÙˆÙŠØ©",
+            "export": "ØªØµØ¯ÙŠØ±",
+            "print": "Ø·Ø¨Ø§Ø¹Ø©",
+            "manual": "ÙŠØ¯ÙˆÙŠ",
+        }
+        return labels.get(str(source or "").strip(), str(source or "").strip())
+
+    def _refresh(self):
+        self._reports = self.db.list_stock_audit_reports()
+        self._tree.delete(*self._tree.get_children())
+        for row in self._reports:
+            rid = int(row.get("id") or 0)
+            self._tree.insert(
+                "",
+                tk.END,
+                iid=str(rid),
+                values=(
+                    rid,
+                    fmt_local_ts(row.get("created_at") or ""),
+                    self._source_label(row.get("source")),
+                    int(row.get("line_count") or 0),
+                    f"{int(row.get('total_diff') or 0):+d}",
+                    format_money(row.get("total_value") or 0),
+                ),
+            )
+        apply_zebra_tags(self._tree)
+        self._detail.delete(*self._detail.get_children())
+
+    def _backfill_legacy_reports(self):
+        try:
+            created = self.db.backfill_stock_audit_reports_from_movements()
+            self._refresh()
+            if created:
+                show_toast(self, f"ØªÙ… Ø§Ø³ØªÙŠØ±Ø§Ø¯ {created} ØªÙ‚Ø±ÙŠØ± Ø¬Ø±Ø¯ Ù‚Ø¯ÙŠÙ…")
+            else:
+                show_toast(self, "Ù„Ø§ ØªÙˆØ¬Ø¯ ØªØ³ÙˆÙŠØ§Øª Ù‚Ø¯ÙŠÙ…Ø© Ø¬Ø¯ÙŠØ¯Ø© Ù„Ù„Ø§Ø³ØªÙŠØ±Ø§Ø¯", bg="#f59e0b")
+        except Exception as ex:
+            messagebox.showerror("Ø§Ø³ØªÙŠØ±Ø§Ø¯ Ø§Ù„ØªØ³ÙˆÙŠØ§Øª Ø§Ù„Ù‚Ø¯ÙŠÙ…Ø©", str(ex), parent=self)
+
+    def _selected_report_id(self) -> Optional[int]:
+        sel = self._tree.selection()
+        if not sel:
+            return None
+        return parse_int_text(sel[0])
+
+    def _selected_report(self) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        rid = self._selected_report_id()
+        if rid is None:
+            messagebox.showwarning("Ø³Ø¬Ù„ ØªÙ‚Ø§Ø±ÙŠØ± Ø§Ù„Ø¬Ø±Ø¯", "Ø§Ø®ØªØ± ØªÙ‚Ø±ÙŠØ±Ø§Ù‹ Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
+            return None, []
+        report, rows = self.db.get_stock_audit_report(rid)
+        if report is None:
+            messagebox.showerror("Ø³Ø¬Ù„ ØªÙ‚Ø§Ø±ÙŠØ± Ø§Ù„Ø¬Ø±Ø¯", "Ù„Ù… ÙŠØªÙ… Ø§Ù„Ø¹Ø«ÙˆØ± Ø¹Ù„Ù‰ Ø§Ù„ØªÙ‚Ø±ÙŠØ±.", parent=self)
+            return None, []
+        return report, rows
+
+    def _load_selected_details(self):
+        report, rows = self._selected_report()
+        if report is None:
+            return
+        self._detail.delete(*self._detail.get_children())
+        for idx, row in enumerate(rows):
+            diff = int(row.get("diff") or 0)
+            tag = "surplus" if diff > 0 else "deficit"
+            self._detail.insert(
+                "",
+                tk.END,
+                iid=str(idx),
+                values=(
+                    row.get("item_type") or "",
+                    row.get("school") or "",
+                    row.get("color") or "",
+                    row.get("size") or "",
+                    row.get("warehouse_no") or "",
+                    row.get("package_no") or "",
+                    int(row.get("expected") or 0),
+                    int(row.get("actual") or 0),
+                    f"{diff:+d}",
+                    format_money(row.get("unit_price") or 0),
+                    format_money(row.get("diff_value") or 0),
+                ),
+                tags=(tag,),
+            )
+
+    def _print_selected(self):
+        report, rows = self._selected_report()
+        if report is None:
+            return
+        title = f"ØªÙ‚Ø±ÙŠØ± ÙØ±ÙˆÙ‚ Ø§Ù„Ø¬Ø±Ø¯ #{report.get('id')} - {fmt_local_ts(report.get('created_at') or '')}"
+        html = _stock_audit_report_html(rows, title=title)
+        path = os.path.join(
+            tempfile.gettempdir(),
+            f"stock_audit_report_{int(report.get('id') or 0)}.html",
+        )
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(html)
+            _print_html_auto(path, copies=1, parent=self)
+        except Exception as ex:
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø·Ø¨Ø§Ø¹Ø©", str(ex), parent=self)
+
+    def _export_selected(self):
+        report, rows = self._selected_report()
+        if report is None:
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="ØªØµØ¯ÙŠØ± ØªÙ‚Ø±ÙŠØ± Ø¬Ø±Ø¯ Ù…Ø­ÙÙˆØ¸",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Workbook", "*.xlsx"), ("Excel 97-2003 XML", "*.xls"), ("All files", "*.*")],
+            initialfile=f"stock_audit_report_{int(report.get('id') or 0)}.xlsx",
+        )
+        if not path:
+            return
+        try:
+            _export_stock_audit_report_rows(path, rows)
+            show_toast(self, "ØªÙ… ØªØµØ¯ÙŠØ± ØªÙ‚Ø±ÙŠØ± Ø§Ù„Ø¬Ø±Ø¯ Ø§Ù„Ù…Ø­ÙÙˆØ¸")
+        except Exception as ex:
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„ØªØµØ¯ÙŠØ±", str(ex), parent=self)
 
 # ------------------- Branch Inventory Queue -------------------
 
@@ -10884,28 +13453,28 @@ class BranchInventoryQueueWindow(tk.Toplevel):
     def __init__(self, master, db: SqliteDatabase):
         super().__init__(master)
         self.db = db
-        self.title("منتجات الفروع غير المعالجة")
+        self.title("Ù…Ù†ØªØ¬Ø§Øª Ø§Ù„ÙØ±ÙˆØ¹ ØºÙŠØ± Ø§Ù„Ù…Ø¹Ø§Ù„Ø¬Ø©")
         self.geometry("1220x650")
         self.configure(bg=_UI["BG"])
         hdr = tk.Frame(self, bg=_UI["ACCENT"], height=44)
         hdr.pack(fill=tk.X)
         hdr.pack_propagate(False)
-        tk.Label(hdr, text="  منتجات الفروع غير المعالجة", bg=_UI["ACCENT"], fg="#FFFFFF",
+        tk.Label(hdr, text="  Ù…Ù†ØªØ¬Ø§Øª Ø§Ù„ÙØ±ÙˆØ¹ ØºÙŠØ± Ø§Ù„Ù…Ø¹Ø§Ù„Ø¬Ø©", bg=_UI["ACCENT"], fg="#FFFFFF",
                  font=_FONTS["h3"]).pack(side=tk.RIGHT, padx=12)
         self._build()
         self._refresh()
 
     def _build(self):
-        top = ttk.LabelFrame(self, text="المعالجة")
+        top = ttk.LabelFrame(self, text="Ø§Ù„Ù…Ø¹Ø§Ù„Ø¬Ø©")
         top.pack(fill=tk.X, padx=8, pady=8)
 
-        ttk.Label(top, text="الحالة:").grid(row=0, column=0, sticky="e", padx=6, pady=6)
+        ttk.Label(top, text="Ø§Ù„Ø­Ø§Ù„Ø©:").grid(row=0, column=0, sticky="e", padx=6, pady=6)
         self._status = tk.StringVar(value="PENDING")
         ttk.Combobox(top, textvariable=self._status,
                      values=["PENDING", "ASSIGNED", "DISCARDED", "REROUTED", ""],
                      state="readonly", width=16).grid(row=0, column=1, sticky="w", padx=6, pady=6)
 
-        ttk.Label(top, text="مخزن:").grid(row=0, column=2, sticky="e", padx=6, pady=6)
+        ttk.Label(top, text="Ù…Ø®Ø²Ù†:").grid(row=0, column=2, sticky="e", padx=6, pady=6)
         self._wh_var = tk.StringVar(value=WAREHOUSE_NUMBER_LABELS.get("1", "1"))
         self._wh_cb = ttk.Combobox(
             top,
@@ -10916,16 +13485,16 @@ class BranchInventoryQueueWindow(tk.Toplevel):
         )
         self._wh_cb.grid(row=0, column=3, sticky="w", padx=6, pady=6)
 
-        ttk.Label(top, text="عبوة:").grid(row=0, column=4, sticky="e", padx=6, pady=6)
+        ttk.Label(top, text="Ø¹Ø¨ÙˆØ©:").grid(row=0, column=4, sticky="e", padx=6, pady=6)
         self._pkg_var = tk.StringVar(value="")
         ttk.Entry(top, textvariable=self._pkg_var, width=10).grid(row=0, column=5, sticky="w", padx=6, pady=6)
 
-        ttk.Label(top, text="إلى فرع:").grid(row=1, column=0, sticky="e", padx=6, pady=6)
+        ttk.Label(top, text="Ø¥Ù„Ù‰ ÙØ±Ø¹:").grid(row=1, column=0, sticky="e", padx=6, pady=6)
         self._target_var = tk.StringVar(value="")
         self._target_cb = ttk.Combobox(top, textvariable=self._target_var, state="readonly", width=18)
         self._target_cb.grid(row=1, column=1, sticky="w", padx=6, pady=6)
 
-        ttk.Label(top, text="ملاحظة:").grid(row=1, column=2, sticky="e", padx=6, pady=6)
+        ttk.Label(top, text="Ù…Ù„Ø§Ø­Ø¸Ø©:").grid(row=1, column=2, sticky="e", padx=6, pady=6)
         self._note_var = tk.StringVar(value="")
         ttk.Entry(top, textvariable=self._note_var, width=54).grid(
             row=1, column=3, columnspan=3, sticky="ew", padx=6, pady=6
@@ -10934,19 +13503,19 @@ class BranchInventoryQueueWindow(tk.Toplevel):
 
         btns = ttk.Frame(top)
         btns.grid(row=0, column=6, rowspan=2, sticky="ns", padx=8)
-        ttk.Button(btns, text="تحديث", command=self._refresh).pack(side=tk.TOP, fill=tk.X, pady=2)
-        ttk.Button(btns, text="إسناد للمخزون", command=self._assign_selected).pack(side=tk.TOP, fill=tk.X, pady=2)
-        ttk.Button(btns, text="تحويل إلى فرع", command=self._reroute_selected).pack(side=tk.TOP, fill=tk.X, pady=2)
-        ttk.Button(btns, text="إتلاف / معيب", command=self._discard_selected).pack(side=tk.TOP, fill=tk.X, pady=2)
+        ttk.Button(btns, text="ØªØ­Ø¯ÙŠØ«", command=self._refresh).pack(side=tk.TOP, fill=tk.X, pady=2)
+        ttk.Button(btns, text="Ø¥Ø³Ù†Ø§Ø¯ Ù„Ù„Ù…Ø®Ø²ÙˆÙ†", command=self._assign_selected).pack(side=tk.TOP, fill=tk.X, pady=2)
+        ttk.Button(btns, text="ØªØ­ÙˆÙŠÙ„ Ø¥Ù„Ù‰ ÙØ±Ø¹", command=self._reroute_selected).pack(side=tk.TOP, fill=tk.X, pady=2)
+        ttk.Button(btns, text="Ø¥ØªÙ„Ø§Ù / Ù…Ø¹ÙŠØ¨", command=self._discard_selected).pack(side=tk.TOP, fill=tk.X, pady=2)
 
         wrap = ttk.Frame(self)
         wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         cols = ("id", "kind", "source", "target", "type", "school", "color", "size", "qty", "price", "status", "note")
         self._tree = ttk.Treeview(wrap, columns=cols, show="headings")
         for col, txt, w in [
-            ("id", "#", 55), ("kind", "النوع", 80), ("source", "المرسل", 100), ("target", "الهدف", 100),
-            ("type", "الصنف", 150), ("school", "المدرسة", 130), ("color", "اللون", 110), ("size", "المقاس", 70),
-            ("qty", "الكمية", 65), ("price", "السعر", 80), ("status", "الحالة", 100), ("note", "ملاحظة", 220),
+            ("id", "#", 55), ("kind", "Ø§Ù„Ù†ÙˆØ¹", 80), ("source", "Ø§Ù„Ù…Ø±Ø³Ù„", 100), ("target", "Ø§Ù„Ù‡Ø¯Ù", 100),
+            ("type", "Ø§Ù„ØµÙ†Ù", 150), ("school", "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", 130), ("color", "Ø§Ù„Ù„ÙˆÙ†", 110), ("size", "Ø§Ù„Ù…Ù‚Ø§Ø³", 70),
+            ("qty", "Ø§Ù„ÙƒÙ…ÙŠØ©", 65), ("price", "Ø§Ù„Ø³Ø¹Ø±", 80), ("status", "Ø§Ù„Ø­Ø§Ù„Ø©", 100), ("note", "Ù…Ù„Ø§Ø­Ø¸Ø©", 220),
         ]:
             self._tree.heading(col, text=txt)
             self._tree.column(col, width=w, anchor="center")
@@ -10968,7 +13537,7 @@ class BranchInventoryQueueWindow(tk.Toplevel):
         sel = self._tree.selection()
         if not sel:
             return None
-        return int(sel[0])
+        return parse_int_text(sel[0])
 
     def _load_selected_defaults(self):
         queue_id = self._selected_queue_id()
@@ -10993,19 +13562,19 @@ class BranchInventoryQueueWindow(tk.Toplevel):
         rows = self.db.list_branch_inventory_queue(self._status.get() or None)
         self._tree.delete(*self._tree.get_children())
         for row in rows:
-            kind = "مرتجع" if row.get("queue_kind") == "RETURN" else "تحويل"
+            kind = "Ù…Ø±ØªØ¬Ø¹" if row.get("queue_kind") == "RETURN" else "ØªØ­ÙˆÙŠÙ„"
             self._tree.insert(
                 "", tk.END, iid=str(row["id"]),
                 values=(
                     row["id"], kind, branch_display_name(row.get("source_device") or ""),
                     branch_display_name(row.get("requested_target_device") or ""), row.get("item_type") or "",
                     row.get("school") or "", row.get("color") or "", row.get("size") or "",
-                    row.get("qty") or 0, f"{float(row.get('unit_price') or 0):.2f}",
+                    row.get("qty") or 0, f"{format_money(float(row.get('unit_price') or 0))}",
                     row.get("status") or "", row.get("note") or "",
                 ),
             )
         apply_zebra_tags(self._tree)
-        self._status_var.set(f"عدد العناصر: {len(rows)}")
+        self._status_var.set(f"Ø¹Ø¯Ø¯ Ø§Ù„Ø¹Ù†Ø§ØµØ±: {len(rows)}")
         self._load_selected_defaults()
 
     def _selected_warehouse_no(self) -> int:
@@ -11028,55 +13597,55 @@ class BranchInventoryQueueWindow(tk.Toplevel):
     def _assign_selected(self):
         queue_id = self._selected_queue_id()
         if queue_id is None:
-            messagebox.showwarning("تنبيه", "اختر عنصرًا من القائمة أولاً.", parent=self)
+            messagebox.showwarning("ØªÙ†Ø¨ÙŠÙ‡", "Ø§Ø®ØªØ± Ø¹Ù†ØµØ±Ù‹Ø§ Ù…Ù† Ø§Ù„Ù‚Ø§Ø¦Ù…Ø© Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
             return
         try:
             w = self._selected_warehouse_no()
-            p = int((self._pkg_var.get() or "").strip())
+            p = parse_int_text(self._pkg_var.get(), 0) or 0
         except Exception:
-            messagebox.showerror("بيانات غير صالحة", "أدخل رقم مخزن وعبوة صحيحين.", parent=self)
+            messagebox.showerror("Ø¨ÙŠØ§Ù†Ø§Øª ØºÙŠØ± ØµØ§Ù„Ø­Ø©", "Ø£Ø¯Ø®Ù„ Ø±Ù‚Ù… Ù…Ø®Ø²Ù† ÙˆØ¹Ø¨ÙˆØ© ØµØ­ÙŠØ­ÙŠÙ†.", parent=self)
             return
         try:
             self.db.assign_branch_inventory_queue_item(queue_id, w, p, self._note_var.get())
-            show_toast(self, "تم إسناد العنصر إلى المخزون")
+            show_toast(self, "ØªÙ… Ø¥Ø³Ù†Ø§Ø¯ Ø§Ù„Ø¹Ù†ØµØ± Ø¥Ù„Ù‰ Ø§Ù„Ù…Ø®Ø²ÙˆÙ†")
             self._note_var.set("")
             self._pkg_var.set("")
             self._refresh()
         except Exception as ex:
-            messagebox.showerror("فشل الإسناد", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø¥Ø³Ù†Ø§Ø¯", str(ex), parent=self)
 
     def _discard_selected(self):
         queue_id = self._selected_queue_id()
         if queue_id is None:
-            messagebox.showwarning("تنبيه", "اختر عنصرًا من القائمة أولاً.", parent=self)
+            messagebox.showwarning("ØªÙ†Ø¨ÙŠÙ‡", "Ø§Ø®ØªØ± Ø¹Ù†ØµØ±Ù‹Ø§ Ù…Ù† Ø§Ù„Ù‚Ø§Ø¦Ù…Ø© Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
             return
-        if not messagebox.askyesno("تأكيد", "سيتم إتلاف هذا العنصر ولن يدخل المخزون. هل أنت متأكد؟", parent=self):
+        if not messagebox.askyesno("ØªØ£ÙƒÙŠØ¯", "Ø³ÙŠØªÙ… Ø¥ØªÙ„Ø§Ù Ù‡Ø°Ø§ Ø§Ù„Ø¹Ù†ØµØ± ÙˆÙ„Ù† ÙŠØ¯Ø®Ù„ Ø§Ù„Ù…Ø®Ø²ÙˆÙ†. Ù‡Ù„ Ø£Ù†Øª Ù…ØªØ£ÙƒØ¯ØŸ", parent=self):
             return
         try:
             self.db.discard_branch_inventory_queue_item(queue_id, self._note_var.get())
-            show_toast(self, "تم إتلاف / تعليم العنصر كمعيب")
+            show_toast(self, "ØªÙ… Ø¥ØªÙ„Ø§Ù / ØªØ¹Ù„ÙŠÙ… Ø§Ù„Ø¹Ù†ØµØ± ÙƒÙ…Ø¹ÙŠØ¨")
             self._note_var.set("")
             self._refresh()
         except Exception as ex:
-            messagebox.showerror("فشل الإتلاف", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø¥ØªÙ„Ø§Ù", str(ex), parent=self)
 
     def _reroute_selected(self):
         queue_id = self._selected_queue_id()
         if queue_id is None:
-            messagebox.showwarning("تنبيه", "اختر عنصرًا من القائمة أولاً.", parent=self)
+            messagebox.showwarning("ØªÙ†Ø¨ÙŠÙ‡", "Ø§Ø®ØªØ± Ø¹Ù†ØµØ±Ù‹Ø§ Ù…Ù† Ø§Ù„Ù‚Ø§Ø¦Ù…Ø© Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
             return
         target_ui = (self._target_var.get() or "").strip()
         target = getattr(self, "_target_ui_to_dev", {}).get(target_ui, target_ui)
         if not target:
-            messagebox.showerror("بيانات ناقصة", "اختر الفرع الهدف أولاً.", parent=self)
+            messagebox.showerror("Ø¨ÙŠØ§Ù†Ø§Øª Ù†Ø§Ù‚ØµØ©", "Ø§Ø®ØªØ± Ø§Ù„ÙØ±Ø¹ Ø§Ù„Ù‡Ø¯Ù Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
             return
         try:
             self.db.reroute_branch_inventory_queue_item(queue_id, target, self._note_var.get())
-            show_toast(self, f"تم تحويل العنصر إلى الفرع {branch_display_name(target)}")
+            show_toast(self, f"ØªÙ… ØªØ­ÙˆÙŠÙ„ Ø§Ù„Ø¹Ù†ØµØ± Ø¥Ù„Ù‰ Ø§Ù„ÙØ±Ø¹ {branch_display_name(target)}")
             self._note_var.set("")
             self._refresh()
         except Exception as ex:
-            messagebox.showerror("فشل التحويل", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„ØªØ­ÙˆÙŠÙ„", str(ex), parent=self)
 
 # ------------------- Branch Stock View (Phase 3) -------------------
 
@@ -11086,14 +13655,14 @@ class BranchStockWindow(tk.Toplevel):
     Reads from `pos_stocks_mirror` (filled by POS_STOCK_SNAPSHOT
     events). Shows a dropdown of known POS devices with their snapshot
     timestamps, and a filterable Treeview of the selected POS's stock.
-    Includes a "مزامنة الآن" shortcut so the user can refresh without
+    Includes a "Ù…Ø²Ø§Ù…Ù†Ø© Ø§Ù„Ø¢Ù†" shortcut so the user can refresh without
     leaving the window.
     """
 
     def __init__(self, master, db: SqliteDatabase):
         super().__init__(master)
         self.db = db
-        self.title("مخزون الفروع")
+        self.title("Ù…Ø®Ø²ÙˆÙ† Ø§Ù„ÙØ±ÙˆØ¹")
         self.geometry("1000x620")
         self.configure(bg=_UI["BG"])
 
@@ -11101,7 +13670,7 @@ class BranchStockWindow(tk.Toplevel):
         header.pack(fill=tk.X)
         header.pack_propagate(False)
         tk.Label(
-            header, text="  مخزون الفروع",
+            header, text="  Ù…Ø®Ø²ÙˆÙ† Ø§Ù„ÙØ±ÙˆØ¹",
             bg=_UI["ACCENT"], fg="#FFFFFF",
             font=_FONTS["h3"],
         ).pack(side=tk.RIGHT, padx=12)
@@ -11115,7 +13684,7 @@ class BranchStockWindow(tk.Toplevel):
         top = ttk.Frame(self, padding=8)
         top.pack(fill=tk.X)
 
-        ttk.Label(top, text="الفرع:").pack(side=tk.RIGHT, padx=(0, 4))
+        ttk.Label(top, text="Ø§Ù„ÙØ±Ø¹:").pack(side=tk.RIGHT, padx=(0, 4))
         self._device_var = tk.StringVar()
         self._device_cb = ttk.Combobox(
             top, textvariable=self._device_var,
@@ -11124,23 +13693,23 @@ class BranchStockWindow(tk.Toplevel):
         self._device_cb.pack(side=tk.RIGHT, padx=4)
         self._device_cb.bind("<<ComboboxSelected>>", lambda _e: self._reload_stock())
 
-        self._meta_var = tk.StringVar(value="—")
+        self._meta_var = tk.StringVar(value="â€”")
         ttk.Label(top, textvariable=self._meta_var,
                   foreground="#64748b").pack(side=tk.RIGHT, padx=(12, 0))
 
-        ttk.Button(top, text="تحديث",
+        ttk.Button(top, text="ØªØ­Ø¯ÙŠØ«",
                    command=self._reload_devices).pack(side=tk.LEFT, padx=4)
-        ttk.Button(top, text="مزامنة الآن",
+        ttk.Button(top, text="Ù…Ø²Ø§Ù…Ù†Ø© Ø§Ù„Ø¢Ù†",
                    command=self._run_sync_and_reload).pack(side=tk.LEFT, padx=4)
 
         # Filter row
-        filt = ttk.LabelFrame(self, text="تصنيف")
+        filt = ttk.LabelFrame(self, text="ØªØµÙ†ÙŠÙ")
         filt.pack(fill=tk.X, padx=8, pady=(0, 4))
 
-        self._flt_type = LabeledCombobox(filt, "النوع", self.db, "item_type")
-        self._flt_school = LabeledCombobox(filt, "المدرسة", self.db, "school")
-        self._flt_color = LabeledCombobox(filt, "اللون", self.db, "color")
-        self._flt_size = LabeledCombobox(filt, "المقاس", self.db, "size")
+        self._flt_type = LabeledCombobox(filt, "Ø§Ù„Ù†ÙˆØ¹", self.db, "item_type")
+        self._flt_school = LabeledCombobox(filt, "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", self.db, "school")
+        self._flt_color = LabeledCombobox(filt, "Ø§Ù„Ù„ÙˆÙ†", self.db, "color")
+        self._flt_size = LabeledCombobox(filt, "Ø§Ù„Ù…Ù‚Ø§Ø³", self.db, "size")
 
         def _constraints(exclude=None):
             d = {
@@ -11164,7 +13733,7 @@ class BranchStockWindow(tk.Toplevel):
             for ev in ("<<ComboboxSelected>>", "<KeyRelease>"):
                 w.cb.bind(ev, lambda e: (self._refresh_filter_values(), self._apply_filter()), add="+")
 
-        ttk.Label(filt, text="بحث:").grid(row=1, column=3, sticky="e", padx=(6, 4), pady=(6, 6))
+        ttk.Label(filt, text="Ø¨Ø­Ø«:").grid(row=1, column=3, sticky="e", padx=(6, 4), pady=(6, 6))
         self._filter_var = tk.StringVar()
         ent = ttk.Entry(filt, textvariable=self._filter_var, width=28)
         ent.grid(row=1, column=2, sticky="ew", padx=6, pady=(6, 6))
@@ -11172,15 +13741,15 @@ class BranchStockWindow(tk.Toplevel):
 
         btns = ttk.Frame(filt)
         btns.grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(6, 6))
-        ttk.Button(btns, text="بحث", command=self._apply_filter).pack(side=tk.LEFT)
-        ttk.Button(btns, text="مسح", command=self._clear_filters).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btns, text="Ø¨Ø­Ø«", command=self._apply_filter).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Ù…Ø³Ø­", command=self._clear_filters).pack(side=tk.LEFT, padx=8)
 
         # Table
         cols = ("item_type", "school", "color", "size", "unit_price", "count", "value")
         headers = {
-            "item_type": "النوع", "school": "المدرسة", "color": "اللون",
-            "size": "المقاس", "unit_price": "السعر", "count": "الكمية",
-            "value": "القيمة",
+            "item_type": "Ø§Ù„Ù†ÙˆØ¹", "school": "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", "color": "Ø§Ù„Ù„ÙˆÙ†",
+            "size": "Ø§Ù„Ù…Ù‚Ø§Ø³", "unit_price": "Ø§Ù„Ø³Ø¹Ø±", "count": "Ø§Ù„ÙƒÙ…ÙŠØ©",
+            "value": "Ø§Ù„Ù‚ÙŠÙ…Ø©",
         }
         widths = {
             "item_type": 120, "school": 110, "color": 90, "size": 70,
@@ -11252,7 +13821,7 @@ class BranchStockWindow(tk.Toplevel):
         else:
             self._device_var.set("")
             self._tree.delete(*self._tree.get_children())
-            self._meta_var.set("لا توجد فروع مُسجَّلة — شغّل المزامنة أولاً")
+            self._meta_var.set("Ù„Ø§ ØªÙˆØ¬Ø¯ ÙØ±ÙˆØ¹ Ù…ÙØ³Ø¬ÙŽÙ‘Ù„Ø© â€” Ø´ØºÙ‘Ù„ Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø© Ø£ÙˆÙ„Ø§Ù‹")
             self._status_var.set("")
 
     def _reload_stock(self):
@@ -11264,12 +13833,12 @@ class BranchStockWindow(tk.Toplevel):
         meta = self._metas.get(name)
         if meta:
             self._meta_var.set(
-                f"آخر لقطة: {fmt_local_ts(meta['snapshot_at'])}  |  "
-                f"عدد الصفوف: {meta['row_count']}  |  "
-                f"القيمة: {meta['total_value']:.2f}"
+                f"Ø¢Ø®Ø± Ù„Ù‚Ø·Ø©: {fmt_local_ts(meta['snapshot_at'])}  |  "
+                f"Ø¹Ø¯Ø¯ Ø§Ù„ØµÙÙˆÙ: {meta['row_count']}  |  "
+                f"Ø§Ù„Ù‚ÙŠÙ…Ø©: {format_money(meta['total_value'])}"
             )
         else:
-            self._meta_var.set("لا توجد لقطة مخزون بعد لهذا الفرع")
+            self._meta_var.set("Ù„Ø§ ØªÙˆØ¬Ø¯ Ù„Ù‚Ø·Ø© Ù…Ø®Ø²ÙˆÙ† Ø¨Ø¹Ø¯ Ù„Ù‡Ø°Ø§ Ø§Ù„ÙØ±Ø¹")
 
         try:
             rows = self.db.conn.execute(
@@ -11355,13 +13924,13 @@ class BranchStockWindow(tk.Toplevel):
             self._tree.insert(
                 "", tk.END,
                 values=(
-                    it, sc, cl, sz, f"{price:.2f}", count, f"{value:.2f}",
+                    it, sc, cl, sz, f"{format_money(price)}", count, f"{format_money(value)}",
                 ),
             )
             shown += 1
         self._status_var.set(
-            f"يُعرض {shown} صف  |  الكمية: {total_qty}  |  "
-            f"القيمة: {total_val:.2f}"
+            f"ÙŠÙØ¹Ø±Ø¶ {shown} ØµÙ  |  Ø§Ù„ÙƒÙ…ÙŠØ©: {total_qty}  |  "
+            f"Ø§Ù„Ù‚ÙŠÙ…Ø©: {format_money(total_val)}"
         )
 
     def _run_sync_and_reload(self):
@@ -11371,7 +13940,7 @@ class BranchStockWindow(tk.Toplevel):
             import sync_ui
             sync_ui.open_sync_dialog(self, self.db.conn)
         except Exception as ex:
-            messagebox.showerror("المزامنة", str(ex), parent=self)
+            messagebox.showerror("Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø©", str(ex), parent=self)
             return
         # When the sync dialog closes, refresh automatically.
         self.after(500, self._reload_devices)
@@ -11392,11 +13961,11 @@ class DashboardFrame(ttk.Frame):
         # Page title
         title_f = tk.Frame(self, bg=_UI["SURFACE"])
         title_f.pack(fill=tk.X, padx=16, pady=(12, 4))
-        tk.Label(title_f, text="لوحة التحكم", bg=_UI["SURFACE"], fg=_UI["TEXT"],
+        tk.Label(title_f, text="Ù„ÙˆØ­Ø© Ø§Ù„ØªØ­ÙƒÙ…", bg=_UI["SURFACE"], fg=_UI["TEXT"],
                  font=_FONTS["h1"]).pack(side=tk.RIGHT)
-        tk.Label(title_f, text="نظرة عامة على المخزون والمبيعات", bg=_UI["SURFACE"],
+        tk.Label(title_f, text="Ù†Ø¸Ø±Ø© Ø¹Ø§Ù…Ø© Ø¹Ù„Ù‰ Ø§Ù„Ù…Ø®Ø²ÙˆÙ† ÙˆØ§Ù„Ù…Ø¨ÙŠØ¹Ø§Øª", bg=_UI["SURFACE"],
                  fg=_UI["TEXT_SEC"], font=_FONTS["small"]).pack(side=tk.RIGHT, padx=(12, 0))
-        ttk.Button(title_f, text="تحديث", command=self._refresh).pack(side=tk.LEFT)
+        ttk.Button(title_f, text="ØªØ­Ø¯ÙŠØ«", command=self._refresh).pack(side=tk.LEFT)
 
         # Stats cards row
         cards_row = tk.Frame(self, bg=_UI["BG"])
@@ -11404,10 +13973,10 @@ class DashboardFrame(ttk.Frame):
 
         self._cards = {}
         card_defs = [
-            ("total_items", "إجمالي الأصناف", _UI["BRAND"]),
-            ("total_qty", "إجمالي الكميات", _UI["OK"]),
-            ("total_value", "إجمالي القيمة", _UI["WARN"]),
-            ("total_bills", "عدد الفواتير", "#8B5CF6"),
+            ("total_items", "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ø£ØµÙ†Ø§Ù", _UI["BRAND"]),
+            ("total_qty", "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„ÙƒÙ…ÙŠØ§Øª", _UI["OK"]),
+            ("total_value", "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù‚ÙŠÙ…Ø©", _UI["WARN"]),
+            ("total_bills", "Ø¹Ø¯Ø¯ Ø§Ù„ÙÙˆØ§ØªÙŠØ±", "#8B5CF6"),
         ]
         for i, (key, title, color) in enumerate(card_defs):
             cards_row.columnconfigure(i, weight=1)
@@ -11435,13 +14004,13 @@ class DashboardFrame(ttk.Frame):
         r_outer.grid(row=0, column=0, padx=(0, 6), pady=4, sticky="nsew")
         r_card = tk.Frame(r_outer, bg=_UI["SURFACE"])
         r_card.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
-        tk.Label(r_card, text="آخر الفواتير", bg=_UI["SURFACE"], fg=_UI["TEXT"],
+        tk.Label(r_card, text="Ø¢Ø®Ø± Ø§Ù„ÙÙˆØ§ØªÙŠØ±", bg=_UI["SURFACE"], fg=_UI["TEXT"],
                  font=_FONTS["h3"]).pack(anchor="e", padx=12, pady=(10, 4))
 
         self.recent_tree = ttk.Treeview(r_card, columns=("id", "date", "customer", "total"),
                                          show="headings", height=10)
-        for col, txt, w in [("id", "#", 50), ("date", "التاريخ", 140),
-                             ("customer", "العميل", 180), ("total", "الإجمالي", 100)]:
+        for col, txt, w in [("id", "#", 50), ("date", "Ø§Ù„ØªØ§Ø±ÙŠØ®", 140),
+                             ("customer", "Ø§Ù„Ø¹Ù…ÙŠÙ„", 180), ("total", "Ø§Ù„Ø¥Ø¬Ù…Ø§Ù„ÙŠ", 100)]:
             self.recent_tree.heading(col, text=txt)
             self.recent_tree.column(col, width=w, anchor="center")
         self.recent_tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
@@ -11453,13 +14022,13 @@ class DashboardFrame(ttk.Frame):
         a_outer.grid(row=0, column=1, padx=(6, 0), pady=4, sticky="nsew")
         a_card = tk.Frame(a_outer, bg=_UI["SURFACE"])
         a_card.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
-        tk.Label(a_card, text="تنبيهات المخزون المنخفض (أقل من 5)", bg=_UI["SURFACE"],
+        tk.Label(a_card, text="ØªÙ†Ø¨ÙŠÙ‡Ø§Øª Ø§Ù„Ù…Ø®Ø²ÙˆÙ† Ø§Ù„Ù…Ù†Ø®ÙØ¶ (Ø£Ù‚Ù„ Ù…Ù† 5)", bg=_UI["SURFACE"],
                  fg=_UI["TEXT"], font=_FONTS["h3"]).pack(anchor="e", padx=12, pady=(10, 4))
 
         self.alert_tree = ttk.Treeview(a_card, columns=("item", "school", "color", "size", "qty"),
                                         show="headings", height=10)
-        for col, txt, w in [("item", "النوع", 120), ("school", "المدرسة", 120),
-                            ("color", "اللون", 80), ("size", "المقاس", 60), ("qty", "الكمية", 60)]:
+        for col, txt, w in [("item", "Ø§Ù„Ù†ÙˆØ¹", 120), ("school", "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", 120),
+                            ("color", "Ø§Ù„Ù„ÙˆÙ†", 80), ("size", "Ø§Ù„Ù…Ù‚Ø§Ø³", 60), ("qty", "Ø§Ù„ÙƒÙ…ÙŠØ©", 60)]:
             self.alert_tree.heading(col, text=txt)
             self.alert_tree.column(col, width=w, anchor="center")
         self.alert_tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
@@ -11476,7 +14045,7 @@ class DashboardFrame(ttk.Frame):
         s_card.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
         tk.Label(
             s_card,
-            text="صحة المزامنة (الفروع)",
+            text="ØµØ­Ø© Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø© (Ø§Ù„ÙØ±ÙˆØ¹)",
             bg=_UI["SURFACE"],
             fg=_UI["TEXT"],
             font=_FONTS["h3"],
@@ -11495,17 +14064,17 @@ class DashboardFrame(ttk.Frame):
         act.pack(fill=tk.X, padx=8, pady=(0, 6))
         ttk.Button(
             act,
-            text="مزامنة الآن",
+            text="Ù…Ø²Ø§Ù…Ù†Ø© Ø§Ù„Ø¢Ù†",
             command=(lambda: self.app._open_sync_dialog()) if self.app else None,
         ).pack(side=tk.LEFT, padx=2)
         ttk.Button(
             act,
-            text="طابور الفروع",
+            text="Ø·Ø§Ø¨ÙˆØ± Ø§Ù„ÙØ±ÙˆØ¹",
             command=(lambda: self.app._open_branch_inventory_queue()) if self.app else None,
         ).pack(side=tk.LEFT, padx=2)
         ttk.Button(
             act,
-            text="مرآة حجوزات الفروع",
+            text="Ù…Ø±Ø¢Ø© Ø­Ø¬ÙˆØ²Ø§Øª Ø§Ù„ÙØ±ÙˆØ¹",
             command=(lambda: self.app._open_pos_reservations_mirror()) if self.app else None,
         ).pack(side=tk.LEFT, padx=2)
         self.sync_tree = ttk.Treeview(
@@ -11515,13 +14084,13 @@ class DashboardFrame(ttk.Frame):
             height=6,
         )
         for col, txt, w in [
-            ("branch", "الفرع", 180),
-            ("status", "الحالة", 100),
-            ("last_snapshot", "آخر لقطة", 190),
-            ("age_min", "عمر اللقطة (د)", 110),
-            ("rows", "الصفوف", 90),
-            ("value", "القيمة", 120),
-            ("sync_errors", "أخطاء مزامنة", 120),
+            ("branch", "Ø§Ù„ÙØ±Ø¹", 180),
+            ("status", "Ø§Ù„Ø­Ø§Ù„Ø©", 100),
+            ("last_snapshot", "Ø¢Ø®Ø± Ù„Ù‚Ø·Ø©", 190),
+            ("age_min", "Ø¹Ù…Ø± Ø§Ù„Ù„Ù‚Ø·Ø© (Ø¯)", 110),
+            ("rows", "Ø§Ù„ØµÙÙˆÙ", 90),
+            ("value", "Ø§Ù„Ù‚ÙŠÙ…Ø©", 120),
+            ("sync_errors", "Ø£Ø®Ø·Ø§Ø¡ Ù…Ø²Ø§Ù…Ù†Ø©", 120),
         ]:
             self.sync_tree.heading(col, text=txt)
             self.sync_tree.column(col, width=w, anchor="center")
@@ -11535,7 +14104,7 @@ class DashboardFrame(ttk.Frame):
         ex_card.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
         tk.Label(
             ex_card,
-            text="استثناءات المزامنة (أعلى الأسباب)",
+            text="Ø§Ø³ØªØ«Ù†Ø§Ø¡Ø§Øª Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø© (Ø£Ø¹Ù„Ù‰ Ø§Ù„Ø£Ø³Ø¨Ø§Ø¨)",
             bg=_UI["SURFACE"],
             fg=_UI["TEXT"],
             font=_FONTS["h3"],
@@ -11547,9 +14116,9 @@ class DashboardFrame(ttk.Frame):
             height=4,
         )
         for col, txt, w in [
-            ("etype", "نوع الحدث", 220),
-            ("count", "عدد الأخطاء", 100),
-            ("last_error", "آخر خطأ", 760),
+            ("etype", "Ù†ÙˆØ¹ Ø§Ù„Ø­Ø¯Ø«", 220),
+            ("count", "Ø¹Ø¯Ø¯ Ø§Ù„Ø£Ø®Ø·Ø§Ø¡", 100),
+            ("last_error", "Ø¢Ø®Ø± Ø®Ø·Ø£", 760),
         ]:
             self.sync_ex_tree.heading(col, text=txt)
             self.sync_ex_tree.column(col, width=w, anchor="center")
@@ -11569,7 +14138,7 @@ class DashboardFrame(ttk.Frame):
 
             cur.execute("SELECT COALESCE(SUM(count * unit_price), 0) FROM stocks WHERE count > 0")
             val = cur.fetchone()[0] or 0
-            self._cards["total_value"].config(text=f"{val:,.2f}")
+            self._cards["total_value"].config(text=f"{format_money(val)}")
 
             cur.execute("SELECT COUNT(*) FROM bills WHERE COALESCE(status,'CONFIRMED')='CONFIRMED'")
             self._cards["total_bills"].config(text=str(cur.fetchone()[0] or 0))
@@ -11578,7 +14147,7 @@ class DashboardFrame(ttk.Frame):
             self.recent_tree.delete(*self.recent_tree.get_children())
             cur.execute("SELECT id, created_at, customer, total FROM bills WHERE COALESCE(status,'CONFIRMED')='CONFIRMED' ORDER BY id DESC LIMIT 10")
             for r in cur.fetchall():
-                self.recent_tree.insert("", tk.END, values=(r[0], r[1], r[2] or "", f"{r[3]:.2f}"))
+                self.recent_tree.insert("", tk.END, values=(r[0], r[1], r[2] or "", f"{format_money(r[3])}"))
             apply_zebra_tags(self.recent_tree)
 
             # Low stock alerts
@@ -11624,16 +14193,16 @@ class DashboardFrame(ttk.Frame):
                     except Exception:
                         age_min = None
                 if age_min is None:
-                    status = "غير معروف"
+                    status = "ØºÙŠØ± Ù…Ø¹Ø±ÙˆÙ"
                     warn_count += 1
                 elif age_min >= 60:
-                    status = "حرج"
+                    status = "Ø­Ø±Ø¬"
                     critical_count += 1
                 elif age_min >= 15:
-                    status = "تحذير"
+                    status = "ØªØ­Ø°ÙŠØ±"
                     warn_count += 1
                 else:
-                    status = "جيد"
+                    status = "Ø¬ÙŠØ¯"
                     ok_count += 1
                 self.sync_tree.insert(
                     "",
@@ -11644,8 +14213,8 @@ class DashboardFrame(ttk.Frame):
                         fmt_local_ts(snap, ""),
                         age_min if age_min is not None else "",
                         int(r[2] or 0),
-                        f"{float(r[3] or 0.0):,.2f}",
-                        "—",
+                        f"{format_money(float(r[3] or 0.0))}",
+                        "â€”",
                     ),
                 )
             apply_zebra_tags(self.sync_tree)
@@ -11661,9 +14230,9 @@ class DashboardFrame(ttk.Frame):
             except Exception:
                 pass
             self._sync_summary_var.set(
-                f"فروع سليمة: {ok_count}  |  تحذير: {warn_count}  |  حرج: {critical_count}  |  "
-                f"أحداث صادرة قيد الانتظار: {outbox_pending}  |  أخطاء تطبيق وارد: {inbox_errors}  |  "
-                f"طابور الفرع (معلّق): {queue_pending}"
+                f"ÙØ±ÙˆØ¹ Ø³Ù„ÙŠÙ…Ø©: {ok_count}  |  ØªØ­Ø°ÙŠØ±: {warn_count}  |  Ø­Ø±Ø¬: {critical_count}  |  "
+                f"Ø£Ø­Ø¯Ø§Ø« ØµØ§Ø¯Ø±Ø© Ù‚ÙŠØ¯ Ø§Ù„Ø§Ù†ØªØ¸Ø§Ø±: {outbox_pending}  |  Ø£Ø®Ø·Ø§Ø¡ ØªØ·Ø¨ÙŠÙ‚ ÙˆØ§Ø±Ø¯: {inbox_errors}  |  "
+                f"Ø·Ø§Ø¨ÙˆØ± Ø§Ù„ÙØ±Ø¹ (Ù…Ø¹Ù„Ù‘Ù‚): {queue_pending}"
             )
 
             # Top sync apply error causes
@@ -11708,7 +14277,7 @@ class SyncDiagnosticsFrame(ttk.Frame):
         self._refresh()
 
     def _build(self):
-        ttk.Label(self, text="تشخيص المزامنة", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 8))
+        ttk.Label(self, text="ØªØ´Ø®ÙŠØµ Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø©", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 8))
 
         self._sync_summary_var = tk.StringVar(value="")
         ttk.Label(self, textvariable=self._sync_summary_var).pack(fill=tk.X, pady=(0, 6))
@@ -11717,21 +14286,21 @@ class SyncDiagnosticsFrame(ttk.Frame):
         act.pack(fill=tk.X, pady=(0, 6))
         ttk.Button(
             act,
-            text="مزامنة الآن",
+            text="Ù…Ø²Ø§Ù…Ù†Ø© Ø§Ù„Ø¢Ù†",
             command=(lambda: self.app._open_sync_dialog()) if self.app else None,
         ).pack(side=tk.LEFT, padx=2)
         ttk.Button(
             act,
-            text="طابور الفروع",
+            text="Ø·Ø§Ø¨ÙˆØ± Ø§Ù„ÙØ±ÙˆØ¹",
             command=(lambda: self.app._open_branch_inventory_queue()) if self.app else None,
         ).pack(side=tk.LEFT, padx=2)
         ttk.Button(
             act,
-            text="مرآة حجوزات الفروع",
+            text="Ù…Ø±Ø¢Ø© Ø­Ø¬ÙˆØ²Ø§Øª Ø§Ù„ÙØ±ÙˆØ¹",
             command=(lambda: self.app._open_pos_reservations_mirror()) if self.app else None,
         ).pack(side=tk.LEFT, padx=2)
 
-        health_fr = ttk.LabelFrame(self, text="صحة الفروع")
+        health_fr = ttk.LabelFrame(self, text="ØµØ­Ø© Ø§Ù„ÙØ±ÙˆØ¹")
         health_fr.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         self.sync_tree = ttk.Treeview(
             health_fr,
@@ -11740,13 +14309,13 @@ class SyncDiagnosticsFrame(ttk.Frame):
             height=8,
         )
         for col, txt, w in [
-            ("branch", "الفرع", 180),
-            ("status", "الحالة", 100),
-            ("last_snapshot", "آخر لقطة", 190),
-            ("age_min", "عمر اللقطة (د)", 110),
-            ("rows", "الصفوف", 90),
-            ("value", "القيمة", 120),
-            ("sync_errors", "أخطاء مزامنة", 120),
+            ("branch", "Ø§Ù„ÙØ±Ø¹", 180),
+            ("status", "Ø§Ù„Ø­Ø§Ù„Ø©", 100),
+            ("last_snapshot", "Ø¢Ø®Ø± Ù„Ù‚Ø·Ø©", 190),
+            ("age_min", "Ø¹Ù…Ø± Ø§Ù„Ù„Ù‚Ø·Ø© (Ø¯)", 110),
+            ("rows", "Ø§Ù„ØµÙÙˆÙ", 90),
+            ("value", "Ø§Ù„Ù‚ÙŠÙ…Ø©", 120),
+            ("sync_errors", "Ø£Ø®Ø·Ø§Ø¡ Ù…Ø²Ø§Ù…Ù†Ø©", 120),
         ]:
             self.sync_tree.heading(col, text=txt)
             self.sync_tree.column(col, width=w, anchor="center")
@@ -11754,7 +14323,7 @@ class SyncDiagnosticsFrame(ttk.Frame):
         add_context_menu(self.sync_tree)
         _bind_mousewheel(self.sync_tree)
 
-        ex_fr = ttk.LabelFrame(self, text="استثناءات المزامنة (أعلى الأسباب)")
+        ex_fr = ttk.LabelFrame(self, text="Ø§Ø³ØªØ«Ù†Ø§Ø¡Ø§Øª Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø© (Ø£Ø¹Ù„Ù‰ Ø§Ù„Ø£Ø³Ø¨Ø§Ø¨)")
         ex_fr.pack(fill=tk.BOTH, expand=False)
         self.sync_ex_tree = ttk.Treeview(
             ex_fr,
@@ -11763,9 +14332,9 @@ class SyncDiagnosticsFrame(ttk.Frame):
             height=6,
         )
         for col, txt, w in [
-            ("etype", "نوع الحدث", 220),
-            ("count", "عدد الأخطاء", 100),
-            ("last_error", "آخر خطأ", 760),
+            ("etype", "Ù†ÙˆØ¹ Ø§Ù„Ø­Ø¯Ø«", 220),
+            ("count", "Ø¹Ø¯Ø¯ Ø§Ù„Ø£Ø®Ø·Ø§Ø¡", 100),
+            ("last_error", "Ø¢Ø®Ø± Ø®Ø·Ø£", 760),
         ]:
             self.sync_ex_tree.heading(col, text=txt)
             self.sync_ex_tree.column(col, width=w, anchor="center")
@@ -11804,16 +14373,16 @@ class SyncDiagnosticsFrame(ttk.Frame):
                     except Exception:
                         age_min = None
                 if age_min is None:
-                    status = "غير معروف"
+                    status = "ØºÙŠØ± Ù…Ø¹Ø±ÙˆÙ"
                     warn_count += 1
                 elif age_min >= 60:
-                    status = "حرج"
+                    status = "Ø­Ø±Ø¬"
                     critical_count += 1
                 elif age_min >= 15:
-                    status = "تحذير"
+                    status = "ØªØ­Ø°ÙŠØ±"
                     warn_count += 1
                 else:
-                    status = "جيد"
+                    status = "Ø¬ÙŠØ¯"
                     ok_count += 1
                 self.sync_tree.insert(
                     "",
@@ -11824,8 +14393,8 @@ class SyncDiagnosticsFrame(ttk.Frame):
                         fmt_local_ts(snap, ""),
                         age_min if age_min is not None else "",
                         int(r[2] or 0),
-                        f"{float(r[3] or 0.0):,.2f}",
-                        "—",
+                        f"{format_money(float(r[3] or 0.0))}",
+                        "â€”",
                     ),
                 )
             apply_zebra_tags(self.sync_tree)
@@ -11840,9 +14409,9 @@ class SyncDiagnosticsFrame(ttk.Frame):
             except Exception:
                 pass
             self._sync_summary_var.set(
-                f"فروع سليمة: {ok_count}  |  تحذير: {warn_count}  |  حرج: {critical_count}  |  "
-                f"أحداث صادرة قيد الانتظار: {outbox_pending}  |  أخطاء تطبيق وارد: {inbox_errors}  |  "
-                f"طابور الفرع (معلّق): {queue_pending}"
+                f"ÙØ±ÙˆØ¹ Ø³Ù„ÙŠÙ…Ø©: {ok_count}  |  ØªØ­Ø°ÙŠØ±: {warn_count}  |  Ø­Ø±Ø¬: {critical_count}  |  "
+                f"Ø£Ø­Ø¯Ø§Ø« ØµØ§Ø¯Ø±Ø© Ù‚ÙŠØ¯ Ø§Ù„Ø§Ù†ØªØ¸Ø§Ø±: {outbox_pending}  |  Ø£Ø®Ø·Ø§Ø¡ ØªØ·Ø¨ÙŠÙ‚ ÙˆØ§Ø±Ø¯: {inbox_errors}  |  "
+                f"Ø·Ø§Ø¨ÙˆØ± Ø§Ù„ÙØ±Ø¹ (Ù…Ø¹Ù„Ù‘Ù‚): {queue_pending}"
             )
 
             self.sync_ex_tree.delete(*self.sync_ex_tree.get_children())
@@ -11886,17 +14455,17 @@ class StatisticsFrame(ttk.Frame):
         self._refresh()
 
     def _build(self):
-        ttk.Label(self, text="الإحصائيات والتقارير", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 12))
+        ttk.Label(self, text="Ø§Ù„Ø¥Ø­ØµØ§Ø¦ÙŠØ§Øª ÙˆØ§Ù„ØªÙ‚Ø§Ø±ÙŠØ±", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 12))
 
         # Date range filters (stays outside the scroll area)
         filters = ttk.Frame(self)
         filters.pack(fill=tk.X, pady=(0, 8))
 
-        self.df = DateField(filters, "من")
+        self.df = DateField(filters, "Ù…Ù†")
         self.df.pack(side=tk.LEFT, padx=(0, 8))
-        self.dt = DateField(filters, "إلى")
+        self.dt = DateField(filters, "Ø¥Ù„Ù‰")
         self.dt.pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(filters, text="تحديث", command=self._refresh).pack(side=tk.LEFT, padx=8)
+        ttk.Button(filters, text="ØªØ­Ø¯ÙŠØ«", command=self._refresh).pack(side=tk.LEFT, padx=8)
 
         # Scrollable container for all stats sections
         canvas = tk.Canvas(self, highlightthickness=0)
@@ -11919,15 +14488,15 @@ class StatisticsFrame(ttk.Frame):
         _bind_mousewheel(inner, canvas)
 
         # ---- Summary cards ----
-        summary = ttk.LabelFrame(inner, text="ملخص الفترة")
+        summary = ttk.LabelFrame(inner, text="Ù…Ù„Ø®Øµ Ø§Ù„ÙØªØ±Ø©")
         summary.pack(fill=tk.X, pady=(0, 8), padx=4)
 
         self._stats = {}
         stat_defs = [
-            ("bills_count", "عدد الفواتير"),
-            ("bills_total", "إجمالي المبيعات"),
-            ("items_in", "كميات واردة"),
-            ("items_out", "كميات منصرفة"),
+            ("bills_count", "Ø¹Ø¯Ø¯ Ø§Ù„ÙÙˆØ§ØªÙŠØ±"),
+            ("bills_total", "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø¨ÙŠØ¹Ø§Øª"),
+            ("items_in", "ÙƒÙ…ÙŠØ§Øª ÙˆØ§Ø±Ø¯Ø©"),
+            ("items_out", "ÙƒÙ…ÙŠØ§Øª Ù…Ù†ØµØ±ÙØ©"),
         ]
         for i, (key, label) in enumerate(stat_defs):
             ttk.Label(summary, text=label + ":").grid(row=0, column=i*2, padx=6, pady=8, sticky="e")
@@ -11937,15 +14506,15 @@ class StatisticsFrame(ttk.Frame):
             summary.columnconfigure(i*2+1, weight=1)
 
         # ---- Top selling items ----
-        top_frame = ttk.LabelFrame(inner, text="أكثر الأصناف مبيعاً")
+        top_frame = ttk.LabelFrame(inner, text="Ø£ÙƒØ«Ø± Ø§Ù„Ø£ØµÙ†Ø§Ù Ù…Ø¨ÙŠØ¹Ø§Ù‹")
         top_frame.pack(fill=tk.X, pady=(0, 8), padx=4)
 
         self.top_tree = ttk.Treeview(top_frame,
             columns=("item", "school", "color", "qty", "revenue"),
             show="headings", height=10)
-        for col, txt, w in [("item", "النوع", 160), ("school", "المدرسة", 160),
-                            ("color", "اللون", 120), ("qty", "الكمية المباعة", 110),
-                            ("revenue", "الإيراد", 130)]:
+        for col, txt, w in [("item", "Ø§Ù„Ù†ÙˆØ¹", 160), ("school", "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", 160),
+                            ("color", "Ø§Ù„Ù„ÙˆÙ†", 120), ("qty", "Ø§Ù„ÙƒÙ…ÙŠØ© Ø§Ù„Ù…Ø¨Ø§Ø¹Ø©", 110),
+                            ("revenue", "Ø§Ù„Ø¥ÙŠØ±Ø§Ø¯", 130)]:
             self.top_tree.heading(col, text=txt)
             self.top_tree.column(col, width=w, anchor="center")
         ysb2 = ttk.Scrollbar(top_frame, orient="vertical", command=self.top_tree.yview)
@@ -11956,13 +14525,13 @@ class StatisticsFrame(ttk.Frame):
         _bind_mousewheel(self.top_tree)
 
         # ---- Sales Trends ----
-        trends_frame = ttk.LabelFrame(inner, text="اتجاهات المبيعات")
+        trends_frame = ttk.LabelFrame(inner, text="Ø§ØªØ¬Ø§Ù‡Ø§Øª Ø§Ù„Ù…Ø¨ÙŠØ¹Ø§Øª")
         trends_frame.pack(fill=tk.X, pady=(0, 8), padx=4)
 
         self._trend_mode = tk.StringVar(value="daily")
         mode_row = ttk.Frame(trends_frame)
         mode_row.pack(fill=tk.X, padx=4, pady=4)
-        for val, lbl in [("daily", "يومي"), ("weekly", "أسبوعي"), ("monthly", "شهري")]:
+        for val, lbl in [("daily", "ÙŠÙˆÙ…ÙŠ"), ("weekly", "Ø£Ø³Ø¨ÙˆØ¹ÙŠ"), ("monthly", "Ø´Ù‡Ø±ÙŠ")]:
             ttk.Radiobutton(mode_row, text=lbl, variable=self._trend_mode,
                             value=val, command=self._refresh).pack(side=tk.LEFT, padx=4)
 
@@ -11970,8 +14539,8 @@ class StatisticsFrame(ttk.Frame):
             columns=("period", "bills_count", "total_sales", "items_sold"),
             show="headings", height=8)
         for col, txt, w in [
-            ("period", "الفترة", 140), ("bills_count", "عدد الفواتير", 100),
-            ("total_sales", "إجمالي المبيعات", 120), ("items_sold", "الأصناف المباعة", 100),
+            ("period", "Ø§Ù„ÙØªØ±Ø©", 140), ("bills_count", "Ø¹Ø¯Ø¯ Ø§Ù„ÙÙˆØ§ØªÙŠØ±", 100),
+            ("total_sales", "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø¨ÙŠØ¹Ø§Øª", 120), ("items_sold", "Ø§Ù„Ø£ØµÙ†Ø§Ù Ø§Ù„Ù…Ø¨Ø§Ø¹Ø©", 100),
         ]:
             self.trend_tree.heading(col, text=txt)
             self.trend_tree.column(col, width=w, anchor="center")
@@ -11980,23 +14549,23 @@ class StatisticsFrame(ttk.Frame):
         _bind_mousewheel(self.trend_tree)
 
         # ---- Dead Stock / Slow Movers ----
-        dead_frame = ttk.LabelFrame(inner, text="أصناف راكدة (بدون حركة بيع)")
+        dead_frame = ttk.LabelFrame(inner, text="Ø£ØµÙ†Ø§Ù Ø±Ø§ÙƒØ¯Ø© (Ø¨Ø¯ÙˆÙ† Ø­Ø±ÙƒØ© Ø¨ÙŠØ¹)")
         dead_frame.pack(fill=tk.X, pady=(0, 8), padx=4)
 
         days_row = ttk.Frame(dead_frame)
         days_row.pack(fill=tk.X, padx=4, pady=4)
-        ttk.Label(days_row, text="بدون بيع لمدة (أيام):").pack(side=tk.LEFT)
+        ttk.Label(days_row, text="Ø¨Ø¯ÙˆÙ† Ø¨ÙŠØ¹ Ù„Ù…Ø¯Ø© (Ø£ÙŠØ§Ù…):").pack(side=tk.LEFT)
         self._dead_days_var = tk.StringVar(value="30")
         ttk.Entry(days_row, textvariable=self._dead_days_var, width=6).pack(side=tk.LEFT, padx=4)
-        ttk.Button(days_row, text="تحديث", command=self._refresh).pack(side=tk.LEFT, padx=4)
+        ttk.Button(days_row, text="ØªØ­Ø¯ÙŠØ«", command=self._refresh).pack(side=tk.LEFT, padx=4)
 
         self.dead_tree = ttk.Treeview(dead_frame,
             columns=("type", "school", "color", "size", "qty", "value", "last_sale"),
             show="headings", height=8)
         for col, txt, w in [
-            ("type", "النوع", 120), ("school", "المدرسة", 120), ("color", "اللون", 80),
-            ("size", "المقاس", 60), ("qty", "الكمية", 60), ("value", "القيمة", 90),
-            ("last_sale", "آخر بيع", 120),
+            ("type", "Ø§Ù„Ù†ÙˆØ¹", 120), ("school", "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", 120), ("color", "Ø§Ù„Ù„ÙˆÙ†", 80),
+            ("size", "Ø§Ù„Ù…Ù‚Ø§Ø³", 60), ("qty", "Ø§Ù„ÙƒÙ…ÙŠØ©", 60), ("value", "Ø§Ù„Ù‚ÙŠÙ…Ø©", 90),
+            ("last_sale", "Ø¢Ø®Ø± Ø¨ÙŠØ¹", 120),
         ]:
             self.dead_tree.heading(col, text=txt)
             self.dead_tree.column(col, width=w, anchor="center")
@@ -12005,15 +14574,15 @@ class StatisticsFrame(ttk.Frame):
         _bind_mousewheel(self.dead_tree)
 
         # ---- Inventory Valuation by Warehouse ----
-        val_frame = ttk.LabelFrame(inner, text="تقييم المخزون حسب المخزن")
+        val_frame = ttk.LabelFrame(inner, text="ØªÙ‚ÙŠÙŠÙ… Ø§Ù„Ù…Ø®Ø²ÙˆÙ† Ø­Ø³Ø¨ Ø§Ù„Ù…Ø®Ø²Ù†")
         val_frame.pack(fill=tk.X, pady=(0, 8), padx=4)
 
         self.val_tree = ttk.Treeview(val_frame,
             columns=("wh", "items_count", "total_qty", "total_value"),
             show="headings", height=5)
         for col, txt, w in [
-            ("wh", "المخزن", 80), ("items_count", "عدد الأصناف", 100),
-            ("total_qty", "إجمالي الكميات", 100), ("total_value", "إجمالي القيمة", 120),
+            ("wh", "Ø§Ù„Ù…Ø®Ø²Ù†", 80), ("items_count", "Ø¹Ø¯Ø¯ Ø§Ù„Ø£ØµÙ†Ø§Ù", 100),
+            ("total_qty", "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„ÙƒÙ…ÙŠØ§Øª", 100), ("total_value", "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù‚ÙŠÙ…Ø©", 120),
         ]:
             self.val_tree.heading(col, text=txt)
             self.val_tree.column(col, width=w, anchor="center")
@@ -12032,8 +14601,8 @@ class StatisticsFrame(ttk.Frame):
             where = [
                 "COALESCE(status,'CONFIRMED')='CONFIRMED'",
                 "(COALESCE(bill_type,'SALE')='SALE' OR bill_type IS NULL)",
-                "LOWER(TRIM(COALESCE(customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))",
-                "LOWER(TRIM(COALESCE(customer,''))) != LOWER(TRIM('الى المصنع'))",
+                "LOWER(TRIM(COALESCE(customer,''))) NOT LIKE LOWER(TRIM('ÙØ±Ø¹:%'))",
+                "LOWER(TRIM(COALESCE(customer,''))) != LOWER(TRIM('Ø§Ù„Ù‰ Ø§Ù„Ù…ØµÙ†Ø¹'))",
                 "UPPER(TRIM(COALESCE(customer,''))) != 'WAREHOUSE'",
             ]
             args: List[Any] = []
@@ -12047,7 +14616,7 @@ class StatisticsFrame(ttk.Frame):
             cur.execute(f"SELECT COUNT(*), COALESCE(SUM(total), 0) FROM bills WHERE {' AND '.join(where)}", args)
             r = cur.fetchone()
             self._stats["bills_count"].config(text=str(r[0] or 0))
-            self._stats["bills_total"].config(text=f"{r[1] or 0:,.2f}")
+            self._stats["bills_total"].config(text=f"{format_money(r[1] or 0)}")
 
             # Movements IN/OUT
             mwhere = ["1=1"]
@@ -12070,8 +14639,8 @@ class StatisticsFrame(ttk.Frame):
             bi_where = [
                 "COALESCE(b.status,'CONFIRMED')='CONFIRMED'",
                 "(COALESCE(b.bill_type,'SALE')='SALE' OR b.bill_type IS NULL)",
-                "LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))",
-                "LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('الى المصنع'))",
+                "LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('ÙØ±Ø¹:%'))",
+                "LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('Ø§Ù„Ù‰ Ø§Ù„Ù…ØµÙ†Ø¹'))",
                 "UPPER(TRIM(COALESCE(b.customer,''))) != 'WAREHOUSE'",
             ]
             bi_args: List[Any] = []
@@ -12094,7 +14663,7 @@ class StatisticsFrame(ttk.Frame):
             """, bi_args)
 
             for r in cur.fetchall():
-                self.top_tree.insert("", tk.END, values=(r[0], r[1], r[2], r[3], f"{r[4]:,.2f}"))
+                self.top_tree.insert("", tk.END, values=(r[0], r[1], r[2], r[3], f"{format_money(r[4])}"))
             apply_zebra_tags(self.top_tree)
 
             # ---- Sales Trends ----
@@ -12110,8 +14679,8 @@ class StatisticsFrame(ttk.Frame):
             trend_where = [
                 "COALESCE(b.status,'CONFIRMED')='CONFIRMED'",
                 "(COALESCE(b.bill_type,'SALE')='SALE' OR b.bill_type IS NULL)",
-                "LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))",
-                "LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('الى المصنع'))",
+                "LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('ÙØ±Ø¹:%'))",
+                "LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('Ø§Ù„Ù‰ Ø§Ù„Ù…ØµÙ†Ø¹'))",
                 "UPPER(TRIM(COALESCE(b.customer,''))) != 'WAREHOUSE'",
             ]
             trend_args: List[Any] = []
@@ -12136,15 +14705,15 @@ class StatisticsFrame(ttk.Frame):
             """, trend_args)
             for r in cur.fetchall():
                 self.trend_tree.insert("", tk.END, values=(
-                    r[0], r[1], f"{r[2]:,.2f}", r[3]
+                    r[0], r[1], f"{format_money(r[2])}", r[3]
                 ))
             apply_zebra_tags(self.trend_tree)
 
             # ---- Dead Stock / Slow Movers ----
             self.dead_tree.delete(*self.dead_tree.get_children())
             try:
-                days = int(self._dead_days_var.get() or 30)
-            except ValueError:
+                days = parse_int_text(self._dead_days_var.get(), 30) or 30
+            except Exception:
                 days = 30
 
             cur.execute(f"""
@@ -12160,8 +14729,8 @@ class StatisticsFrame(ttk.Frame):
                                 b.id IS NULL
                              OR (
                                     (COALESCE(b.bill_type,'SALE')='SALE' OR b.bill_type IS NULL)
-                                AND LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('فرع:%'))
-                                AND LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('الى المصنع'))
+                                AND LOWER(TRIM(COALESCE(b.customer,''))) NOT LIKE LOWER(TRIM('ÙØ±Ø¹:%'))
+                                AND LOWER(TRIM(COALESCE(b.customer,''))) != LOWER(TRIM('Ø§Ù„Ù‰ Ø§Ù„Ù…ØµÙ†Ø¹'))
                                 AND UPPER(TRIM(COALESCE(b.customer,''))) != 'WAREHOUSE'
                                 )
                           )) AS last_sale
@@ -12174,8 +14743,8 @@ class StatisticsFrame(ttk.Frame):
             """)
             for r in cur.fetchall():
                 self.dead_tree.insert("", tk.END, values=(
-                    r[0], r[1], r[2], r[3], r[4], f"{r[5]:,.2f}",
-                    r[6] or "لا يوجد"
+                    r[0], r[1], r[2], r[3], r[4], f"{format_money(r[5])}",
+                    r[6] or "Ù„Ø§ ÙŠÙˆØ¬Ø¯"
                 ))
             apply_zebra_tags(self.dead_tree)
 
@@ -12192,7 +14761,7 @@ class StatisticsFrame(ttk.Frame):
             """)
             for r in cur.fetchall():
                 self.val_tree.insert("", tk.END, values=(
-                    r[0], r[1], f"{r[2]:,}", f"{r[3]:,.2f}"
+                    r[0], r[1], f"{r[2]:,}", f"{format_money(r[3])}"
                 ))
             apply_zebra_tags(self.val_tree)
 
@@ -12212,53 +14781,53 @@ class SchoolAccountsFrame(ttk.Frame):
 
     def _update_selected_schools_label(self) -> None:
         if self._selected_schools:
-            self._schools_var.set("المدارس المختارة: " + " - ".join(self._selected_schools))
+            self._schools_var.set("Ø§Ù„Ù…Ø¯Ø§Ø±Ø³ Ø§Ù„Ù…Ø®ØªØ§Ø±Ø©: " + " - ".join(self._selected_schools))
         else:
-            self._schools_var.set("كل المدارس")
+            self._schools_var.set("ÙƒÙ„ Ø§Ù„Ù…Ø¯Ø§Ø±Ø³")
 
     def _build(self):
-        ttk.Label(self, text="حسابات المدارس", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 12))
+        ttk.Label(self, text="Ø­Ø³Ø§Ø¨Ø§Øª Ø§Ù„Ù…Ø¯Ø§Ø±Ø³", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 12))
 
         filters = ttk.Frame(self)
         filters.pack(fill=tk.X, pady=(0, 8))
 
-        self.df = DateField(filters, "من")
+        self.df = DateField(filters, "Ù…Ù†")
         self.df.pack(side=tk.LEFT, padx=(0, 8))
-        self.dt = DateField(filters, "إلى")
+        self.dt = DateField(filters, "Ø¥Ù„Ù‰")
         self.dt.pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(filters, text="اختيار المدارس", command=self._pick_schools).pack(side=tk.LEFT, padx=8)
-        ttk.Button(filters, text="تحديث", command=self._refresh).pack(side=tk.LEFT, padx=8)
-        ttk.Button(filters, text="مسح الاختيار", command=self._clear_schools).pack(side=tk.LEFT, padx=8)
+        ttk.Button(filters, text="Ø§Ø®ØªÙŠØ§Ø± Ø§Ù„Ù…Ø¯Ø§Ø±Ø³", command=self._pick_schools).pack(side=tk.LEFT, padx=8)
+        ttk.Button(filters, text="ØªØ­Ø¯ÙŠØ«", command=self._refresh).pack(side=tk.LEFT, padx=8)
+        ttk.Button(filters, text="Ù…Ø³Ø­ Ø§Ù„Ø§Ø®ØªÙŠØ§Ø±", command=self._clear_schools).pack(side=tk.LEFT, padx=8)
 
-        self._schools_var = tk.StringVar(value="كل المدارس")
+        self._schools_var = tk.StringVar(value="ÙƒÙ„ Ø§Ù„Ù…Ø¯Ø§Ø±Ø³")
         ttk.Label(self, textvariable=self._schools_var, foreground=_UI["TEXT_DIM"]).pack(anchor="w", pady=(0, 8))
 
-        summary = ttk.LabelFrame(self, text="ملخص")
+        summary = ttk.LabelFrame(self, text="Ù…Ù„Ø®Øµ")
         summary.pack(fill=tk.X, pady=(0, 8))
         self._sum_school_count = tk.StringVar(value="0")
         self._sum_qty = tk.StringVar(value="0")
-        self._sum_sales = tk.StringVar(value="0.00")
+        self._sum_sales = tk.StringVar(value="0")
         for i, (label, var) in enumerate([
-            ("عدد المدارس:", self._sum_school_count),
-            ("إجمالي الكمية:", self._sum_qty),
-            ("إجمالي المبيعات:", self._sum_sales),
+            ("Ø¹Ø¯Ø¯ Ø§Ù„Ù…Ø¯Ø§Ø±Ø³:", self._sum_school_count),
+            ("Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„ÙƒÙ…ÙŠØ©:", self._sum_qty),
+            ("Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø¨ÙŠØ¹Ø§Øª:", self._sum_sales),
         ]):
             ttk.Label(summary, text=label).grid(row=0, column=i * 2, padx=6, pady=8, sticky="e")
             ttk.Label(summary, textvariable=var, font=("Segoe UI", 12, "bold")).grid(
                 row=0, column=i * 2 + 1, padx=(0, 16), pady=8, sticky="w"
             )
 
-        table_wrap = ttk.LabelFrame(self, text="تفاصيل المبيعات")
+        table_wrap = ttk.LabelFrame(self, text="ØªÙØ§ØµÙŠÙ„ Ø§Ù„Ù…Ø¨ÙŠØ¹Ø§Øª")
         table_wrap.pack(fill=tk.BOTH, expand=True)
         cols = ("school", "item_type", "color", "size", "qty", "sales_total")
         self._tree = ttk.Treeview(table_wrap, columns=cols, show="headings", height=16)
         for col, txt, w in [
-            ("school", "المدرسة", 170),
-            ("item_type", "النوع", 170),
-            ("color", "اللون", 110),
-            ("size", "المقاس", 90),
-            ("qty", "الكمية", 90),
-            ("sales_total", "إجمالي المبيعات", 130),
+            ("school", "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", 170),
+            ("item_type", "Ø§Ù„Ù†ÙˆØ¹", 170),
+            ("color", "Ø§Ù„Ù„ÙˆÙ†", 110),
+            ("size", "Ø§Ù„Ù…Ù‚Ø§Ø³", 90),
+            ("qty", "Ø§Ù„ÙƒÙ…ÙŠØ©", 90),
+            ("sales_total", "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø¨ÙŠØ¹Ø§Øª", 130),
         ]:
             self._tree.heading(col, text=txt)
             self._tree.column(col, width=w, anchor="center")
@@ -12271,7 +14840,7 @@ class SchoolAccountsFrame(ttk.Frame):
 
     def _pick_schools(self):
         values = self.db.list_schools_all()
-        dlg = MultiSelectDialog(self, title="اختيار المدارس", values=values, preselected=self._selected_schools)
+        dlg = MultiSelectDialog(self, title="Ø§Ø®ØªÙŠØ§Ø± Ø§Ù„Ù…Ø¯Ø§Ø±Ø³", values=values, preselected=self._selected_schools)
         result = dlg.run()
         if result is None:
             return
@@ -12310,14 +14879,14 @@ class SchoolAccountsFrame(ttk.Frame):
                     row.get("color") or "",
                     row.get("size") or "",
                     qty,
-                    f"{sales_total:.2f}",
+                    f"{format_money(sales_total)}",
                 ),
             )
         apply_zebra_tags(self._tree)
         self._update_selected_schools_label()
         self._sum_school_count.set(str(len(schools_seen)))
         self._sum_qty.set(str(total_qty))
-        self._sum_sales.set(f"{total_sales:.2f}")
+        self._sum_sales.set(f"{format_money(total_sales)}")
 
 
 class FabricWeightsDialog(tk.Toplevel):
@@ -12325,28 +14894,28 @@ class FabricWeightsDialog(tk.Toplevel):
         super().__init__(master)
         self.db = db
         self.on_change = on_change
-        self.title("إدارة أوزان القماش")
+        self.title("Ø¥Ø¯Ø§Ø±Ø© Ø£ÙˆØ²Ø§Ù† Ø§Ù„Ù‚Ù…Ø§Ø´")
         self.geometry("760x520")
         self.configure(bg=_UI["BG"])
         _wh = tk.Frame(self, bg=_UI["ACCENT"], height=44)
         _wh.pack(fill=tk.X)
         _wh.pack_propagate(False)
-        tk.Label(_wh, text="  إدارة أوزان القماش", bg=_UI["ACCENT"], fg="#FFFFFF", font=_FONTS["h3"]).pack(side=tk.RIGHT, padx=12)
+        tk.Label(_wh, text="  Ø¥Ø¯Ø§Ø±Ø© Ø£ÙˆØ²Ø§Ù† Ø§Ù„Ù‚Ù…Ø§Ø´", bg=_UI["ACCENT"], fg="#FFFFFF", font=_FONTS["h3"]).pack(side=tk.RIGHT, padx=12)
         self.transient(master)
         self.grab_set()
         self._build()
         self._refresh()
 
     def _build(self):
-        top = ttk.LabelFrame(self, text="بيانات الوزن")
+        top = ttk.LabelFrame(self, text="Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„ÙˆØ²Ù†")
         top.pack(fill=tk.X, padx=10, pady=10)
 
-        self.f_item = LabeledCombobox(top, "نوع الصنف", self.db, "item_type")
+        self.f_item = LabeledCombobox(top, "Ù†ÙˆØ¹ Ø§Ù„ØµÙ†Ù", self.db, "item_type")
         self.f_item.grid(row=0, column=0, padx=6, pady=6, sticky="ew")
-        self.f_size = LabeledCombobox(top, "المقاس", self.db, "size")
+        self.f_size = LabeledCombobox(top, "Ø§Ù„Ù…Ù‚Ø§Ø³", self.db, "size")
         self.f_size.grid(row=0, column=1, padx=6, pady=6, sticky="ew")
         self.weight_var = tk.StringVar()
-        self.f_weight = LabeledEntry(top, "الوزن بالجرام")
+        self.f_weight = LabeledEntry(top, "Ø§Ù„ÙˆØ²Ù† Ø¨Ø§Ù„Ø¬Ø±Ø§Ù…")
         self.f_weight.grid(row=0, column=2, padx=6, pady=6, sticky="ew")
         self.f_weight.entry.configure(textvariable=self.weight_var)
         top.columnconfigure(0, weight=1)
@@ -12365,19 +14934,19 @@ class FabricWeightsDialog(tk.Toplevel):
 
         btns = ttk.Frame(top)
         btns.grid(row=1, column=0, columnspan=3, sticky="e", padx=6, pady=(0, 6))
-        ttk.Button(btns, text="جديد", command=self._clear_form).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="حفظ", command=self._save).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="حذف", command=self._delete_selected).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="تحديث", command=self._refresh).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Ø¬Ø¯ÙŠØ¯", command=self._clear_form).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Ø­ÙØ¸", command=self._save).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Ø­Ø°Ù", command=self._delete_selected).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="ØªØ­Ø¯ÙŠØ«", command=self._refresh).pack(side=tk.LEFT, padx=4)
 
-        wrap = ttk.LabelFrame(self, text="الأوزان المعرفة")
+        wrap = ttk.LabelFrame(self, text="Ø§Ù„Ø£ÙˆØ²Ø§Ù† Ø§Ù„Ù…Ø¹Ø±ÙØ©")
         wrap.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
         cols = ("item_type", "size", "weight_grams")
         self.tree = ttk.Treeview(wrap, columns=cols, show="headings", height=16)
         for col, txt, w in [
-            ("item_type", "نوع الصنف", 280),
-            ("size", "المقاس", 140),
-            ("weight_grams", "الوزن بالجرام", 140),
+            ("item_type", "Ù†ÙˆØ¹ Ø§Ù„ØµÙ†Ù", 280),
+            ("size", "Ø§Ù„Ù…Ù‚Ø§Ø³", 140),
+            ("weight_grams", "Ø§Ù„ÙˆØ²Ù† Ø¨Ø§Ù„Ø¬Ø±Ø§Ù…", 140),
         ]:
             self.tree.heading(col, text=txt)
             self.tree.column(col, width=w, anchor="center")
@@ -12434,10 +15003,12 @@ class FabricWeightsDialog(tk.Toplevel):
     def _save(self):
         item_type, size = self._selected_specs()
         try:
-            weight = float((self.weight_var.get() or "").strip())
+            weight = parse_float_text(self.weight_var.get())
+            if weight is None:
+                raise ValueError("Invalid fabric weight")
             self.db.upsert_fabric_weight(item_type, size, weight)
         except Exception as ex:
-            messagebox.showerror("فشل الحفظ", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø­ÙØ¸", str(ex), parent=self)
             return
         self._refresh()
         if self.on_change:
@@ -12445,22 +15016,22 @@ class FabricWeightsDialog(tk.Toplevel):
                 self.on_change()
             except Exception:
                 pass
-        show_toast(self, "تم حفظ وزن القماش بنجاح")
+        show_toast(self, "ØªÙ… Ø­ÙØ¸ ÙˆØ²Ù† Ø§Ù„Ù‚Ù…Ø§Ø´ Ø¨Ù†Ø¬Ø§Ø­")
 
     def _delete_selected(self):
         item_type, size = self._selected_specs()
         if not item_type or not size:
-            messagebox.showwarning("لم يتم التحديد", "اختر وزنًا من القائمة أولاً.", parent=self)
+            messagebox.showwarning("Ù„Ù… ÙŠØªÙ… Ø§Ù„ØªØ­Ø¯ÙŠØ¯", "Ø§Ø®ØªØ± ÙˆØ²Ù†Ù‹Ø§ Ù…Ù† Ø§Ù„Ù‚Ø§Ø¦Ù…Ø© Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
             return
         if not messagebox.askyesno(
-            "تأكيد الحذف",
-            f"حذف وزن القماش للصنف '{item_type}' والمقاس '{size}'؟",
+            "ØªØ£ÙƒÙŠØ¯ Ø§Ù„Ø­Ø°Ù",
+            f"Ø­Ø°Ù ÙˆØ²Ù† Ø§Ù„Ù‚Ù…Ø§Ø´ Ù„Ù„ØµÙ†Ù '{item_type}' ÙˆØ§Ù„Ù…Ù‚Ø§Ø³ '{size}'ØŸ",
             parent=self,
         ):
             return
         deleted = self.db.delete_fabric_weight(item_type, size)
         if deleted <= 0:
-            show_toast(self, "لم يتم العثور على الوزن المحدد", bg="#f59e0b")
+            show_toast(self, "Ù„Ù… ÙŠØªÙ… Ø§Ù„Ø¹Ø«ÙˆØ± Ø¹Ù„Ù‰ Ø§Ù„ÙˆØ²Ù† Ø§Ù„Ù…Ø­Ø¯Ø¯", bg="#f59e0b")
             return
         self._clear_form()
         self._refresh()
@@ -12469,7 +15040,7 @@ class FabricWeightsDialog(tk.Toplevel):
                 self.on_change()
             except Exception:
                 pass
-        show_toast(self, "تم حذف وزن القماش")
+        show_toast(self, "ØªÙ… Ø­Ø°Ù ÙˆØ²Ù† Ø§Ù„Ù‚Ù…Ø§Ø´")
 
 
 class FabricCalculationFrame(ttk.Frame):
@@ -12480,21 +15051,21 @@ class FabricCalculationFrame(ttk.Frame):
         self._build()
 
     def _build(self):
-        ttk.Label(self, text="حساب القماش", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 12))
+        ttk.Label(self, text="Ø­Ø³Ø§Ø¨ Ø§Ù„Ù‚Ù…Ø§Ø´", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 12))
 
-        top = ttk.LabelFrame(self, text="الفلاتر")
+        top = ttk.LabelFrame(self, text="Ø§Ù„ÙÙ„Ø§ØªØ±")
         top.pack(fill=tk.X, pady=(0, 8))
-        self.ftype = LabeledCombobox(top, "النوع", self.db, "item_type")
+        self.ftype = LabeledCombobox(top, "Ø§Ù„Ù†ÙˆØ¹", self.db, "item_type")
         self.ftype.grid(row=0, column=0, padx=6, pady=4, sticky="ew")
-        self.fsch = LabeledCombobox(top, "المدرسة", self.db, "school")
+        self.fsch = LabeledCombobox(top, "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", self.db, "school")
         self.fsch.grid(row=0, column=1, padx=6, pady=4, sticky="ew")
-        self.fclr = LabeledCombobox(top, "اللون", self.db, "color")
+        self.fclr = LabeledCombobox(top, "Ø§Ù„Ù„ÙˆÙ†", self.db, "color")
         self.fclr.grid(row=0, column=2, padx=6, pady=4, sticky="ew")
-        self.fsiz = LabeledCombobox(top, "المقاس", self.db, "size")
+        self.fsiz = LabeledCombobox(top, "Ø§Ù„Ù…Ù‚Ø§Ø³", self.db, "size")
         self.fsiz.grid(row=0, column=3, padx=6, pady=4, sticky="ew")
         branch_vals = [""] + [branch_display_name(n) for n in DEFAULT_BRANCH_POS_NAMES]
         branch_map = {n: branch_display_name(n) for n in DEFAULT_BRANCH_POS_NAMES}
-        self.fbranch = LabeledStaticCombo(top, "الفرع", branch_vals, value_map=branch_map, width=18)
+        self.fbranch = LabeledStaticCombo(top, "Ø§Ù„ÙØ±Ø¹", branch_vals, value_map=branch_map, width=18)
         self.fbranch.grid(row=0, column=4, padx=6, pady=4, sticky="ew")
 
         def _constraints(exclude: Optional[str] = None) -> Dict[str, Any]:
@@ -12513,34 +15084,34 @@ class FabricCalculationFrame(ttk.Frame):
         self.fclr.set_supplier(lambda: self.db.get_distinct_filtered("color", _constraints("color")))
         self.fsiz.set_supplier(lambda: self.db.get_distinct_filtered("size", _constraints("size")))
 
-        self.df = DateField(top, "من")
+        self.df = DateField(top, "Ù…Ù†")
         self.df.grid(row=1, column=0, padx=6, pady=4, sticky="w")
-        self.dt = DateField(top, "إلى")
+        self.dt = DateField(top, "Ø¥Ù„Ù‰")
         self.dt.grid(row=1, column=1, padx=6, pady=4, sticky="w")
-        ttk.Label(top, text="بحث").grid(row=1, column=2, sticky="e", padx=4, pady=4)
+        ttk.Label(top, text="Ø¨Ø­Ø«").grid(row=1, column=2, sticky="e", padx=4, pady=4)
         self.txt = ttk.Entry(top)
         self.txt.grid(row=1, column=3, sticky="ew", padx=6, pady=4)
         top.columnconfigure(3, weight=1)
 
         btns = ttk.Frame(top)
         btns.grid(row=0, column=5, rowspan=2, sticky="e", padx=6, pady=4)
-        ttk.Button(btns, text="احسب", command=self._calculate).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="إدارة الأوزان", command=self._open_weights_dialog).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="تصدير", command=self._export).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="طباعة", command=self._print_report).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="مسح", command=self._clear).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Ø§Ø­Ø³Ø¨", command=self._calculate).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Ø¥Ø¯Ø§Ø±Ø© Ø§Ù„Ø£ÙˆØ²Ø§Ù†", command=self._open_weights_dialog).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="ØªØµØ¯ÙŠØ±", command=self._export).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Ø·Ø¨Ø§Ø¹Ø©", command=self._print_report).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Ù…Ø³Ø­", command=self._clear).pack(side=tk.LEFT, padx=4)
 
-        summary = ttk.LabelFrame(self, text="الملخص")
+        summary = ttk.LabelFrame(self, text="Ø§Ù„Ù…Ù„Ø®Øµ")
         summary.pack(fill=tk.X, pady=(0, 8))
         self._sum_rows = tk.StringVar(value="0")
         self._sum_requested = tk.StringVar(value="0")
-        self._sum_weight = tk.StringVar(value="0 كجم")
+        self._sum_weight = tk.StringVar(value="0 ÙƒØ¬Ù…")
         self._sum_missing = tk.StringVar(value="0")
         summary_items = [
-            ("عدد الصفوف:", self._sum_rows),
-            ("إجمالي المطلوب:", self._sum_requested),
-            ("إجمالي القماش:", self._sum_weight),
-            ("أوزان غير معرفة:", self._sum_missing),
+            ("Ø¹Ø¯Ø¯ Ø§Ù„ØµÙÙˆÙ:", self._sum_rows),
+            ("Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø·Ù„ÙˆØ¨:", self._sum_requested),
+            ("Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù‚Ù…Ø§Ø´:", self._sum_weight),
+            ("Ø£ÙˆØ²Ø§Ù† ØºÙŠØ± Ù…Ø¹Ø±ÙØ©:", self._sum_missing),
         ]
         for i, (label, var) in enumerate(summary_items):
             ttk.Label(summary, text=label).grid(row=0, column=i * 2, padx=6, pady=8, sticky="e")
@@ -12548,16 +15119,16 @@ class FabricCalculationFrame(ttk.Frame):
                 row=0, column=i * 2 + 1, padx=(0, 16), pady=8, sticky="w"
             )
 
-        wrap = ttk.LabelFrame(self, text="النتائج")
+        wrap = ttk.LabelFrame(self, text="Ø§Ù„Ù†ØªØ§Ø¦Ø¬")
         wrap.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         cols = ("school", "item_type", "color", "requested_qty", "total_weight")
         self.tree = ttk.Treeview(wrap, columns=cols, show="headings", height=14)
         for col, txt, w in [
-            ("school", "المدرسة", 170),
-            ("item_type", "نوع الصنف", 170),
-            ("color", "اللون", 110),
-            ("requested_qty", "إجمالي المطلوب", 110),
-            ("total_weight", "إجمالي القماش", 140),
+            ("school", "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", 170),
+            ("item_type", "Ù†ÙˆØ¹ Ø§Ù„ØµÙ†Ù", 170),
+            ("color", "Ø§Ù„Ù„ÙˆÙ†", 110),
+            ("requested_qty", "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø·Ù„ÙˆØ¨", 110),
+            ("total_weight", "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù‚Ù…Ø§Ø´", 140),
         ]:
             self.tree.heading(col, text=txt)
             self.tree.column(col, width=w, anchor="center")
@@ -12568,16 +15139,16 @@ class FabricCalculationFrame(ttk.Frame):
         add_context_menu(self.tree)
         _bind_mousewheel(self.tree)
 
-        missing_wrap = ttk.LabelFrame(self, text="أوزان غير معرفة")
+        missing_wrap = ttk.LabelFrame(self, text="Ø£ÙˆØ²Ø§Ù† ØºÙŠØ± Ù…Ø¹Ø±ÙØ©")
         missing_wrap.pack(fill=tk.BOTH, expand=False)
         miss_cols = ("school", "item_type", "color", "size", "requested_qty")
         self.missing_tree = ttk.Treeview(missing_wrap, columns=miss_cols, show="headings", height=7)
         for col, txt, w in [
-            ("school", "المدرسة", 170),
-            ("item_type", "نوع الصنف", 170),
-            ("color", "اللون", 110),
-            ("size", "المقاس", 90),
-            ("requested_qty", "المطلوب", 90),
+            ("school", "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", 170),
+            ("item_type", "Ù†ÙˆØ¹ Ø§Ù„ØµÙ†Ù", 170),
+            ("color", "Ø§Ù„Ù„ÙˆÙ†", 110),
+            ("size", "Ø§Ù„Ù…Ù‚Ø§Ø³", 90),
+            ("requested_qty", "Ø§Ù„Ù…Ø·Ù„ÙˆØ¨", 90),
         ]:
             self.missing_tree.heading(col, text=txt)
             self.missing_tree.column(col, width=w, anchor="center")
@@ -12617,7 +15188,7 @@ class FabricCalculationFrame(ttk.Frame):
         self.missing_tree.delete(*self.missing_tree.get_children())
         self._sum_rows.set("0")
         self._sum_requested.set("0")
-        self._sum_weight.set("0 كجم")
+        self._sum_weight.set("0 ÙƒØ¬Ù…")
         self._sum_missing.set("0")
         self._last_result = None
 
@@ -12625,7 +15196,7 @@ class FabricCalculationFrame(ttk.Frame):
         try:
             result = self.db.calculate_fabric_requirements(self._filters())
         except Exception as ex:
-            messagebox.showerror("فشل الحساب", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø­Ø³Ø§Ø¨", str(ex), parent=self)
             return
         self._last_result = result
         rows = list(result.get("rows") or [])
@@ -12669,10 +15240,10 @@ class FabricCalculationFrame(ttk.Frame):
 
     def _export(self):
         if not self._last_result:
-            messagebox.showwarning("لا توجد نتائج", "احسب النتائج أولاً قبل التصدير.", parent=self)
+            messagebox.showwarning("Ù„Ø§ ØªÙˆØ¬Ø¯ Ù†ØªØ§Ø¦Ø¬", "Ø§Ø­Ø³Ø¨ Ø§Ù„Ù†ØªØ§Ø¦Ø¬ Ø£ÙˆÙ„Ø§Ù‹ Ù‚Ø¨Ù„ Ø§Ù„ØªØµØ¯ÙŠØ±.", parent=self)
             return
         path = filedialog.asksaveasfilename(
-            title="تصدير حساب القماش",
+            title="ØªØµØ¯ÙŠØ± Ø­Ø³Ø§Ø¨ Ø§Ù„Ù‚Ù…Ø§Ø´",
             defaultextension=".xlsx",
             filetypes=[("Excel Workbook", "*.xlsx"), ("Excel 97-2003 XML", "*.xls"), ("All files", "*.*")],
             initialfile=f"fabric_requirements_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
@@ -12702,7 +15273,7 @@ class FabricCalculationFrame(ttk.Frame):
         missing = list(self._last_result.get("missing") or [])
         if missing:
             table.append(["", "", "", "", "", ""])
-            table.append(["أوزان غير معرفة", "", "", "", "", ""])
+            table.append(["Ø£ÙˆØ²Ø§Ù† ØºÙŠØ± Ù…Ø¹Ø±ÙØ©", "", "", "", "", ""])
             for row in missing:
                 table.append([
                     row.get("school") or "",
@@ -12710,17 +15281,17 @@ class FabricCalculationFrame(ttk.Frame):
                     row.get("color") or "",
                     int(row.get("requested_qty") or 0),
                     row.get("size") or "",
-                    "وزن غير معرف",
+                    "ÙˆØ²Ù† ØºÙŠØ± Ù…Ø¹Ø±Ù",
                 ])
         try:
             export_to_excel(path, headers, table)
-            show_toast(self, "تم تصدير حساب القماش بنجاح")
+            show_toast(self, "ØªÙ… ØªØµØ¯ÙŠØ± Ø­Ø³Ø§Ø¨ Ø§Ù„Ù‚Ù…Ø§Ø´ Ø¨Ù†Ø¬Ø§Ø­")
         except Exception as ex:
-            messagebox.showerror("فشل التصدير", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„ØªØµØ¯ÙŠØ±", str(ex), parent=self)
 
     def _print_report(self):
         if not self._last_result:
-            messagebox.showwarning("لا توجد نتائج", "احسب النتائج أولاً قبل الطباعة.", parent=self)
+            messagebox.showwarning("Ù„Ø§ ØªÙˆØ¬Ø¯ Ù†ØªØ§Ø¦Ø¬", "Ø§Ø­Ø³Ø¨ Ø§Ù„Ù†ØªØ§Ø¦Ø¬ Ø£ÙˆÙ„Ø§Ù‹ Ù‚Ø¨Ù„ Ø§Ù„Ø·Ø¨Ø§Ø¹Ø©.", parent=self)
             return
 
         def _h(v: Any) -> str:
@@ -12735,19 +15306,19 @@ class FabricCalculationFrame(ttk.Frame):
         filters = self._filters()
         filter_bits = []
         for label, key in (
-            ("الفرع", "branch_device"),
-            ("النوع", "item_type"),
-            ("المدرسة", "school"),
-            ("اللون", "color"),
-            ("المقاس", "size"),
-            ("من", "date_from"),
-            ("إلى", "date_to"),
-            ("بحث", "text"),
+            ("Ø§Ù„ÙØ±Ø¹", "branch_device"),
+            ("Ø§Ù„Ù†ÙˆØ¹", "item_type"),
+            ("Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", "school"),
+            ("Ø§Ù„Ù„ÙˆÙ†", "color"),
+            ("Ø§Ù„Ù…Ù‚Ø§Ø³", "size"),
+            ("Ù…Ù†", "date_from"),
+            ("Ø¥Ù„Ù‰", "date_to"),
+            ("Ø¨Ø­Ø«", "text"),
         ):
             val = str(filters.get(key) or "").strip()
             if val:
                 filter_bits.append(f"{label}: {_h(val)}")
-        filters_html = " | ".join(filter_bits) if filter_bits else "بدون فلاتر"
+        filters_html = " | ".join(filter_bits) if filter_bits else "Ø¨Ø¯ÙˆÙ† ÙÙ„Ø§ØªØ±"
 
         rows_html = []
         for row in self._last_result.get("rows") or []:
@@ -12777,15 +15348,15 @@ class FabricCalculationFrame(ttk.Frame):
         missing_section = ""
         if missing_html:
             missing_section = f"""
-            <div class="subhead">أوزان غير معرفة</div>
+            <div class="subhead">Ø£ÙˆØ²Ø§Ù† ØºÙŠØ± Ù…Ø¹Ø±ÙØ©</div>
             <table>
               <thead>
                 <tr>
-                  <th>المدرسة</th>
-                  <th>نوع الصنف</th>
-                  <th>اللون</th>
-                  <th>المقاس</th>
-                  <th>المطلوب</th>
+                  <th>Ø§Ù„Ù…Ø¯Ø±Ø³Ø©</th>
+                  <th>Ù†ÙˆØ¹ Ø§Ù„ØµÙ†Ù</th>
+                  <th>Ø§Ù„Ù„ÙˆÙ†</th>
+                  <th>Ø§Ù„Ù…Ù‚Ø§Ø³</th>
+                  <th>Ø§Ù„Ù…Ø·Ù„ÙˆØ¨</th>
                 </tr>
               </thead>
               <tbody>
@@ -12798,7 +15369,7 @@ class FabricCalculationFrame(ttk.Frame):
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8" />
-<title>حساب القماش</title>
+<title>Ø­Ø³Ø§Ø¨ Ø§Ù„Ù‚Ù…Ø§Ø´</title>
 <style>
 @page {{ size: A4 landscape; margin: 10mm; }}
 body {{
@@ -12842,23 +15413,23 @@ tbody tr:nth-child(even) {{ background: #f8fafc; }}
 </head>
 <body>
   <div class="wrap">
-    <div class="title">تقرير حساب القماش</div>
-    <div class="meta">وقت التقرير: {_h(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))}</div>
-    <div class="meta">الفلاتر: {filters_html}</div>
+    <div class="title">ØªÙ‚Ø±ÙŠØ± Ø­Ø³Ø§Ø¨ Ø§Ù„Ù‚Ù…Ø§Ø´</div>
+    <div class="meta">ÙˆÙ‚Øª Ø§Ù„ØªÙ‚Ø±ÙŠØ±: {_h(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))}</div>
+    <div class="meta">Ø§Ù„ÙÙ„Ø§ØªØ±: {filters_html}</div>
     <div class="summary">
-      عدد الصفوف: {int(summary.get('row_count') or 0)} |
-      إجمالي المطلوب: {int(summary.get('requested_qty') or 0)} |
-      إجمالي القماش: {_h(format_weight_kg(summary.get('total_weight_grams') or 0.0))} |
-      أوزان غير معرفة: {int(summary.get('missing_count') or 0)}
+      Ø¹Ø¯Ø¯ Ø§Ù„ØµÙÙˆÙ: {int(summary.get('row_count') or 0)} |
+      Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø·Ù„ÙˆØ¨: {int(summary.get('requested_qty') or 0)} |
+      Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù‚Ù…Ø§Ø´: {_h(format_weight_kg(summary.get('total_weight_grams') or 0.0))} |
+      Ø£ÙˆØ²Ø§Ù† ØºÙŠØ± Ù…Ø¹Ø±ÙØ©: {int(summary.get('missing_count') or 0)}
     </div>
     <table>
       <thead>
         <tr>
-          <th>المدرسة</th>
-          <th>نوع الصنف</th>
-          <th>اللون</th>
-          <th>إجمالي المطلوب</th>
-          <th>إجمالي القماش</th>
+          <th>Ø§Ù„Ù…Ø¯Ø±Ø³Ø©</th>
+          <th>Ù†ÙˆØ¹ Ø§Ù„ØµÙ†Ù</th>
+          <th>Ø§Ù„Ù„ÙˆÙ†</th>
+          <th>Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø·Ù„ÙˆØ¨</th>
+          <th>Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù‚Ù…Ø§Ø´</th>
         </tr>
       </thead>
       <tbody>
@@ -12887,7 +15458,7 @@ class BranchBillsSyncLogWindow(tk.Toplevel):
     def __init__(self, master, db: "SqliteDatabase"):
         super().__init__(master)
         self.db = db
-        self.title("سجل فواتير الفروع والوارد المتزامن")
+        self.title("Ø³Ø¬Ù„ ÙÙˆØ§ØªÙŠØ± Ø§Ù„ÙØ±ÙˆØ¹ ÙˆØ§Ù„ÙˆØ§Ø±Ø¯ Ø§Ù„Ù…ØªØ²Ø§Ù…Ù†")
         self.geometry("1080x620")
         self._build()
 
@@ -12896,20 +15467,20 @@ class BranchBillsSyncLogWindow(tk.Toplevel):
         nb.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         tab_b = ttk.Frame(nb)
-        nb.add(tab_b, text="شحنات صادرة (فواتير فرع)")
+        nb.add(tab_b, text="Ø´Ø­Ù†Ø§Øª ØµØ§Ø¯Ø±Ø© (ÙÙˆØ§ØªÙŠØ± ÙØ±Ø¹)")
         top_b = ttk.Frame(tab_b)
         top_b.pack(fill=tk.X, padx=4, pady=4)
-        ttk.Button(top_b, text="تحديث", command=lambda: self._fill_branch_bills()).pack(side=tk.RIGHT)
+        ttk.Button(top_b, text="ØªØ­Ø¯ÙŠØ«", command=lambda: self._fill_branch_bills()).pack(side=tk.RIGHT)
         wrap_b = ttk.Frame(tab_b)
         wrap_b.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 4))
         cols_b = ("id", "created_at", "customer", "total", "status")
         self._tree_b = ttk.Treeview(wrap_b, columns=cols_b, show="headings", height=18)
         for col, txt, w in [
             ("id", "#", 70),
-            ("created_at", "التاريخ", 170),
-            ("customer", "الفرع / العميل", 260),
-            ("total", "الإجمالي", 100),
-            ("status", "الحالة", 90),
+            ("created_at", "Ø§Ù„ØªØ§Ø±ÙŠØ®", 170),
+            ("customer", "Ø§Ù„ÙØ±Ø¹ / Ø§Ù„Ø¹Ù…ÙŠÙ„", 260),
+            ("total", "Ø§Ù„Ø¥Ø¬Ù…Ø§Ù„ÙŠ", 100),
+            ("status", "Ø§Ù„Ø­Ø§Ù„Ø©", 90),
         ]:
             self._tree_b.heading(col, text=txt)
             self._tree_b.column(col, width=w, anchor="center")
@@ -12920,26 +15491,26 @@ class BranchBillsSyncLogWindow(tk.Toplevel):
         _bind_mousewheel(self._tree_b)
 
         tab_q = ttk.Frame(nb)
-        nb.add(tab_q, text="وارد متزامن (طابور الفروع)")
+        nb.add(tab_q, text="ÙˆØ§Ø±Ø¯ Ù…ØªØ²Ø§Ù…Ù† (Ø·Ø§Ø¨ÙˆØ± Ø§Ù„ÙØ±ÙˆØ¹)")
         top_q = ttk.Frame(tab_q)
         top_q.pack(fill=tk.X, padx=4, pady=4)
-        ttk.Button(top_q, text="تحديث", command=lambda: self._fill_queue()).pack(side=tk.RIGHT)
+        ttk.Button(top_q, text="ØªØ­Ø¯ÙŠØ«", command=lambda: self._fill_queue()).pack(side=tk.RIGHT)
         wrap_q = ttk.Frame(tab_q)
         wrap_q.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 4))
         cols_q = ("id", "kind", "source", "target", "type", "school", "color", "size", "qty", "status", "created_at")
         self._tree_q = ttk.Treeview(wrap_q, columns=cols_q, show="headings", height=18)
         for col, txt, w in [
             ("id", "#", 55),
-            ("kind", "النوع", 80),
-            ("source", "المرسل", 110),
-            ("target", "الهدف", 110),
-            ("type", "الصنف", 140),
-            ("school", "المدرسة", 120),
-            ("color", "اللون", 80),
-            ("size", "المقاس", 70),
-            ("qty", "الكمية", 60),
-            ("status", "الحالة", 100),
-            ("created_at", "التاريخ", 150),
+            ("kind", "Ø§Ù„Ù†ÙˆØ¹", 80),
+            ("source", "Ø§Ù„Ù…Ø±Ø³Ù„", 110),
+            ("target", "Ø§Ù„Ù‡Ø¯Ù", 110),
+            ("type", "Ø§Ù„ØµÙ†Ù", 140),
+            ("school", "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", 120),
+            ("color", "Ø§Ù„Ù„ÙˆÙ†", 80),
+            ("size", "Ø§Ù„Ù…Ù‚Ø§Ø³", 70),
+            ("qty", "Ø§Ù„ÙƒÙ…ÙŠØ©", 60),
+            ("status", "Ø§Ù„Ø­Ø§Ù„Ø©", 100),
+            ("created_at", "Ø§Ù„ØªØ§Ø±ÙŠØ®", 150),
         ]:
             self._tree_q.heading(col, text=txt)
             self._tree_q.column(col, width=w, anchor="center")
@@ -12954,7 +15525,7 @@ class BranchBillsSyncLogWindow(tk.Toplevel):
 
     def _fill_branch_bills(self):
         self._tree_b.delete(*self._tree_b.get_children())
-        status_map = {"DRAFT": "مسودة", "CONFIRMED": "مؤكدة", "VOID": "ملغاة"}
+        status_map = {"DRAFT": "Ù…Ø³ÙˆØ¯Ø©", "CONFIRMED": "Ù…Ø¤ÙƒØ¯Ø©", "VOID": "Ù…Ù„ØºØ§Ø©"}
         for b in self.db.list_bills():
             if b.get("bill_kind") != "BRANCH_SHIPMENT":
                 continue
@@ -12965,7 +15536,7 @@ class BranchBillsSyncLogWindow(tk.Toplevel):
                     b["id"],
                     b.get("created_at") or "",
                     b.get("customer") or "",
-                    f"{float(b.get('total') or 0):.2f}",
+                    f"{format_money(float(b.get('total') or 0))}",
                     st,
                 ),
             )
@@ -12974,7 +15545,7 @@ class BranchBillsSyncLogWindow(tk.Toplevel):
     def _fill_queue(self):
         self._tree_q.delete(*self._tree_q.get_children())
         for row in self.db.list_branch_inventory_queue(None):
-            kind = "مرتجع" if row.get("queue_kind") == "RETURN" else "تحويل"
+            kind = "Ù…Ø±ØªØ¬Ø¹" if row.get("queue_kind") == "RETURN" else "ØªØ­ÙˆÙŠÙ„"
             self._tree_q.insert(
                 "", tk.END,
                 values=(
@@ -13000,14 +15571,14 @@ class PosReservationsMirrorWindow(tk.Toplevel):
     def __init__(self, master, db: "SqliteDatabase"):
         super().__init__(master)
         self.db = db
-        self.title("حجوزات الفروع (مرآة من المزامنة)")
+        self.title("Ø­Ø¬ÙˆØ²Ø§Øª Ø§Ù„ÙØ±ÙˆØ¹ (Ù…Ø±Ø¢Ø© Ù…Ù† Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø©)")
         self.geometry("1220x600")
         self._build()
 
     def _build(self):
         top = ttk.Frame(self)
         top.pack(fill=tk.X, padx=8, pady=8)
-        ttk.Label(top, text="نقطة البيع:").pack(side=tk.RIGHT, padx=4)
+        ttk.Label(top, text="Ù†Ù‚Ø·Ø© Ø§Ù„Ø¨ÙŠØ¹:").pack(side=tk.RIGHT, padx=4)
         pick = self.db.list_pos_reservations_mirror_device_picklist()
         self._dev = tk.StringVar(value="")
         self._dev_cb = ttk.Combobox(
@@ -13017,22 +15588,22 @@ class PosReservationsMirrorWindow(tk.Toplevel):
         self._dev_cb.bind("<<ComboboxSelected>>", lambda _e: self._refresh())
         self._active_only = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            top, text="المعلقة فقط", variable=self._active_only,
+            top, text="Ø§Ù„Ù…Ø¹Ù„Ù‚Ø© ÙÙ‚Ø·", variable=self._active_only,
             command=self._refresh,
         ).pack(side=tk.RIGHT, padx=12)
-        ttk.Button(top, text="تحديث", command=self._refresh).pack(side=tk.LEFT)
+        ttk.Button(top, text="ØªØ­Ø¯ÙŠØ«", command=self._refresh).pack(side=tk.LEFT)
 
         nb = ttk.Notebook(self)
         nb.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
         tab_d = ttk.Frame(nb)
-        nb.add(tab_d, text="تفصيلي (كل حجز)")
+        nb.add(tab_d, text="ØªÙØµÙŠÙ„ÙŠ (ÙƒÙ„ Ø­Ø¬Ø²)")
         ttk.Label(
             tab_d,
             text=(
-                "كل سطر هنا = سطر حجز واحد في المزامنة (معرّفات مختلفة تظهر منفصلة). "
-                "لرؤية إجمالي الكمية لنفس المنتج (نوع + مدرسة + لون + مقاس) بعد جمع كل الأسطر، "
-                "استخدم تبويب «مجمّع حسب المنتج» (يفتح افتراضياً)."
+                "ÙƒÙ„ Ø³Ø·Ø± Ù‡Ù†Ø§ = Ø³Ø·Ø± Ø­Ø¬Ø² ÙˆØ§Ø­Ø¯ ÙÙŠ Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø© (Ù…Ø¹Ø±Ù‘ÙØ§Øª Ù…Ø®ØªÙ„ÙØ© ØªØ¸Ù‡Ø± Ù…Ù†ÙØµÙ„Ø©). "
+                "Ù„Ø±Ø¤ÙŠØ© Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„ÙƒÙ…ÙŠØ© Ù„Ù†ÙØ³ Ø§Ù„Ù…Ù†ØªØ¬ (Ù†ÙˆØ¹ + Ù…Ø¯Ø±Ø³Ø© + Ù„ÙˆÙ† + Ù…Ù‚Ø§Ø³) Ø¨Ø¹Ø¯ Ø¬Ù…Ø¹ ÙƒÙ„ Ø§Ù„Ø£Ø³Ø·Ø±ØŒ "
+                "Ø§Ø³ØªØ®Ø¯Ù… ØªØ¨ÙˆÙŠØ¨ Â«Ù…Ø¬Ù…Ù‘Ø¹ Ø­Ø³Ø¨ Ø§Ù„Ù…Ù†ØªØ¬Â» (ÙŠÙØªØ­ Ø§ÙØªØ±Ø§Ø¶ÙŠØ§Ù‹)."
             ),
             wraplength=1100,
         ).pack(anchor="w", padx=6, pady=(4, 2))
@@ -13044,19 +15615,19 @@ class PosReservationsMirrorWindow(tk.Toplevel):
         )
         self._tree = ttk.Treeview(wrap, columns=cols, show="headings", height=18)
         heads = [
-            ("device", "الجهاز", 110),
-            ("key", "المعرّف", 180),
-            ("customer", "العميل", 120),
-            ("type", "النوع", 110),
-            ("school", "المدرسة", 110),
-            ("color", "اللون", 70),
-            ("size", "المقاس", 55),
-            ("qty", "الكمية", 50),
-            ("price", "السعر", 65),
-            ("total", "الإجمالي", 75),
-            ("paid", "المدفوع", 70),
-            ("status", "الحالة", 85),
-            ("updated", "آخر تحديث", 140),
+            ("device", "Ø§Ù„Ø¬Ù‡Ø§Ø²", 110),
+            ("key", "Ø§Ù„Ù…Ø¹Ø±Ù‘Ù", 180),
+            ("customer", "Ø§Ù„Ø¹Ù…ÙŠÙ„", 120),
+            ("type", "Ø§Ù„Ù†ÙˆØ¹", 110),
+            ("school", "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", 110),
+            ("color", "Ø§Ù„Ù„ÙˆÙ†", 70),
+            ("size", "Ø§Ù„Ù…Ù‚Ø§Ø³", 55),
+            ("qty", "Ø§Ù„ÙƒÙ…ÙŠØ©", 50),
+            ("price", "Ø§Ù„Ø³Ø¹Ø±", 65),
+            ("total", "Ø§Ù„Ø¥Ø¬Ù…Ø§Ù„ÙŠ", 75),
+            ("paid", "Ø§Ù„Ù…Ø¯ÙÙˆØ¹", 70),
+            ("status", "Ø§Ù„Ø­Ø§Ù„Ø©", 85),
+            ("updated", "Ø¢Ø®Ø± ØªØ­Ø¯ÙŠØ«", 140),
         ]
         for col, txt, w in heads:
             self._tree.heading(col, text=txt)
@@ -13068,11 +15639,11 @@ class PosReservationsMirrorWindow(tk.Toplevel):
         _bind_mousewheel(self._tree)
 
         tab_a = ttk.Frame(nb)
-        nb.add(tab_a, text="مجمّع حسب المنتج")
+        nb.add(tab_a, text="Ù…Ø¬Ù…Ù‘Ø¹ Ø­Ø³Ø¨ Ø§Ù„Ù…Ù†ØªØ¬")
         hint = (
-            "تُجمّع كل الأسطر ذات نفس (النوع، المدرسة، اللون، المقاس). "
-            "عند اختيار نقطة بيع يُحسب المجموع لهذا الفرع فقط (بما يتوافق مع الاسم أو المعرّف المخزّن). "
-            "عند ترك «نقطة البيع» فارغاً يُجمع عبر كل الفروع."
+            "ØªÙØ¬Ù…Ù‘Ø¹ ÙƒÙ„ Ø§Ù„Ø£Ø³Ø·Ø± Ø°Ø§Øª Ù†ÙØ³ (Ø§Ù„Ù†ÙˆØ¹ØŒ Ø§Ù„Ù…Ø¯Ø±Ø³Ø©ØŒ Ø§Ù„Ù„ÙˆÙ†ØŒ Ø§Ù„Ù…Ù‚Ø§Ø³). "
+            "Ø¹Ù†Ø¯ Ø§Ø®ØªÙŠØ§Ø± Ù†Ù‚Ø·Ø© Ø¨ÙŠØ¹ ÙŠÙØ­Ø³Ø¨ Ø§Ù„Ù…Ø¬Ù…ÙˆØ¹ Ù„Ù‡Ø°Ø§ Ø§Ù„ÙØ±Ø¹ ÙÙ‚Ø· (Ø¨Ù…Ø§ ÙŠØªÙˆØ§ÙÙ‚ Ù…Ø¹ Ø§Ù„Ø§Ø³Ù… Ø£Ùˆ Ø§Ù„Ù…Ø¹Ø±Ù‘Ù Ø§Ù„Ù…Ø®Ø²Ù‘Ù†). "
+            "Ø¹Ù†Ø¯ ØªØ±Ùƒ Â«Ù†Ù‚Ø·Ø© Ø§Ù„Ø¨ÙŠØ¹Â» ÙØ§Ø±ØºØ§Ù‹ ÙŠÙØ¬Ù…Ø¹ Ø¹Ø¨Ø± ÙƒÙ„ Ø§Ù„ÙØ±ÙˆØ¹."
         )
         ttk.Label(tab_a, text=hint, wraplength=1100).pack(anchor="w", padx=6, pady=(4, 2))
         agg_wrap = ttk.Frame(tab_a)
@@ -13083,17 +15654,17 @@ class PosReservationsMirrorWindow(tk.Toplevel):
         )
         self._tree_agg = ttk.Treeview(agg_wrap, columns=acols, show="headings", height=16)
         ahead = [
-            ("type", "النوع", 120),
-            ("school", "المدرسة", 120),
-            ("color", "اللون", 80),
-            ("size", "المقاس", 60),
-            ("qty", "إجمالي الكمية", 90),
-            ("lines", "عدد الحجوزات", 95),
-            ("branches", "عدد الفروع", 85),
-            ("avg_price", "سعر وسيط", 80),
-            ("sum_total", "إجمالي المبالغ", 95),
-            ("sum_paid", "إجمالي المدفوع", 95),
-            ("updated", "آخر تحديث", 130),
+            ("type", "Ø§Ù„Ù†ÙˆØ¹", 120),
+            ("school", "Ø§Ù„Ù…Ø¯Ø±Ø³Ø©", 120),
+            ("color", "Ø§Ù„Ù„ÙˆÙ†", 80),
+            ("size", "Ø§Ù„Ù…Ù‚Ø§Ø³", 60),
+            ("qty", "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„ÙƒÙ…ÙŠØ©", 90),
+            ("lines", "Ø¹Ø¯Ø¯ Ø§Ù„Ø­Ø¬ÙˆØ²Ø§Øª", 95),
+            ("branches", "Ø¹Ø¯Ø¯ Ø§Ù„ÙØ±ÙˆØ¹", 85),
+            ("avg_price", "Ø³Ø¹Ø± ÙˆØ³ÙŠØ·", 80),
+            ("sum_total", "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø¨Ø§Ù„Øº", 95),
+            ("sum_paid", "Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø¯ÙÙˆØ¹", 95),
+            ("updated", "Ø¢Ø®Ø± ØªØ­Ø¯ÙŠØ«", 130),
         ]
         for col, txt, w in ahead:
             self._tree_agg.heading(col, text=txt)
@@ -13131,9 +15702,9 @@ class PosReservationsMirrorWindow(tk.Toplevel):
                     r.get("color") or "",
                     r.get("size") or "",
                     r.get("qty") or 0,
-                    f"{float(r.get('unit_price') or 0):.2f}",
-                    f"{float(r.get('total_amount') or 0):.2f}",
-                    f"{float(r.get('paid_amount') or 0):.2f}",
+                    f"{format_money(float(r.get('unit_price') or 0))}",
+                    f"{format_money(float(r.get('total_amount') or 0))}",
+                    f"{format_money(float(r.get('paid_amount') or 0))}",
                     r.get("status") or "",
                     r.get("updated_at") or "",
                 ),
@@ -13158,9 +15729,9 @@ class PosReservationsMirrorWindow(tk.Toplevel):
                     int(r.get("agg_qty") or 0),
                     int(r.get("reservation_line_count") or 0),
                     int(r.get("pos_device_count") or 0),
-                    f"{float(r.get('avg_unit_price') or 0):.2f}",
-                    f"{float(r.get('sum_total_amount') or 0):.2f}",
-                    f"{float(r.get('sum_paid_amount') or 0):.2f}",
+                    f"{format_money(float(r.get('avg_unit_price') or 0))}",
+                    f"{format_money(float(r.get('sum_total_amount') or 0))}",
+                    f"{format_money(float(r.get('sum_paid_amount') or 0))}",
                     r.get("last_updated") or "",
                 ),
             )
@@ -13171,36 +15742,36 @@ class PosBranchFinancialWindow(tk.Toplevel):
     """Day-by-day POS cashflow totals from synced events."""
 
     _CAT_AR = {
-        "sale": "مبيعات",
-        "return_bill": "مرتجعات",
-        "void_bill": "إلغاء فواتير",
-        "exchange_net": "استبدال (صافي)",
-        "reservation_downpayment": "عربون حجز",
-        "reservation_payment": "دفعات حجز",
-        "reservation_collect": "تحصيل عند التسليم",
+        "sale": "Ù…Ø¨ÙŠØ¹Ø§Øª",
+        "return_bill": "Ù…Ø±ØªØ¬Ø¹Ø§Øª",
+        "void_bill": "Ø¥Ù„ØºØ§Ø¡ ÙÙˆØ§ØªÙŠØ±",
+        "exchange_net": "Ø§Ø³ØªØ¨Ø¯Ø§Ù„ (ØµØ§ÙÙŠ)",
+        "reservation_downpayment": "Ø¹Ø±Ø¨ÙˆÙ† Ø­Ø¬Ø²",
+        "reservation_payment": "Ø¯ÙØ¹Ø§Øª Ø­Ø¬Ø²",
+        "reservation_collect": "ØªØ­ØµÙŠÙ„ Ø¹Ù†Ø¯ Ø§Ù„ØªØ³Ù„ÙŠÙ…",
     }
 
     def __init__(self, master, db: "SqliteDatabase"):
         super().__init__(master)
         self.db = db
-        self.title("التدفقات المالية للفروع (يومي)")
+        self.title("Ø§Ù„ØªØ¯ÙÙ‚Ø§Øª Ø§Ù„Ù…Ø§Ù„ÙŠØ© Ù„Ù„ÙØ±ÙˆØ¹ (ÙŠÙˆÙ…ÙŠ)")
         self.geometry("1120x580")
         self._build()
 
     def _build(self):
         top = ttk.Frame(self)
         top.pack(fill=tk.X, padx=8, pady=8)
-        ttk.Label(top, text="من تاريخ:").pack(side=tk.RIGHT, padx=4)
+        ttk.Label(top, text="Ù…Ù† ØªØ§Ø±ÙŠØ®:").pack(side=tk.RIGHT, padx=4)
         self._df = DateField(top, "")
         self._df.pack(side=tk.RIGHT)
-        ttk.Label(top, text="إلى:").pack(side=tk.RIGHT, padx=4)
+        ttk.Label(top, text="Ø¥Ù„Ù‰:").pack(side=tk.RIGHT, padx=4)
         self._dt = DateField(top, "")
         self._dt.pack(side=tk.RIGHT)
-        ttk.Label(top, text="الجهاز:").pack(side=tk.RIGHT, padx=4)
+        ttk.Label(top, text="Ø§Ù„Ø¬Ù‡Ø§Ø²:").pack(side=tk.RIGHT, padx=4)
         names = self.db.list_pos_reservations_mirror_device_picklist()
         self._dev = tk.StringVar(value="")
         ttk.Combobox(top, textvariable=self._dev, values=names, width=30, state="readonly").pack(side=tk.RIGHT, padx=4)
-        ttk.Button(top, text="تحديث", command=self._refresh_summary).pack(side=tk.LEFT)
+        ttk.Button(top, text="ØªØ­Ø¯ÙŠØ«", command=self._refresh_summary).pack(side=tk.LEFT)
 
         mid = ttk.Panedwindow(self, orient=tk.VERTICAL)
         mid.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
@@ -13212,15 +15783,15 @@ class PosBranchFinancialWindow(tk.Toplevel):
         )
         self._sum_tree = ttk.Treeview(sum_frame, columns=cols, show="headings", height=10)
         for col, txt, w in [
-            ("day", "اليوم", 100),
-            ("sales", "مبيعات", 90),
-            ("returns", "مرتجعات", 90),
-            ("voids", "إلغاء", 80),
-            ("exch", "استبدال", 90),
-            ("rdep", "عربون", 80),
-            ("rpay", "دفعات حجز", 90),
-            ("rcoll", "تحصيل تسليم", 95),
-            ("net", "الصافي", 100),
+            ("day", "Ø§Ù„ÙŠÙˆÙ…", 100),
+            ("sales", "Ù…Ø¨ÙŠØ¹Ø§Øª", 90),
+            ("returns", "Ù…Ø±ØªØ¬Ø¹Ø§Øª", 90),
+            ("voids", "Ø¥Ù„ØºØ§Ø¡", 80),
+            ("exch", "Ø§Ø³ØªØ¨Ø¯Ø§Ù„", 90),
+            ("rdep", "Ø¹Ø±Ø¨ÙˆÙ†", 80),
+            ("rpay", "Ø¯ÙØ¹Ø§Øª Ø­Ø¬Ø²", 90),
+            ("rcoll", "ØªØ­ØµÙŠÙ„ ØªØ³Ù„ÙŠÙ…", 95),
+            ("net", "Ø§Ù„ØµØ§ÙÙŠ", 100),
         ]:
             self._sum_tree.heading(col, text=txt)
             self._sum_tree.column(col, width=w, anchor="center")
@@ -13231,16 +15802,16 @@ class PosBranchFinancialWindow(tk.Toplevel):
         self._sum_tree.bind("<<TreeviewSelect>>", lambda _e: self._load_detail())
         _bind_mousewheel(self._sum_tree)
 
-        det_fr = ttk.LabelFrame(mid, text="تفاصيل اليوم المحدد")
+        det_fr = ttk.LabelFrame(mid, text="ØªÙØ§ØµÙŠÙ„ Ø§Ù„ÙŠÙˆÙ… Ø§Ù„Ù…Ø­Ø¯Ø¯")
         mid.add(det_fr, weight=3)
         dcols = ("cat", "amount", "etype", "eid", "meta")
         self._det_tree = ttk.Treeview(det_fr, columns=dcols, show="headings", height=14)
         for col, txt, w in [
-            ("cat", "البند", 140),
-            ("amount", "المبلغ", 90),
-            ("etype", "نوع الحدث", 160),
-            ("eid", "مرجع", 220),
-            ("meta", "ملاحظة", 320),
+            ("cat", "Ø§Ù„Ø¨Ù†Ø¯", 140),
+            ("amount", "Ø§Ù„Ù…Ø¨Ù„Øº", 90),
+            ("etype", "Ù†ÙˆØ¹ Ø§Ù„Ø­Ø¯Ø«", 160),
+            ("eid", "Ù…Ø±Ø¬Ø¹", 220),
+            ("meta", "Ù…Ù„Ø§Ø­Ø¸Ø©", 320),
         ]:
             self._det_tree.heading(col, text=txt)
             self._det_tree.column(col, width=w, anchor="center")
@@ -13271,14 +15842,14 @@ class PosBranchFinancialWindow(tk.Toplevel):
                 "", tk.END, iid=str(r.get("day") or ""),
                 values=(
                     r.get("day") or "",
-                    f"{float(r.get('sales_amt') or 0):.2f}",
-                    f"{float(r.get('returns_amt') or 0):.2f}",
-                    f"{float(r.get('voids_amt') or 0):.2f}",
-                    f"{float(r.get('exchange_amt') or 0):.2f}",
-                    f"{float(r.get('res_dep_amt') or 0):.2f}",
-                    f"{float(r.get('res_pay_amt') or 0):.2f}",
-                    f"{float(r.get('res_coll_amt') or 0):.2f}",
-                    f"{float(r.get('net_amt') or 0):.2f}",
+                    f"{format_money(float(r.get('sales_amt') or 0))}",
+                    f"{format_money(float(r.get('returns_amt') or 0))}",
+                    f"{format_money(float(r.get('voids_amt') or 0))}",
+                    f"{format_money(float(r.get('exchange_amt') or 0))}",
+                    f"{format_money(float(r.get('res_dep_amt') or 0))}",
+                    f"{format_money(float(r.get('res_pay_amt') or 0))}",
+                    f"{format_money(float(r.get('res_coll_amt') or 0))}",
+                    f"{format_money(float(r.get('net_amt') or 0))}",
                 ),
             )
         apply_zebra_tags(self._sum_tree)
@@ -13296,7 +15867,7 @@ class PosBranchFinancialWindow(tk.Toplevel):
                 "", tk.END,
                 values=(
                     cat,
-                    f"{float(r.get('amount') or 0):.2f}",
+                    f"{format_money(float(r.get('amount') or 0))}",
                     r.get("event_type") or "",
                     r.get("event_uuid") or "",
                     meta[:400],
@@ -13312,22 +15883,22 @@ class BranchCycleSummaryWindow(tk.Toplevel):
         super().__init__(master)
         self.db = db
         self._row_branch_by_iid: Dict[str, str] = {}
-        self.title("ملخص دورة الفروع")
+        self.title("Ù…Ù„Ø®Øµ Ø¯ÙˆØ±Ø© Ø§Ù„ÙØ±ÙˆØ¹")
         self.geometry("1400x760")
         self._build()
 
     def _build(self):
         top = ttk.Frame(self)
         top.pack(fill=tk.X, padx=8, pady=8)
-        ttk.Label(top, text="من تاريخ:").pack(side=tk.RIGHT, padx=4)
+        ttk.Label(top, text="Ù…Ù† ØªØ§Ø±ÙŠØ®:").pack(side=tk.RIGHT, padx=4)
         self._df = DateField(top, "")
         self._df.pack(side=tk.RIGHT)
-        ttk.Label(top, text="إلى:").pack(side=tk.RIGHT, padx=4)
+        ttk.Label(top, text="Ø¥Ù„Ù‰:").pack(side=tk.RIGHT, padx=4)
         self._dt = DateField(top, "")
         self._dt.pack(side=tk.RIGHT)
-        ttk.Button(top, text="تحديث", command=self._refresh).pack(side=tk.LEFT)
-        ttk.Button(top, text="تسجيل متحصل فعلي…", command=self._add_actual_receipt).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(top, text="حذف المتحصل المحدد", command=self._delete_selected_receipt).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(top, text="ØªØ­Ø¯ÙŠØ«", command=self._refresh).pack(side=tk.LEFT)
+        ttk.Button(top, text="ØªØ³Ø¬ÙŠÙ„ Ù…ØªØ­ØµÙ„ ÙØ¹Ù„ÙŠâ€¦", command=self._add_actual_receipt).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(top, text="Ø­Ø°Ù Ø§Ù„Ù…ØªØ­ØµÙ„ Ø§Ù„Ù…Ø­Ø¯Ø¯", command=self._delete_selected_receipt).pack(side=tk.LEFT, padx=(8, 0))
 
         cols = (
             "branch", "bills", "ship_qty", "ship_value", "cash_net",
@@ -13335,16 +15906,16 @@ class BranchCycleSummaryWindow(tk.Toplevel):
         )
         self._tree = ttk.Treeview(self, columns=cols, show="headings", height=14)
         for col, txt, w in [
-            ("branch", "الفرع", 160),
-            ("bills", "عدد فواتير الشحن", 110),
-            ("ship_qty", "كمية الشحنات", 95),
-            ("ship_value", "قيمة الشحنات", 120),
-            ("cash_net", "صافي المتحصل", 110),
-            ("actual_received", "المستلم فعلياً", 110),
-            ("stock_qty", "كمية المخزون الحالي", 120),
-            ("stock_value", "قيمة المخزون الحالي", 130),
-            ("gap", "فجوة حسب POS", 120),
-            ("actual_gap", "الفجوة الفعلية", 120),
+            ("branch", "Ø§Ù„ÙØ±Ø¹", 160),
+            ("bills", "Ø¹Ø¯Ø¯ ÙÙˆØ§ØªÙŠØ± Ø§Ù„Ø´Ø­Ù†", 110),
+            ("ship_qty", "ÙƒÙ…ÙŠØ© Ø§Ù„Ø´Ø­Ù†Ø§Øª", 95),
+            ("ship_value", "Ù‚ÙŠÙ…Ø© Ø§Ù„Ø´Ø­Ù†Ø§Øª", 120),
+            ("cash_net", "ØµØ§ÙÙŠ Ø§Ù„Ù…ØªØ­ØµÙ„", 110),
+            ("actual_received", "Ø§Ù„Ù…Ø³ØªÙ„Ù… ÙØ¹Ù„ÙŠØ§Ù‹", 110),
+            ("stock_qty", "ÙƒÙ…ÙŠØ© Ø§Ù„Ù…Ø®Ø²ÙˆÙ† Ø§Ù„Ø­Ø§Ù„ÙŠ", 120),
+            ("stock_value", "Ù‚ÙŠÙ…Ø© Ø§Ù„Ù…Ø®Ø²ÙˆÙ† Ø§Ù„Ø­Ø§Ù„ÙŠ", 130),
+            ("gap", "ÙØ¬ÙˆØ© Ø­Ø³Ø¨ POS", 120),
+            ("actual_gap", "Ø§Ù„ÙØ¬ÙˆØ© Ø§Ù„ÙØ¹Ù„ÙŠØ©", 120),
         ]:
             self._tree.heading(col, text=txt)
             self._tree.column(col, width=w, anchor="center")
@@ -13357,7 +15928,7 @@ class BranchCycleSummaryWindow(tk.Toplevel):
         _bind_mousewheel(self._tree)
         self._tree.bind("<<TreeviewSelect>>", lambda _e: self._refresh_receipts())
 
-        receipts = ttk.LabelFrame(self, text="المتحصل الفعلي المسجل للفرع المحدد")
+        receipts = ttk.LabelFrame(self, text="Ø§Ù„Ù…ØªØ­ØµÙ„ Ø§Ù„ÙØ¹Ù„ÙŠ Ø§Ù„Ù…Ø³Ø¬Ù„ Ù„Ù„ÙØ±Ø¹ Ø§Ù„Ù…Ø­Ø¯Ø¯")
         receipts.pack(fill=tk.BOTH, expand=False, padx=8, pady=(0, 8))
         rwrap = ttk.Frame(receipts)
         rwrap.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
@@ -13365,10 +15936,10 @@ class BranchCycleSummaryWindow(tk.Toplevel):
         self._receipt_tree = ttk.Treeview(rwrap, columns=rcols, show="headings", height=7)
         for col, txt, w in [
             ("id", "#", 60),
-            ("date", "التاريخ", 110),
-            ("branch", "الفرع", 150),
-            ("amount", "المبلغ", 100),
-            ("note", "ملاحظة", 520),
+            ("date", "Ø§Ù„ØªØ§Ø±ÙŠØ®", 110),
+            ("branch", "Ø§Ù„ÙØ±Ø¹", 150),
+            ("amount", "Ø§Ù„Ù…Ø¨Ù„Øº", 100),
+            ("note", "Ù…Ù„Ø§Ø­Ø¸Ø©", 520),
         ]:
             self._receipt_tree.heading(col, text=txt)
             self._receipt_tree.column(col, width=w, anchor="center" if col != "note" else "w")
@@ -13392,31 +15963,31 @@ class BranchCycleSummaryWindow(tk.Toplevel):
     def _add_actual_receipt(self) -> None:
         branch_device = self._selected_branch_device()
         if not branch_device:
-            messagebox.showwarning("اختر الفرع", "اختر فرعاً من الجدول أولاً.", parent=self)
+            messagebox.showwarning("Ø§Ø®ØªØ± Ø§Ù„ÙØ±Ø¹", "Ø§Ø®ØªØ± ÙØ±Ø¹Ø§Ù‹ Ù…Ù† Ø§Ù„Ø¬Ø¯ÙˆÙ„ Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
             return
 
         dlg = tk.Toplevel(self)
-        dlg.title("تسجيل متحصل فعلي")
+        dlg.title("ØªØ³Ø¬ÙŠÙ„ Ù…ØªØ­ØµÙ„ ÙØ¹Ù„ÙŠ")
         dlg.transient(self)
         dlg.grab_set()
         frm = ttk.Frame(dlg, padding=12)
         frm.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(frm, text=f"الفرع: {branch_display_name(branch_device)}", font=("Segoe UI", 10, "bold")).grid(
+        ttk.Label(frm, text=f"Ø§Ù„ÙØ±Ø¹: {branch_display_name(branch_device)}", font=("Segoe UI", 10, "bold")).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
         )
-        ttk.Label(frm, text="التاريخ:").grid(row=1, column=0, sticky="e", padx=4, pady=4)
+        ttk.Label(frm, text="Ø§Ù„ØªØ§Ø±ÙŠØ®:").grid(row=1, column=0, sticky="e", padx=4, pady=4)
         date_field = DateField(frm, "")
         current_df = self._df.get()
         if current_df:
             date_field.set(current_df)
         date_field.grid(row=1, column=1, sticky="w", padx=4, pady=4)
 
-        ttk.Label(frm, text="المبلغ:").grid(row=2, column=0, sticky="e", padx=4, pady=4)
+        ttk.Label(frm, text="Ø§Ù„Ù…Ø¨Ù„Øº:").grid(row=2, column=0, sticky="e", padx=4, pady=4)
         amount_var = tk.StringVar()
         ttk.Entry(frm, textvariable=amount_var, width=18).grid(row=2, column=1, sticky="w", padx=4, pady=4)
 
-        ttk.Label(frm, text="ملاحظة:").grid(row=3, column=0, sticky="ne", padx=4, pady=4)
+        ttk.Label(frm, text="Ù…Ù„Ø§Ø­Ø¸Ø©:").grid(row=3, column=0, sticky="ne", padx=4, pady=4)
         note_txt = tk.Text(frm, width=40, height=4)
         note_txt.grid(row=3, column=1, sticky="ew", padx=4, pady=4)
         frm.columnconfigure(1, weight=1)
@@ -13426,9 +15997,11 @@ class BranchCycleSummaryWindow(tk.Toplevel):
 
         def _save() -> None:
             try:
-                amount = float((amount_var.get() or "").strip())
+                amount = parse_float_text(amount_var.get())
+                if amount is None:
+                    raise ValueError
             except Exception:
-                messagebox.showerror("مبلغ غير صالح", "أدخل مبلغاً رقمياً صحيحاً.", parent=dlg)
+                messagebox.showerror("Ù…Ø¨Ù„Øº ØºÙŠØ± ØµØ§Ù„Ø­", "Ø£Ø¯Ø®Ù„ Ù…Ø¨Ù„ØºØ§Ù‹ Ø±Ù‚Ù…ÙŠØ§Ù‹ ØµØ­ÙŠØ­Ø§Ù‹.", parent=dlg)
                 return
             try:
                 self.db.add_branch_cash_receipt(
@@ -13438,29 +16011,32 @@ class BranchCycleSummaryWindow(tk.Toplevel):
                     note=note_txt.get("1.0", tk.END).strip(),
                 )
             except Exception as ex:
-                messagebox.showerror("فشل الحفظ", str(ex), parent=dlg)
+                messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø­ÙØ¸", str(ex), parent=dlg)
                 return
             dlg.destroy()
             self._refresh()
 
-        ttk.Button(btns, text="إلغاء", command=dlg.destroy).pack(side=tk.RIGHT)
-        ttk.Button(btns, text="حفظ", command=_save).pack(side=tk.RIGHT, padx=6)
+        ttk.Button(btns, text="Ø¥Ù„ØºØ§Ø¡", command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Ø­ÙØ¸", command=_save).pack(side=tk.RIGHT, padx=6)
 
     def _delete_selected_receipt(self) -> None:
         sel = self._receipt_tree.selection()
         if not sel:
-            messagebox.showwarning("اختر متحصلاً", "اختر سجل متحصل فعلي من القائمة أولاً.", parent=self)
+            messagebox.showwarning("Ø§Ø®ØªØ± Ù…ØªØ­ØµÙ„Ø§Ù‹", "Ø§Ø®ØªØ± Ø³Ø¬Ù„ Ù…ØªØ­ØµÙ„ ÙØ¹Ù„ÙŠ Ù…Ù† Ø§Ù„Ù‚Ø§Ø¦Ù…Ø© Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
             return
         vals = self._receipt_tree.item(sel[0], "values")
         if not vals:
             return
-        rid = int(vals[0])
-        if not messagebox.askyesno("تأكيد الحذف", "حذف المتحصل المحدد؟", parent=self):
+        rid = parse_int_text(vals[0])
+        if rid is None:
+            messagebox.showerror("Ø¨ÙŠØ§Ù†Ø§Øª ØºÙŠØ± ØµØ§Ù„Ø­Ø©", "Ù…Ø¹Ø±Ù Ø§Ù„Ù…ØªØ­ØµÙ„ ØºÙŠØ± ØµØ§Ù„Ø­.", parent=self)
+            return
+        if not messagebox.askyesno("ØªØ£ÙƒÙŠØ¯ Ø§Ù„Ø­Ø°Ù", "Ø­Ø°Ù Ø§Ù„Ù…ØªØ­ØµÙ„ Ø§Ù„Ù…Ø­Ø¯Ø¯ØŸ", parent=self):
             return
         try:
             self.db.delete_branch_cash_receipt(rid)
         except Exception as ex:
-            messagebox.showerror("فشل الحذف", str(ex), parent=self)
+            messagebox.showerror("ÙØ´Ù„ Ø§Ù„Ø­Ø°Ù", str(ex), parent=self)
             return
         self._refresh()
 
@@ -13480,7 +16056,7 @@ class BranchCycleSummaryWindow(tk.Toplevel):
                     int(r.get("id") or 0),
                     r.get("received_at") or "",
                     branch_display_name(r.get("branch_device") or ""),
-                    f"{float(r.get('amount') or 0.0):.2f}",
+                    f"{format_money(float(r.get('amount') or 0.0))}",
                     r.get("note") or "",
                 ),
             )
@@ -13512,31 +16088,395 @@ class BranchCycleSummaryWindow(tk.Toplevel):
                     r.get("branch_name") or "",
                     int(r.get("shipment_bills_count") or 0),
                     int(r.get("shipment_qty") or 0),
-                    f"{float(r.get('shipment_value') or 0.0):.2f}",
-                    f"{float(r.get('cash_net') or 0.0):.2f}",
-                    f"{float(r.get('actual_received') or 0.0):.2f}",
+                    f"{format_money(float(r.get('shipment_value') or 0.0))}",
+                    f"{format_money(float(r.get('cash_net') or 0.0))}",
+                    f"{format_money(float(r.get('actual_received') or 0.0))}",
                     int(r.get("stock_qty") or 0),
-                    f"{float(r.get('stock_value') or 0.0):.2f}",
-                    f"{float(r.get('cycle_gap') or 0.0):.2f}",
-                    f"{float(r.get('actual_gap') or 0.0):.2f}",
+                    f"{format_money(float(r.get('stock_value') or 0.0))}",
+                    f"{format_money(float(r.get('cycle_gap') or 0.0))}",
+                    f"{format_money(float(r.get('actual_gap') or 0.0))}",
                 ),
             )
             self._row_branch_by_iid[iid] = str(r.get("branch_device") or "")
         apply_zebra_tags(self._tree)
         self._sum.set(
-            f"إجمالي قيمة الشحنات: {t_ship:.2f}  |  إجمالي صافي المتحصل (POS): {t_cash:.2f}  |  "
-            f"إجمالي المستلم فعلياً: {t_actual:.2f}  |  إجمالي قيمة المخزون الحالي: {t_stock:.2f}  |  "
-            f"فجوة POS: {t_gap:.2f}  |  الفجوة الفعلية: {t_actual_gap:.2f}"
+            f"Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ù‚ÙŠÙ…Ø© Ø§Ù„Ø´Ø­Ù†Ø§Øª: {format_money(t_ship)}  |  Ø¥Ø¬Ù…Ø§Ù„ÙŠ ØµØ§ÙÙŠ Ø§Ù„Ù…ØªØ­ØµÙ„ (POS): {format_money(t_cash)}  |  "
+            f"Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ø§Ù„Ù…Ø³ØªÙ„Ù… ÙØ¹Ù„ÙŠØ§Ù‹: {format_money(t_actual)}  |  Ø¥Ø¬Ù…Ø§Ù„ÙŠ Ù‚ÙŠÙ…Ø© Ø§Ù„Ù…Ø®Ø²ÙˆÙ† Ø§Ù„Ø­Ø§Ù„ÙŠ: {format_money(t_stock)}  |  "
+            f"ÙØ¬ÙˆØ© POS: {format_money(t_gap)}  |  Ø§Ù„ÙØ¬ÙˆØ© Ø§Ù„ÙØ¹Ù„ÙŠØ©: {format_money(t_actual_gap)}"
         )
         self._refresh_receipts()
 
 
 # ------------------- App -------------------
 
+class PriceProfileManagerWindow(tk.Toplevel):
+    def __init__(self, master, db: SqliteDatabase):
+        super().__init__(master)
+        self.db = db
+        self.title("Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø±")
+        self.geometry("980x620")
+        self.configure(bg=_UI["BG"])
+        self._selected_profile_id: Optional[int] = None
+        self._profile_rows: List[Dict[str, Any]] = []
+        self._row_vars: List[Tuple[tk.StringVar, tk.StringVar]] = []
+        self._item_type_var = tk.StringVar(value="")
+        self._import_item_var = tk.StringVar(value="")
+        self._profile_title_var = tk.StringVar(value="Ø§Ø®ØªØ± Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø³Ø¹Ø±")
+        self._build()
+        self._refresh_profiles()
+
+    def _build(self):
+        root = ttk.Frame(self, padding=10)
+        root.pack(fill=tk.BOTH, expand=True)
+        root.columnconfigure(1, weight=1)
+        root.rowconfigure(0, weight=1)
+
+        left = ttk.LabelFrame(root, text="Ø§Ù„Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª")
+        left.grid(row=0, column=0, sticky="nsw", padx=(0, 8))
+        right = ttk.LabelFrame(root, text="Ø§Ù„ØªÙØ§ØµÙŠÙ„")
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(2, weight=1)
+
+        self._profiles_list = tk.Listbox(left, height=24)
+        self._profiles_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self._profiles_list.bind("<<ListboxSelect>>", lambda _e: self._on_profile_selected())
+
+        left_btns = ttk.Frame(left)
+        left_btns.pack(fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Button(left_btns, text="Ø¬Ø¯ÙŠØ¯", command=self._create_profile).pack(side=tk.LEFT)
+        ttk.Button(left_btns, text="Ø¥Ø¹Ø§Ø¯Ø© ØªØ³Ù…ÙŠØ©", command=self._rename_profile).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(left_btns, text="Ø­Ø°Ù", command=self._delete_profile).pack(side=tk.LEFT, padx=(6, 0))
+
+        ttk.Label(right, textvariable=self._profile_title_var, font=_FONTS["h2"]).grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
+
+        item_bar = ttk.Frame(right)
+        item_bar.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
+        item_bar.columnconfigure(1, weight=1)
+        ttk.Label(item_bar, text="Ù†ÙˆØ¹ Ø§Ù„ØµÙ†Ù").grid(row=0, column=0, sticky="w")
+        self._item_type_combo = LabeledCombobox(item_bar, "", self.db, "item_type")
+        self._item_type_combo.var = self._item_type_var
+        self._item_type_combo.cb.configure(textvariable=self._item_type_var)
+        self._item_type_combo.grid(row=0, column=1, sticky="ew", padx=6)
+        self._item_type_combo.cb.bind("<<ComboboxSelected>>", lambda _e: self._load_item_prices(), add="+")
+        self._item_type_combo.cb.bind("<Return>", lambda _e: self._load_item_prices(), add="+")
+        self._item_type_combo.cb.bind("<FocusOut>", lambda _e: self._load_item_prices(), add="+")
+        ttk.Button(item_bar, text="ØªØ­Ù…ÙŠÙ„", command=self._load_item_prices).grid(row=0, column=2, padx=(0, 6))
+        ttk.Button(item_bar, text="Ø¥Ø¶Ø§ÙØ© Ù…Ù‚Ø§Ø³", command=self._add_custom_size).grid(row=0, column=3)
+
+        ttk.Label(item_bar, text="Ø§Ø³ØªÙŠØ±Ø§Ø¯ Ù…Ø«Ù„ ØµÙ†Ù").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self._import_item_combo = LabeledCombobox(item_bar, "", self.db, "item_type")
+        self._import_item_combo.var = self._import_item_var
+        self._import_item_combo.cb.configure(textvariable=self._import_item_var)
+        self._import_item_combo.grid(row=1, column=1, sticky="ew", padx=6, pady=(6, 0))
+        self._import_item_combo.cb.bind("<<ComboboxSelected>>", lambda _e: self._import_prices_from_item(), add="+")
+        ttk.Button(item_bar, text="Ø§Ø³ØªÙŠØ±Ø§Ø¯", command=self._import_prices_from_item).grid(row=1, column=2, padx=(0, 6), pady=(6, 0))
+
+        canvas_wrap = ttk.Frame(right)
+        canvas_wrap.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        canvas_wrap.columnconfigure(0, weight=1)
+        canvas_wrap.rowconfigure(0, weight=1)
+        self._rows_canvas = tk.Canvas(canvas_wrap, highlightthickness=0)
+        rows_scroll = ttk.Scrollbar(canvas_wrap, orient="vertical", command=self._rows_canvas.yview)
+        self._rows_canvas.configure(yscrollcommand=rows_scroll.set)
+        self._rows_canvas.grid(row=0, column=0, sticky="nsew")
+        rows_scroll.grid(row=0, column=1, sticky="ns")
+        self._rows_host = ttk.Frame(self._rows_canvas)
+        self._rows_window = self._rows_canvas.create_window((0, 0), window=self._rows_host, anchor="nw")
+        self._rows_host.bind("<Configure>", lambda _e=None: self._sync_rows_canvas())
+        self._rows_canvas.bind("<Configure>", lambda _e=None: self._sync_rows_canvas())
+        _bind_mousewheel(canvas_wrap, self._rows_canvas)
+
+        action_bar = ttk.Frame(right)
+        action_bar.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
+        ttk.Button(action_bar, text="Ø­ÙØ¸ Ø£Ø³Ø¹Ø§Ø± Ù‡Ø°Ø§ Ø§Ù„ØµÙ†Ù", command=self._save_current_item_prices).pack(side=tk.LEFT)
+        ttk.Button(action_bar, text="ØªØ­Ø¯ÙŠØ«", command=self._refresh_current_profile).pack(side=tk.LEFT, padx=(6, 0))
+
+    def _sync_rows_canvas(self):
+        try:
+            self._rows_canvas.configure(scrollregion=self._rows_canvas.bbox("all"))
+            self._rows_canvas.itemconfigure(self._rows_window, width=self._rows_canvas.winfo_width())
+        except Exception:
+            pass
+
+    def _refresh_profiles(self, select_profile_id: Optional[int] = None):
+        self._profile_rows = self.db.list_price_profiles()
+        self._profiles_list.delete(0, tk.END)
+        selected_index = None
+        for idx, row in enumerate(self._profile_rows):
+            label = str(row.get("name") or "").strip()
+            count = int(row.get("assignment_count") or 0)
+            suffix = f" ({count})" if count else ""
+            self._profiles_list.insert(tk.END, f"{label}{suffix}")
+            if select_profile_id and int(row["id"]) == int(select_profile_id):
+                selected_index = idx
+        if selected_index is None and self._profile_rows:
+            selected_index = 0
+        if selected_index is not None:
+            self._profiles_list.selection_clear(0, tk.END)
+            self._profiles_list.selection_set(selected_index)
+            self._profiles_list.activate(selected_index)
+            self._on_profile_selected()
+        else:
+            self._selected_profile_id = None
+            self._profile_title_var.set("Ø§Ø®ØªØ± Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø³Ø¹Ø±")
+            self._item_type_combo.set_supplier(lambda: [])
+            self._import_item_combo.set_supplier(lambda: [])
+            self._item_type_var.set("")
+            self._import_item_var.set("")
+            self._render_price_rows([])
+
+    def _selected_profile_row(self) -> Optional[Dict[str, Any]]:
+        if self._selected_profile_id is None:
+            return None
+        for row in self._profile_rows:
+            if int(row["id"]) == int(self._selected_profile_id):
+                return row
+        return None
+
+    def _on_profile_selected(self):
+        sel = self._profiles_list.curselection()
+        if not sel:
+            return
+        idx = parse_int_text(sel[0], -1)
+        if idx < 0 or idx >= len(self._profile_rows):
+            return
+        self._selected_profile_id = int(self._profile_rows[idx]["id"])
+        self._refresh_current_profile()
+
+    def _refresh_current_profile(self):
+        row = self._selected_profile_row()
+        if row is None:
+            return
+        self._profile_title_var.set(str(row.get("name") or "").strip())
+        item_types = sorted(
+            {
+                *[str(v or "").strip() for v in self.db.get_distinct("item_type")],
+                *self.db.list_price_profile_item_types(self._selected_profile_id),
+            },
+            key=lambda s: s.casefold(),
+        )
+        self._item_type_combo.set_supplier(lambda vals=item_types: vals[:])
+        self._item_type_combo.refresh_values()
+        self._refresh_import_item_choices()
+        if (self._item_type_var.get() or "").strip() not in item_types:
+            self._item_type_var.set(item_types[0] if item_types else "")
+        self._load_item_prices()
+
+    def _refresh_import_item_choices(self):
+        if not self._selected_profile_id:
+            choices: List[str] = []
+        else:
+            current = (self._item_type_var.get() or "").strip().casefold()
+            choices = [
+                item for item in self.db.list_price_profile_item_types(self._selected_profile_id)
+                if item.strip().casefold() != current
+            ]
+        self._import_item_combo.set_supplier(lambda vals=choices: vals[:])
+        self._import_item_combo.refresh_values()
+        if (self._import_item_var.get() or "").strip() not in choices:
+            self._import_item_var.set("")
+
+    def _render_price_rows(self, rows: Sequence[Tuple[str, Optional[float]]]):
+        for child in self._rows_host.winfo_children():
+            child.destroy()
+        self._row_vars = []
+        if not rows:
+            ttk.Label(self._rows_host, text="Ø§Ø®ØªØ± Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø«Ù… Ù†ÙˆØ¹ ØµÙ†Ù Ù„Ø¹Ø±Ø¶ Ø§Ù„Ù…Ù‚Ø§Ø³Ø§Øª ÙˆØ§Ù„Ø£Ø³Ø¹Ø§Ø±.").pack(anchor="w", padx=8, pady=8)
+            return
+        header = ttk.Frame(self._rows_host)
+        header.pack(fill=tk.X, padx=8, pady=(6, 2))
+        ttk.Label(header, text="Ø§Ù„Ù…Ù‚Ø§Ø³", width=20).pack(side=tk.LEFT)
+        ttk.Label(header, text="Ø§Ù„Ø³Ø¹Ø±", width=20).pack(side=tk.LEFT, padx=(8, 0))
+        for size, price in rows:
+            row = ttk.Frame(self._rows_host)
+            row.pack(fill=tk.X, padx=8, pady=2)
+            size_var = tk.StringVar(value=str(size or "").strip())
+            price_var = tk.StringVar(value="" if price is None else format_money(float(price)))
+            ttk.Entry(row, textvariable=size_var, width=18).pack(side=tk.LEFT)
+            ttk.Entry(row, textvariable=price_var, width=18).pack(side=tk.LEFT, padx=(8, 0))
+            self._row_vars.append((size_var, price_var))
+
+    def _load_item_prices(self):
+        if not self._selected_profile_id:
+            self._render_price_rows([])
+            return
+        item_type = (self._item_type_var.get() or "").strip()
+        if not item_type:
+            self._render_price_rows([])
+            return
+        self._refresh_import_item_choices()
+        sizes = self.db.list_sizes_for_price_profile_item(item_type)
+        existing = {
+            str(row.get("size") or "").strip(): row.get("price")
+            for row in self.db.list_price_profile_lines(self._selected_profile_id, item_type=item_type)
+        }
+        merged_sizes = list(sizes)
+        for size in existing:
+            if size and size not in merged_sizes:
+                merged_sizes.append(size)
+        merged_sizes.sort(key=warehouse_size_sort_key)
+        self._render_price_rows([(size, existing.get(size)) for size in merged_sizes])
+
+    def _import_prices_from_item(self):
+        if not self._selected_profile_id:
+            messagebox.showwarning("Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø±", "Ø§Ø®ØªØ± Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
+            return
+        target_item = (self._item_type_var.get() or "").strip()
+        source_item = (self._import_item_var.get() or "").strip()
+        if not target_item:
+            messagebox.showwarning("Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø±", "Ø§Ø®ØªØ± Ù†ÙˆØ¹ Ø§Ù„ØµÙ†Ù Ø§Ù„Ø­Ø§Ù„ÙŠ Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
+            return
+        if not source_item:
+            messagebox.showwarning("Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø±", "Ø§Ø®ØªØ± Ø§Ù„ØµÙ†Ù Ø§Ù„Ø°ÙŠ ØªØ±ÙŠØ¯ Ø§Ù„Ø§Ø³ØªÙŠØ±Ø§Ø¯ Ù…Ù†Ù‡.", parent=self)
+            return
+        if source_item.casefold() == target_item.casefold():
+            messagebox.showwarning("Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø±", "Ø§Ø®ØªØ± ØµÙ†ÙØ§Ù‹ Ù…Ø®ØªÙ„ÙØ§Ù‹ Ù„Ù„Ø§Ø³ØªÙŠØ±Ø§Ø¯ Ù…Ù†Ù‡.", parent=self)
+            return
+
+        source_rows = self.db.list_price_profile_lines(self._selected_profile_id, item_type=source_item)
+        source_prices = {
+            str(row.get("size") or "").strip(): row.get("price")
+            for row in source_rows
+            if str(row.get("size") or "").strip() and row.get("price") is not None
+        }
+        if not source_prices:
+            messagebox.showinfo("Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø±", "Ø§Ù„ØµÙ†Ù Ø§Ù„Ù…Ø®ØªØ§Ø± Ù„Ø§ ÙŠØ­ØªÙˆÙŠ Ø¹Ù„Ù‰ Ø£Ø³Ø¹Ø§Ø± Ù…Ø­ÙÙˆØ¸Ø© ÙÙŠ Ù‡Ø°Ø§ Ø§Ù„Ø¨Ø±ÙˆÙØ§ÙŠÙ„.", parent=self)
+            return
+
+        current_sizes = [sv.get().strip() for sv, _ in self._row_vars if sv.get().strip()]
+        merged_sizes = list(current_sizes)
+        for size in source_prices:
+            if size and size not in merged_sizes:
+                merged_sizes.append(size)
+        merged_sizes.sort(key=warehouse_size_sort_key)
+
+        existing_current: Dict[str, Optional[float]] = {}
+        for size_var, price_var in self._row_vars:
+            size = size_var.get().strip()
+            raw_price = price_var.get().strip()
+            if size:
+                existing_current[size] = parse_float_text(raw_price) if raw_price else None
+
+        rendered_rows: List[Tuple[str, Optional[float]]] = []
+        copied = 0
+        for size in merged_sizes:
+            if size in source_prices:
+                rendered_rows.append((size, parse_float_text(source_prices[size])))
+                copied += 1
+            else:
+                rendered_rows.append((size, existing_current.get(size)))
+        self._render_price_rows(rendered_rows)
+        show_toast(self, f"ØªÙ… Ø§Ø³ØªÙŠØ±Ø§Ø¯ Ø£Ø³Ø¹Ø§Ø± {copied} Ù…Ù‚Ø§Ø³ Ù…Ù† {source_item}")
+
+    def _add_custom_size(self):
+        if not self._selected_profile_id:
+            messagebox.showwarning("Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø±", "Ø§Ø®ØªØ± Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
+            return
+        size = simpledialog.askstring("Ù…Ù‚Ø§Ø³ Ø¬Ø¯ÙŠØ¯", "Ø£Ø¯Ø®Ù„ Ø§Ø³Ù… Ø§Ù„Ù…Ù‚Ø§Ø³:", parent=self)
+        size = str(size or "").strip()
+        if not size:
+            return
+        rows = [(sv.get().strip(), pv.get().strip()) for sv, pv in self._row_vars]
+        sizes = [s for s, _ in rows if s]
+        if size not in sizes:
+            sizes.append(size)
+        sizes.sort(key=warehouse_size_sort_key)
+        existing_prices = {s: p for s, p in rows}
+        rendered_rows: List[Tuple[str, Optional[float]]] = []
+        for label in sizes:
+            raw_price = existing_prices.get(label)
+            if raw_price in ("", None):
+                rendered_rows.append((label, None))
+                continue
+            try:
+                rendered_rows.append((label, parse_float_text(raw_price)))
+            except (TypeError, ValueError):
+                rendered_rows.append((label, None))
+        self._render_price_rows(rendered_rows)
+
+    def _save_current_item_prices(self):
+        if not self._selected_profile_id:
+            messagebox.showwarning("Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø±", "Ø§Ø®ØªØ± Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
+            return
+        item_type = (self._item_type_var.get() or "").strip()
+        if not item_type:
+            messagebox.showwarning("Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø±", "Ø§Ø®ØªØ± Ù†ÙˆØ¹ ØµÙ†Ù Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
+            return
+        rows: List[Dict[str, Any]] = []
+        for size_var, price_var in self._row_vars:
+            size = size_var.get().strip()
+            price_txt = price_var.get().strip()
+            if not size:
+                continue
+            if not price_txt:
+                continue
+            price_val = parse_float_text(price_txt)
+            if price_val is None:
+                messagebox.showwarning("Ø³Ø¹Ø± ØºÙŠØ± ØµØ§Ù„Ø­", f"Ø§Ù„Ø³Ø¹Ø± ØºÙŠØ± ØµØ§Ù„Ø­ Ù„Ù„Ù…Ù‚Ø§Ø³ {size}.", parent=self)
+                return
+            rows.append({"size": size, "price": price_val})
+        try:
+            self.db.replace_price_profile_item_prices(self._selected_profile_id, item_type, rows)
+            result = self.db.apply_price_profile_item_to_assigned_stock(
+                self._selected_profile_id,
+                item_type,
+                note="Price profile prices updated",
+            )
+            self._refresh_profiles(select_profile_id=self._selected_profile_id)
+            show_toast(
+                self,
+                f"ØªÙ… ØªØ­Ø¯ÙŠØ« {result.get('updated', 0)} ØµÙ Ù…Ø®Ø²ÙˆÙ† Ù…Ø±ØªØ¨Ø· Ø¨Ø§Ù„Ø¨Ø±ÙˆÙØ§ÙŠÙ„",
+                bg="#16a34a" if int(result.get("updated", 0) or 0) else "#f59e0b",
+            )
+            show_toast(self, "ØªÙ… Ø­ÙØ¸ Ø£Ø³Ø¹Ø§Ø± Ø§Ù„Ø¨Ø±ÙˆÙØ§ÙŠÙ„")
+        except Exception as ex:
+            messagebox.showerror("Ø®Ø·Ø£", str(ex), parent=self)
+
+    def _create_profile(self):
+        name = simpledialog.askstring("Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø¬Ø¯ÙŠØ¯", "Ø§Ø³Ù… Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø§Ù„Ø³Ø¹Ø±:", parent=self)
+        name = str(name or "").strip()
+        if not name:
+            return
+        try:
+            profile_id = self.db.create_price_profile(name)
+            self._refresh_profiles(select_profile_id=profile_id)
+        except Exception as ex:
+            messagebox.showerror("Ø®Ø·Ø£", str(ex), parent=self)
+
+    def _rename_profile(self):
+        row = self._selected_profile_row()
+        if row is None:
+            messagebox.showwarning("Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø±", "Ø§Ø®ØªØ± Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
+            return
+        name = simpledialog.askstring("Ø¥Ø¹Ø§Ø¯Ø© ØªØ³Ù…ÙŠØ©", "Ø§Ø³Ù… Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø§Ù„Ø³Ø¹Ø±:", initialvalue=str(row.get("name") or "").strip(), parent=self)
+        name = str(name or "").strip()
+        if not name:
+            return
+        try:
+            self.db.rename_price_profile(int(row["id"]), name)
+            self._refresh_profiles(select_profile_id=int(row["id"]))
+        except Exception as ex:
+            messagebox.showerror("Ø®Ø·Ø£", str(ex), parent=self)
+
+    def _delete_profile(self):
+        row = self._selected_profile_row()
+        if row is None:
+            messagebox.showwarning("Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø±", "Ø§Ø®ØªØ± Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø£ÙˆÙ„Ø§Ù‹.", parent=self)
+            return
+        if not messagebox.askyesno("Ø­Ø°Ù", f"Ø­Ø°Ù Ø¨Ø±ÙˆÙØ§ÙŠÙ„ Ø§Ù„Ø³Ø¹Ø±: {row.get('name')}", parent=self):
+            return
+        try:
+            self.db.delete_price_profile(int(row["id"]))
+            self._refresh_profiles()
+        except Exception as ex:
+            messagebox.showerror("Ø®Ø·Ø£", str(ex), parent=self)
+
+
 class WarehouseApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("إدارة المخازن")
+        self.title("Ø¥Ø¯Ø§Ø±Ø© Ø§Ù„Ù…Ø®Ø§Ø²Ù†")
         self.geometry("1320x760")
         self.db = SqliteDatabase(DB_PATH)
         self._dark_mode = False
@@ -13588,38 +16528,38 @@ class WarehouseApp(tk.Tk):
         for d in diffs[:8]:
             lines_preview.append(
                 f"- {d.get('item_type','')} | {d.get('school','')} | {d.get('color','')} | {d.get('size','')}: "
-                f"مرسل {int(d.get('expected_qty') or 0)} / مستلم {int(d.get('received_qty') or 0)}"
+                f"Ù…Ø±Ø³Ù„ {int(d.get('expected_qty') or 0)} / Ù…Ø³ØªÙ„Ù… {int(d.get('received_qty') or 0)}"
             )
-        preview_txt = "\n".join(lines_preview) if lines_preview else "(لا توجد فروقات)"
+        preview_txt = "\n".join(lines_preview) if lines_preview else "(Ù„Ø§ ØªÙˆØ¬Ø¯ ÙØ±ÙˆÙ‚Ø§Øª)"
         msg = (
-            f"مراجعة فرق استلام شحنة من: {source}\n"
-            f"مرجع الشحنة: {shipment[:8] if shipment else '-'}\n"
-            f"عدد مرات إبلاغ هذا الفرع بوجود خطأ: {wrong_count}\n\n"
+            f"Ù…Ø±Ø§Ø¬Ø¹Ø© ÙØ±Ù‚ Ø§Ø³ØªÙ„Ø§Ù… Ø´Ø­Ù†Ø© Ù…Ù†: {source}\n"
+            f"Ù…Ø±Ø¬Ø¹ Ø§Ù„Ø´Ø­Ù†Ø©: {shipment[:8] if shipment else '-'}\n"
+            f"Ø¹Ø¯Ø¯ Ù…Ø±Ø§Øª Ø¥Ø¨Ù„Ø§Øº Ù‡Ø°Ø§ Ø§Ù„ÙØ±Ø¹ Ø¨ÙˆØ¬ÙˆØ¯ Ø®Ø·Ø£: {wrong_count}\n\n"
             f"{preview_txt}\n\n"
-            f"هل تريد اعتماد الكميات التي أبلغ بها الفرع؟"
+            f"Ù‡Ù„ ØªØ±ÙŠØ¯ Ø§Ø¹ØªÙ…Ø§Ø¯ Ø§Ù„ÙƒÙ…ÙŠØ§Øª Ø§Ù„ØªÙŠ Ø£Ø¨Ù„Øº Ø¨Ù‡Ø§ Ø§Ù„ÙØ±Ø¹ØŸ"
         )
-        accept = messagebox.askyesno("مراجعة فروق شحنة فرع", msg, parent=self)
+        accept = messagebox.askyesno("Ù…Ø±Ø§Ø¬Ø¹Ø© ÙØ±ÙˆÙ‚ Ø´Ø­Ù†Ø© ÙØ±Ø¹", msg, parent=self)
         note = ""
         if not accept:
-            note = simpledialog.askstring("سبب الرفض (اختياري)", "اكتب ملاحظة للرفض:", parent=self) or ""
+            note = simpledialog.askstring("Ø³Ø¨Ø¨ Ø§Ù„Ø±ÙØ¶ (Ø§Ø®ØªÙŠØ§Ø±ÙŠ)", "Ø§ÙƒØªØ¨ Ù…Ù„Ø§Ø­Ø¸Ø© Ù„Ù„Ø±ÙØ¶:", parent=self) or ""
         try:
             out = self.db.decide_shipment_receipt_review(int(review["id"]), bool(accept), note)
             if accept:
                 show_toast(
                     self,
-                    f"تم قبول مراجعة الشحنة ({out.get('adjustments_applied', 0)} تعديل).",
+                    f"ØªÙ… Ù‚Ø¨ÙˆÙ„ Ù…Ø±Ø§Ø¬Ø¹Ø© Ø§Ù„Ø´Ø­Ù†Ø© ({out.get('adjustments_applied', 0)} ØªØ¹Ø¯ÙŠÙ„).",
                     bg="#166534",
                     fg="#dcfce7",
                 )
             else:
                 show_toast(
                     self,
-                    "تم رفض مراجعة الشحنة.",
+                    "ØªÙ… Ø±ÙØ¶ Ù…Ø±Ø§Ø¬Ø¹Ø© Ø§Ù„Ø´Ø­Ù†Ø©.",
                     bg="#854d0e",
                     fg="#fef9c3",
                 )
         except Exception as ex:
-            messagebox.showerror("خطأ", str(ex), parent=self)
+            messagebox.showerror("Ø®Ø·Ø£", str(ex), parent=self)
 
     def _bind_shortcuts(self):
         """Global keyboard shortcuts."""
@@ -13776,7 +16716,7 @@ class WarehouseApp(tk.Tk):
             background=[("active", ACCENT_H), ("pressed", ACCENT_H)],
             bordercolor=[("focus", BRAND)])
 
-        # entries / combos — white field, blue focus border
+        # entries / combos â€” white field, blue focus border
         for sty in ("TEntry", "TCombobox", "TSpinbox"):
             s.configure(sty, fieldbackground=SURFACE, background=SURFACE,
                         foreground=TEXT, bordercolor=BORDER,
@@ -13837,52 +16777,57 @@ class WarehouseApp(tk.Tk):
             self._apply_dark_mode(self._dark_mode)
 
         warehouse_menu = tk.Menu(menubar, tearoff=False)
-        warehouse_menu.add_command(label="عرض المخزون (جدول)      Ctrl+I", command=self._open_inventory)
-        warehouse_menu.add_command(label="سجل الحركات", command=self._open_movements)
-        warehouse_menu.add_command(label="سجل الفواتير      Ctrl+P", command=self._open_bills_history)
+        warehouse_menu.add_command(label="Ø¹Ø±Ø¶ Ø§Ù„Ù…Ø®Ø²ÙˆÙ† (Ø¬Ø¯ÙˆÙ„)      Ctrl+I", command=self._open_inventory)
+        warehouse_menu.add_command(label="Ø³Ø¬Ù„ Ø§Ù„Ø­Ø±ÙƒØ§Øª", command=self._open_movements)
+        warehouse_menu.add_command(label="Ø³Ø¬Ù„ Ø§Ù„ÙÙˆØ§ØªÙŠØ±      Ctrl+P", command=self._open_bills_history)
         warehouse_menu.add_separator()
-        warehouse_menu.add_command(label="تحويل بين المخازن", command=self._open_transfer)
-        warehouse_menu.add_command(label="جرد المخزون", command=self._open_audit)
-        menubar.add_cascade(label="إدارة المخزن", menu=warehouse_menu)
+        warehouse_menu.add_command(label="ØªØ­ÙˆÙŠÙ„ Ø¨ÙŠÙ† Ø§Ù„Ù…Ø®Ø§Ø²Ù†", command=self._open_transfer)
+        warehouse_menu.add_command(label="Ø¬Ø±Ø¯ Ø§Ù„Ù…Ø®Ø²ÙˆÙ†", command=self._open_audit)
+        menubar.add_cascade(label="Ø¥Ø¯Ø§Ø±Ø© Ø§Ù„Ù…Ø®Ø²Ù†", menu=warehouse_menu)
 
         branches_menu = tk.Menu(menubar, tearoff=False)
-        branches_menu.add_command(label="مخزون الفروع", command=self._open_branch_stock)
-        branches_menu.add_command(label="منتجات الفروع غير المعالجة", command=self._open_branch_inventory_queue)
+        branches_menu.add_command(label="Ù…Ø®Ø²ÙˆÙ† Ø§Ù„ÙØ±ÙˆØ¹", command=self._open_branch_stock)
+        branches_menu.add_command(label="Ù…Ù†ØªØ¬Ø§Øª Ø§Ù„ÙØ±ÙˆØ¹ ØºÙŠØ± Ø§Ù„Ù…Ø¹Ø§Ù„Ø¬Ø©", command=self._open_branch_inventory_queue)
         branches_menu.add_separator()
-        branches_menu.add_command(label="سجل شحنات الفروع والوارد المتزامن…", command=self._open_branch_bills_sync_log)
-        branches_menu.add_command(label="حجوزات الفروع (مرآة)…", command=self._open_pos_reservations_mirror)
-        branches_menu.add_command(label="التدفقات المالية للفروع (يومي)…", command=self._open_pos_financial_by_day)
-        branches_menu.add_command(label="ملخص دورة الفروع…", command=self._open_branch_cycle_summary)
-        menubar.add_cascade(label="إدارة الفروع", menu=branches_menu)
+        branches_menu.add_command(label="Ø³Ø¬Ù„ Ø´Ø­Ù†Ø§Øª Ø§Ù„ÙØ±ÙˆØ¹ ÙˆØ§Ù„ÙˆØ§Ø±Ø¯ Ø§Ù„Ù…ØªØ²Ø§Ù…Ù†â€¦", command=self._open_branch_bills_sync_log)
+        branches_menu.add_command(label="Ø­Ø¬ÙˆØ²Ø§Øª Ø§Ù„ÙØ±ÙˆØ¹ (Ù…Ø±Ø¢Ø©)â€¦", command=self._open_pos_reservations_mirror)
+        branches_menu.add_command(label="Ø§Ù„ØªØ¯ÙÙ‚Ø§Øª Ø§Ù„Ù…Ø§Ù„ÙŠØ© Ù„Ù„ÙØ±ÙˆØ¹ (ÙŠÙˆÙ…ÙŠ)â€¦", command=self._open_pos_financial_by_day)
+        branches_menu.add_command(label="Ù…Ù„Ø®Øµ Ø¯ÙˆØ±Ø© Ø§Ù„ÙØ±ÙˆØ¹â€¦", command=self._open_branch_cycle_summary)
+        menubar.add_cascade(label="Ø¥Ø¯Ø§Ø±Ø© Ø§Ù„ÙØ±ÙˆØ¹", menu=branches_menu)
+
+        pricing_menu = tk.Menu(menubar, tearoff=False)
+        pricing_menu.add_command(label="Ø¥Ù†Ø´Ø§Ø¡ Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø±â€¦", command=self._open_price_profiles)
+        pricing_menu.add_command(label="Ø³Ø¬Ù„ ØªØ¹Ø¯ÙŠÙ„Ø§Øª Ø£Ø³Ø¹Ø§Ø± Ø§Ù„ÙØ±ÙˆØ¹â€¦", command=self._open_price_sync_audit)
+        menubar.add_cascade(label="Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø±", menu=pricing_menu)
 
         sync_menu = tk.Menu(menubar, tearoff=False)
-        sync_menu.add_command(label="مزامنة الآن…", command=self._open_sync_dialog)
-        sync_menu.add_command(label="إعدادات المزامنة…", command=self._open_sync_setup)
+        sync_menu.add_command(label="Ù…Ø²Ø§Ù…Ù†Ø© Ø§Ù„Ø¢Ù†â€¦", command=self._open_sync_dialog)
+        sync_menu.add_command(label="Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø©â€¦", command=self._open_sync_setup)
         sync_menu.add_separator()
-        sync_menu.add_command(label="سجل تعديلات أسعار الفروع…", command=self._open_price_sync_audit)
-        sync_menu.add_command(label="تشخيص المزامنة (F11)", command=lambda: self._switch_tab("sync_diagnostics"))
-        menubar.add_cascade(label="إدارة المزامنة", menu=sync_menu)
+        sync_menu.add_command(label="Ø³Ø¬Ù„ ØªØ¹Ø¯ÙŠÙ„Ø§Øª Ø£Ø³Ø¹Ø§Ø± Ø§Ù„ÙØ±ÙˆØ¹â€¦", command=self._open_price_sync_audit)
+        sync_menu.add_command(label="ØªØ´Ø®ÙŠØµ Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø© (F11)", command=lambda: self._switch_tab("sync_diagnostics"))
+        menubar.add_cascade(label="Ø¥Ø¯Ø§Ø±Ø© Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø©", menu=sync_menu)
 
         system_menu = tk.Menu(menubar, tearoff=False)
-        system_menu.add_command(label="إعدادات المدير…", command=self._open_admin)
+        system_menu.add_command(label="Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª Ø§Ù„Ù…Ø¯ÙŠØ±â€¦", command=self._open_admin)
         system_menu.add_separator()
 
         appearance = tk.Menu(system_menu, tearoff=False)
-        appearance.add_checkbutton(label="مظهر ملوّن", variable=self._colorful_var, command=_toggle_theme)
-        appearance.add_checkbutton(label="الوضع الليلي", variable=self._dark_var, command=_toggle_dark)
-        system_menu.add_cascade(label="المظهر", menu=appearance)
+        appearance.add_checkbutton(label="Ù…Ø¸Ù‡Ø± Ù…Ù„ÙˆÙ‘Ù†", variable=self._colorful_var, command=_toggle_theme)
+        appearance.add_checkbutton(label="Ø§Ù„ÙˆØ¶Ø¹ Ø§Ù„Ù„ÙŠÙ„ÙŠ", variable=self._dark_var, command=_toggle_dark)
+        system_menu.add_cascade(label="Ø§Ù„Ù…Ø¸Ù‡Ø±", menu=appearance)
 
         shortcuts_menu = tk.Menu(system_menu, tearoff=False)
-        shortcuts_menu.add_command(label="F1  - الوارد", state="disabled")
-        shortcuts_menu.add_command(label="F2  - المنصرف", state="disabled")
-        shortcuts_menu.add_command(label="F3  - المخزون", state="disabled")
-        shortcuts_menu.add_command(label="F4  - الفواتير", state="disabled")
-        shortcuts_menu.add_command(label="F5  - تحديث", state="disabled")
-        shortcuts_menu.add_command(label="F9  - لوحة التحكم", state="disabled")
-        shortcuts_menu.add_command(label="F10 - الإحصائيات", state="disabled")
-        shortcuts_menu.add_command(label="F11 - تشخيص المزامنة", state="disabled")
-        system_menu.add_cascade(label="الاختصارات", menu=shortcuts_menu)
-        menubar.add_cascade(label="النظام", menu=system_menu)
+        shortcuts_menu.add_command(label="F1  - Ø§Ù„ÙˆØ§Ø±Ø¯", state="disabled")
+        shortcuts_menu.add_command(label="F2  - Ø§Ù„Ù…Ù†ØµØ±Ù", state="disabled")
+        shortcuts_menu.add_command(label="F3  - Ø§Ù„Ù…Ø®Ø²ÙˆÙ†", state="disabled")
+        shortcuts_menu.add_command(label="F4  - Ø§Ù„ÙÙˆØ§ØªÙŠØ±", state="disabled")
+        shortcuts_menu.add_command(label="F5  - ØªØ­Ø¯ÙŠØ«", state="disabled")
+        shortcuts_menu.add_command(label="F9  - Ù„ÙˆØ­Ø© Ø§Ù„ØªØ­ÙƒÙ…", state="disabled")
+        shortcuts_menu.add_command(label="F10 - Ø§Ù„Ø¥Ø­ØµØ§Ø¦ÙŠØ§Øª", state="disabled")
+        shortcuts_menu.add_command(label="F11 - ØªØ´Ø®ÙŠØµ Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø©", state="disabled")
+        system_menu.add_cascade(label="Ø§Ù„Ø§Ø®ØªØµØ§Ø±Ø§Øª", menu=shortcuts_menu)
+        menubar.add_cascade(label="Ø§Ù„Ù†Ø¸Ø§Ù…", menu=system_menu)
 
         # ======== HEADER BAR (POS-like light + blue accents) ========
         _HBG = _UI["SURFACE"]
@@ -13895,7 +16840,7 @@ class WarehouseApp(tk.Tk):
         # Brand area (right for RTL)
         brand = tk.Frame(header, bg=_HBG)
         brand.pack(side=tk.RIGHT, padx=16)
-        tk.Label(brand, text="إدارة المخازن", bg=_HBG, fg=_UI["TEXT"],
+        tk.Label(brand, text="Ø¥Ø¯Ø§Ø±Ø© Ø§Ù„Ù…Ø®Ø§Ø²Ù†", bg=_HBG, fg=_UI["TEXT"],
                  font=("Segoe UI", 12, "bold")).pack(side=tk.RIGHT)
         tk.Label(brand, text=" PRO ", bg=_UI["BRAND"], fg="#FFFFFF",
                  font=("Segoe UI", 7, "bold"), padx=4, pady=1).pack(side=tk.RIGHT, padx=(0, 8))
@@ -13908,12 +16853,12 @@ class WarehouseApp(tk.Tk):
         nav.pack(side=tk.RIGHT, padx=8)
         self._nav_btns = []
         nav_items = [
-            ("لوحة التحكم", 0),
-            ("المنصرف", 1),
-            ("الوارد", 2),
-            ("حساب القماش", 3),
-            ("تشخيص المزامنة", 4),
-            ("الإحصائيات", 5),
+            ("Ù„ÙˆØ­Ø© Ø§Ù„ØªØ­ÙƒÙ…", 0),
+            ("Ø§Ù„Ù…Ù†ØµØ±Ù", 1),
+            ("Ø§Ù„ÙˆØ§Ø±Ø¯", 2),
+            ("Ø­Ø³Ø§Ø¨ Ø§Ù„Ù‚Ù…Ø§Ø´", 3),
+            ("ØªØ´Ø®ÙŠØµ Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø©", 4),
+            ("Ø§Ù„Ø¥Ø­ØµØ§Ø¦ÙŠØ§Øª", 5),
         ]
         for text, idx in nav_items:
             b = tk.Button(nav, text=f"  {text}  ", bg=_HBG2, fg=_UI["TEXT_SEC"],
@@ -13937,12 +16882,12 @@ class WarehouseApp(tk.Tk):
                       "padx": 8, "pady": 3, "cursor": "hand2",
                       "activebackground": _UI["BRAND_L"], "activeforeground": _UI["SEL_FG"]}
         for txt, cmd, tip in [
-            ("المخزون", self._open_inventory, "F3 / Ctrl+I"),
-            ("الفواتير", self._open_bills_history, "F4 / Ctrl+P"),
-            ("الحركات", self._open_movements, "سجل الحركات"),
-            ("المدير", self._open_admin, "إعدادات المدير"),
-            ("تحويل", self._open_transfer, "تحويل بين المخازن"),
-            ("جرد", self._open_audit, "جرد المخزون"),
+            ("Ø§Ù„Ù…Ø®Ø²ÙˆÙ†", self._open_inventory, "F3 / Ctrl+I"),
+            ("Ø§Ù„ÙÙˆØ§ØªÙŠØ±", self._open_bills_history, "F4 / Ctrl+P"),
+            ("Ø§Ù„Ø­Ø±ÙƒØ§Øª", self._open_movements, "Ø³Ø¬Ù„ Ø§Ù„Ø­Ø±ÙƒØ§Øª"),
+            ("Ø§Ù„Ù…Ø¯ÙŠØ±", self._open_admin, "Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª Ø§Ù„Ù…Ø¯ÙŠØ±"),
+            ("ØªØ­ÙˆÙŠÙ„", self._open_transfer, "ØªØ­ÙˆÙŠÙ„ Ø¨ÙŠÙ† Ø§Ù„Ù…Ø®Ø§Ø²Ù†"),
+            ("Ø¬Ø±Ø¯", self._open_audit, "Ø¬Ø±Ø¯ Ø§Ù„Ù…Ø®Ø²ÙˆÙ†"),
         ]:
             b = tk.Button(util, text=txt, command=cmd, **_ghost_hdr)
             b.pack(side=tk.LEFT, padx=2)
@@ -13960,22 +16905,22 @@ class WarehouseApp(tk.Tk):
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
 
         self._dashboard = DashboardFrame(self.notebook, self.db, app=self)
-        self.notebook.add(self._dashboard, text="  لوحة التحكم  (F9)  ")
+        self.notebook.add(self._dashboard, text="  Ù„ÙˆØ­Ø© Ø§Ù„ØªØ­ÙƒÙ…  (F9)  ")
 
         self._outcome = OutcomeFrame(self.notebook, self.db)
-        self.notebook.add(self._outcome, text="  المنصرف  (F2)  ")
+        self.notebook.add(self._outcome, text="  Ø§Ù„Ù…Ù†ØµØ±Ù  (F2)  ")
 
         self._income = IncomeFrame(self.notebook, self.db)
-        self.notebook.add(self._income, text="  الوارد  (F1)  ")
+        self.notebook.add(self._income, text="  Ø§Ù„ÙˆØ§Ø±Ø¯  (F1)  ")
 
         self._fabric_calculation = FabricCalculationFrame(self.notebook, self.db)
-        self.notebook.add(self._fabric_calculation, text="  حساب القماش  ")
+        self.notebook.add(self._fabric_calculation, text="  Ø­Ø³Ø§Ø¨ Ø§Ù„Ù‚Ù…Ø§Ø´  ")
 
         self._sync_diagnostics = SyncDiagnosticsFrame(self.notebook, self.db, app=self)
-        self.notebook.add(self._sync_diagnostics, text="  تشخيص المزامنة  (F11)  ")
+        self.notebook.add(self._sync_diagnostics, text="  ØªØ´Ø®ÙŠØµ Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø©  (F11)  ")
 
         self._statistics = StatisticsFrame(self.notebook, self.db)
-        self.notebook.add(self._statistics, text="  الإحصائيات  (F10)  ")
+        self.notebook.add(self._statistics, text="  Ø§Ù„Ø¥Ø­ØµØ§Ø¦ÙŠØ§Øª  (F10)  ")
 
         self.notebook.select(1)
         self._highlight_nav(1)
@@ -14007,7 +16952,7 @@ class WarehouseApp(tk.Tk):
         tk.Label(status, text=f"DB: {DB_PATH}", bg=_UI["SURFACE"],
                  fg=_UI["TEXT_DIM"], font=_FONTS["caption"]).pack(side=tk.LEFT, padx=16)
 
-        self._status_msg = tk.StringVar(value="جاهز")
+        self._status_msg = tk.StringVar(value="Ø¬Ø§Ù‡Ø²")
         tk.Label(status, textvariable=self._status_msg, bg=_UI["SURFACE"],
                  fg=_UI["TEXT_DIM"], font=_FONTS["caption"]).pack(side=tk.RIGHT, padx=8)
 
@@ -14041,56 +16986,62 @@ class WarehouseApp(tk.Tk):
             import sync_ui
             sync_ui.open_sync_dialog(self, self.db.conn)
         except Exception as e:
-            messagebox.showerror("المزامنة", f"تعذّر فتح نافذة المزامنة:\n{e}", parent=self)
+            messagebox.showerror("Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø©", f"ØªØ¹Ø°Ù‘Ø± ÙØªØ­ Ù†Ø§ÙØ°Ø© Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø©:\n{e}", parent=self)
 
     def _open_branch_stock(self):
         try:
             BranchStockWindow(self, self.db)
         except Exception as e:
-            messagebox.showerror("مخزون الفروع", f"تعذّر فتح نافذة مخزون الفروع:\n{e}", parent=self)
+            messagebox.showerror("Ù…Ø®Ø²ÙˆÙ† Ø§Ù„ÙØ±ÙˆØ¹", f"ØªØ¹Ø°Ù‘Ø± ÙØªØ­ Ù†Ø§ÙØ°Ø© Ù…Ø®Ø²ÙˆÙ† Ø§Ù„ÙØ±ÙˆØ¹:\n{e}", parent=self)
 
     def _open_branch_inventory_queue(self):
         try:
             BranchInventoryQueueWindow(self, self.db)
         except Exception as e:
-            messagebox.showerror("منتجات الفروع غير المعالجة", f"تعذّر فتح نافذة المنتجات غير المعالجة:\n{e}", parent=self)
+            messagebox.showerror("Ù…Ù†ØªØ¬Ø§Øª Ø§Ù„ÙØ±ÙˆØ¹ ØºÙŠØ± Ø§Ù„Ù…Ø¹Ø§Ù„Ø¬Ø©", f"ØªØ¹Ø°Ù‘Ø± ÙØªØ­ Ù†Ø§ÙØ°Ø© Ø§Ù„Ù…Ù†ØªØ¬Ø§Øª ØºÙŠØ± Ø§Ù„Ù…Ø¹Ø§Ù„Ø¬Ø©:\n{e}", parent=self)
 
     def _open_sync_setup(self):
         try:
             import sync_ui
             sync_ui.open_sync_setup(self, self.db.conn)
         except Exception as e:
-            messagebox.showerror("المزامنة", f"تعذّر فتح إعدادات المزامنة:\n{e}", parent=self)
+            messagebox.showerror("Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø©", f"ØªØ¹Ø°Ù‘Ø± ÙØªØ­ Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø©:\n{e}", parent=self)
+
+    def _open_price_profiles(self):
+        try:
+            PriceProfileManagerWindow(self, self.db)
+        except Exception as e:
+            messagebox.showerror("Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø±", f"ØªØ¹Ø°Ù‘Ø± ÙØªØ­ Ù†Ø§ÙØ°Ø© Ø¨Ø±ÙˆÙØ§ÙŠÙ„Ø§Øª Ø§Ù„Ø£Ø³Ø¹Ø§Ø±:\n{e}", parent=self)
 
     def _open_price_sync_audit(self):
         try:
             open_price_sync_audit_dialog(self, self.db)
         except Exception as e:
-            messagebox.showerror("سجل أسعار الفروع", f"تعذّر فتح السجل:\n{e}", parent=self)
+            messagebox.showerror("Ø³Ø¬Ù„ Ø£Ø³Ø¹Ø§Ø± Ø§Ù„ÙØ±ÙˆØ¹", f"ØªØ¹Ø°Ù‘Ø± ÙØªØ­ Ø§Ù„Ø³Ø¬Ù„:\n{e}", parent=self)
 
     def _open_branch_bills_sync_log(self):
         try:
             BranchBillsSyncLogWindow(self, self.db)
         except Exception as e:
-            messagebox.showerror("سجل الفروع", f"تعذّر فتح النافذة:\n{e}", parent=self)
+            messagebox.showerror("Ø³Ø¬Ù„ Ø§Ù„ÙØ±ÙˆØ¹", f"ØªØ¹Ø°Ù‘Ø± ÙØªØ­ Ø§Ù„Ù†Ø§ÙØ°Ø©:\n{e}", parent=self)
 
     def _open_pos_reservations_mirror(self):
         try:
             PosReservationsMirrorWindow(self, self.db)
         except Exception as e:
-            messagebox.showerror("حجوزات الفروع", f"تعذّر فتح النافذة:\n{e}", parent=self)
+            messagebox.showerror("Ø­Ø¬ÙˆØ²Ø§Øª Ø§Ù„ÙØ±ÙˆØ¹", f"ØªØ¹Ø°Ù‘Ø± ÙØªØ­ Ø§Ù„Ù†Ø§ÙØ°Ø©:\n{e}", parent=self)
 
     def _open_pos_financial_by_day(self):
         try:
             PosBranchFinancialWindow(self, self.db)
         except Exception as e:
-            messagebox.showerror("التدفقات المالية", f"تعذّر فتح النافذة:\n{e}", parent=self)
+            messagebox.showerror("Ø§Ù„ØªØ¯ÙÙ‚Ø§Øª Ø§Ù„Ù…Ø§Ù„ÙŠØ©", f"ØªØ¹Ø°Ù‘Ø± ÙØªØ­ Ø§Ù„Ù†Ø§ÙØ°Ø©:\n{e}", parent=self)
 
     def _open_branch_cycle_summary(self):
         try:
             BranchCycleSummaryWindow(self, self.db)
         except Exception as e:
-            messagebox.showerror("ملخص دورة الفروع", f"تعذّر فتح النافذة:\n{e}", parent=self)
+            messagebox.showerror("Ù…Ù„Ø®Øµ Ø¯ÙˆØ±Ø© Ø§Ù„ÙØ±ÙˆØ¹", f"ØªØ¹Ø°Ù‘Ø± ÙØªØ­ Ø§Ù„Ù†Ø§ÙØ°Ø©:\n{e}", parent=self)
 
     def _open_inventory(self):
         InventoryWindow(self, self.db)

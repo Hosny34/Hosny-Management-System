@@ -110,30 +110,83 @@ def _apply_size_profile_rows(conn: sqlite3.Connection, profiles: Any) -> int:
         cl = _clean(p.get("color"))
         if not (it and sc and cl):
             continue
-        conn.execute(
-            """
-            INSERT INTO size_profiles
-                (item_type, school, color,
-                 num_start_1, num_end_1, num_start_2, num_end_2,
-                 has_alpha, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-            ON CONFLICT(item_type, school, color) DO UPDATE SET
-                num_start_1 = excluded.num_start_1,
-                num_end_1   = excluded.num_end_1,
-                num_start_2 = excluded.num_start_2,
-                num_end_2   = excluded.num_end_2,
-                has_alpha   = excluded.has_alpha,
-                updated_at  = datetime('now')
-            """,
-            (
-                it, sc, cl,
-                p.get("num_start_1"), p.get("num_end_1"),
-                p.get("num_start_2"), p.get("num_end_2"),
-                int(p.get("has_alpha") or 0),
-            ),
+        values = (
+            p.get("num_start_1"), p.get("num_end_1"),
+            p.get("num_start_2"), p.get("num_end_2"),
+            int(p.get("has_alpha") or 0),
         )
+        cur = conn.execute(
+            """
+            UPDATE size_profiles
+               SET num_start_1 = ?,
+                   num_end_1   = ?,
+                   num_start_2 = ?,
+                   num_end_2   = ?,
+                   has_alpha   = ?,
+                   updated_at  = datetime('now')
+             WHERE item_type = ?
+               AND school = ?
+               AND color = ?
+            """,
+            (*values, it, sc, cl),
+        )
+        if cur.rowcount == 0:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO size_profiles
+                    (item_type, school, color,
+                     num_start_1, num_end_1, num_start_2, num_end_2,
+                     has_alpha, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                """,
+                (it, sc, cl, *values),
+            )
         n += 1
     return n
+
+
+def _update_item_default_price(
+    conn: sqlite3.Connection,
+    item_type: str,
+    price: float,
+) -> None:
+    cur = conn.execute(
+        "UPDATE item_defaults SET default_price = ? WHERE item_type = ?",
+        (float(price), item_type),
+    )
+    if cur.rowcount == 0:
+        conn.execute(
+            "INSERT OR IGNORE INTO item_defaults(item_type, default_price) VALUES(?, ?)",
+            (item_type, float(price)),
+        )
+
+
+def _upsert_pos_stock_snapshot_meta(
+    conn: sqlite3.Connection,
+    source_name: str,
+    snapshot_at: str,
+    inserted: int,
+    total_value: float,
+) -> None:
+    cur = conn.execute(
+        """
+        UPDATE pos_stocks_snapshot_meta
+           SET snapshot_at = ?,
+               row_count   = ?,
+               total_value = ?
+         WHERE source_device = ?
+        """,
+        (snapshot_at, inserted, total_value, source_name),
+    )
+    if cur.rowcount == 0:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO pos_stocks_snapshot_meta
+                (source_device, snapshot_at, row_count, total_value)
+            VALUES (?, ?, ?, ?)
+            """,
+            (source_name, snapshot_at, inserted, total_value),
+        )
 
 
 def _delete_old_spec_history_if_unused(
@@ -239,7 +292,7 @@ def apply_spec_renamed(
         try:
             conn.execute(
                 """
-                INSERT INTO size_profiles
+                INSERT OR IGNORE INTO size_profiles
                     (item_type, school, color,
                      num_start_1, num_end_1, num_start_2, num_end_2,
                      has_alpha, updated_at)
@@ -250,7 +303,6 @@ def apply_spec_renamed(
                  WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
                    AND LOWER(TRIM(school)) = LOWER(TRIM(?))
                    AND LOWER(TRIM(color)) = LOWER(TRIM(?))
-                ON CONFLICT(item_type, school, color) DO NOTHING
                 """,
                 (*new_prof_key, *old_prof_key),
             )
@@ -356,11 +408,10 @@ def apply_stock_transfer_out(
 
         conn.execute(
             """
-            INSERT INTO incoming_shipment_items_pending(
+            INSERT OR IGNORE INTO incoming_shipment_items_pending(
                 shipment_uuid, line_index, item_type, school, color, size,
                 unit_price, expected_qty, received_qty, status
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'PENDING')
-            ON CONFLICT(shipment_uuid, line_index) DO NOTHING
             """,
             (shipment_uuid or event_uuid, queued_rows, it, sc, cl, sz, price, qty),
         )
@@ -370,10 +421,9 @@ def apply_stock_transfer_out(
     profile_rows = _apply_size_profile_rows(conn, payload.get("size_profiles"))
     conn.execute(
         """
-        INSERT INTO incoming_shipment_alerts(
+        INSERT OR IGNORE INTO incoming_shipment_alerts(
             sync_event_uuid, shipment_uuid, from_device, note, total_qty, created_at, shown_at
         ) VALUES (?, ?, ?, ?, ?, ?, NULL)
-        ON CONFLICT(sync_event_uuid) DO NOTHING
         """,
         (
             event_uuid,
@@ -471,11 +521,7 @@ def apply_price_update(
     # price when the item has no stock left later.
     item_types = {r[1] for r in rows}
     for it in item_types:
-        conn.execute(
-            "INSERT INTO item_defaults(item_type, default_price) VALUES(?, ?) "
-            "ON CONFLICT(item_type) DO UPDATE SET default_price = excluded.default_price",
-            (it, new_price),
-        )
+        _update_item_default_price(conn, it, new_price)
 
     return {"updated": len(rows)}
 
@@ -541,16 +587,7 @@ def apply_pos_stock_snapshot(
         inserted += 1
         total_value += price * count
 
-    conn.execute(
-        """INSERT INTO pos_stocks_snapshot_meta
-               (source_device, snapshot_at, row_count, total_value)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(source_device) DO UPDATE SET
-               snapshot_at = excluded.snapshot_at,
-               row_count   = excluded.row_count,
-               total_value = excluded.total_value""",
-        (source_name, snapshot_at, inserted, total_value),
-    )
+    _upsert_pos_stock_snapshot_meta(conn, source_name, snapshot_at, inserted, total_value)
 
     return {"mirrored_rows": inserted, "total_value": total_value}
 
@@ -988,24 +1025,10 @@ def apply_wh_pos_reservation_created(
         alloc_paid = paid_batch if idx == 0 else 0.0
         conn.execute(
             """
-            INSERT INTO pos_reservations_mirror
+            INSERT OR REPLACE INTO pos_reservations_mirror
                 (source_device, reservation_key, customer, item_type, school, color, size,
                  qty, unit_price, total_amount, paid_amount, status, shift_id, last_event_uuid, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'معلق', ?, ?, ?)
-            ON CONFLICT(source_device, reservation_key) DO UPDATE SET
-                customer     = excluded.customer,
-                item_type    = excluded.item_type,
-                school       = excluded.school,
-                color        = excluded.color,
-                size         = excluded.size,
-                qty          = excluded.qty,
-                unit_price   = excluded.unit_price,
-                total_amount = excluded.total_amount,
-                paid_amount  = excluded.paid_amount,
-                status       = 'معلق',
-                shift_id     = excluded.shift_id,
-                last_event_uuid = excluded.last_event_uuid,
-                updated_at   = excluded.updated_at
             """,
             (
                 src, key, customer, it, sc, cl, sz,

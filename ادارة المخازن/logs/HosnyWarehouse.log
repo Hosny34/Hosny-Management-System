@@ -207,3 +207,331 @@ KeyError: 'popdown'
 2026-06-14 16:25:25 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=17468, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
 2026-06-14 16:29:53 INFO hosny: ============================================================
 2026-06-14 16:29:53 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=21676, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-14 19:38:31 INFO hosny: ============================================================
+2026-06-14 19:38:31 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=28568, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-25 19:24:28 INFO hosny: ============================================================
+2026-06-25 19:24:28 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=29168, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-29 13:20:00 INFO hosny: ============================================================
+2026-06-29 13:20:00 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=26688, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-29 18:24:13 INFO hosny: ============================================================
+2026-06-29 18:24:13 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=35808, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-06-29 18:24:14 INFO hosny: ============================================================
+2026-06-29 18:24:14 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=7248, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-05 12:10:31 INFO hosny: ============================================================
+2026-07-05 12:10:31 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=48160, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-05 14:50:05 INFO hosny: ============================================================
+2026-07-05 14:50:05 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=54960, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-05 15:00:17 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 9970, in _edit_price_dialog
+    current_price = float(first[8])
+ValueError: could not convert string to float: '\u200e315\u200e'
+2026-07-05 15:00:31 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 9970, in _edit_price_dialog
+    current_price = float(first[8])
+ValueError: could not convert string to float: '\u200e315\u200e'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 9970, in _edit_price_dialog
+    current_price = float(first[8])
+ValueError: could not convert string to float: '\u200e315\u200e'
+2026-07-05 15:00:35 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 9970, in _edit_price_dialog
+    current_price = float(first[8])
+ValueError: could not convert string to float: '\u200e315\u200e'
+2026-07-05 15:00:38 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 9970, in _edit_price_dialog
+    current_price = float(first[8])
+ValueError: could not convert string to float: '\u200e315\u200e'
+2026-07-05 15:00:41 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 9970, in _edit_price_dialog
+    current_price = float(first[8])
+ValueError: could not convert string to float: '\u200e315\u200e'
+2026-07-05 15:00:41 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 9970, in _edit_price_dialog
+    current_price = float(first[8])
+ValueError: could not convert string to float: '\u200e315\u200e'
+2026-07-05 15:00:45 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 9970, in _edit_price_dialog
+    current_price = float(first[8])
+ValueError: could not convert string to float: '\u200e315\u200e'
+2026-07-05 15:01:09 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 9970, in _edit_price_dialog
+    current_price = float(first[8])
+ValueError: could not convert string to float: '\u200e235\u200e'
+2026-07-05 15:01:10 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 9970, in _edit_price_dialog
+    current_price = float(first[8])
+ValueError: could not convert string to float: '\u200e235\u200e'
+2026-07-05 15:01:10 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 9970, in _edit_price_dialog
+    current_price = float(first[8])
+ValueError: could not convert string to float: '\u200e235\u200e'
+2026-07-05 15:01:12 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 10241, in _edit_specs_dialog
+    ids.append(int(vals[0]))
+               ~~~^^^^^^^^^
+ValueError: invalid literal for int() with base 10: '\u200e614\u200e'
+2026-07-05 15:01:13 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 10241, in _edit_specs_dialog
+    ids.append(int(vals[0]))
+               ~~~^^^^^^^^^
+ValueError: invalid literal for int() with base 10: '\u200e614\u200e'
+2026-07-05 15:01:13 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 10241, in _edit_specs_dialog
+    ids.append(int(vals[0]))
+               ~~~^^^^^^^^^
+ValueError: invalid literal for int() with base 10: '\u200e614\u200e'
+2026-07-05 15:01:20 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 9970, in _edit_price_dialog
+    current_price = float(first[8])
+ValueError: could not convert string to float: '\u200e205\u200e'
+2026-07-05 15:01:21 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 9970, in _edit_price_dialog
+    current_price = float(first[8])
+ValueError: could not convert string to float: '\u200e205\u200e'
+2026-07-05 15:01:21 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 9970, in _edit_price_dialog
+    current_price = float(first[8])
+ValueError: could not convert string to float: '\u200e205\u200e'
+2026-07-05 15:33:31 INFO hosny: ============================================================
+2026-07-05 15:33:31 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=50908, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-14 22:28:55 INFO hosny: ============================================================
+2026-07-14 22:28:55 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=46296, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-15 08:23:07 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 10252, in _edit_specs_dialog
+    ids.append(int(vals[0]))
+               ~~~^^^^^^^^^
+ValueError: invalid literal for int() with base 10: '\u200e264\u200e'
+2026-07-19 19:59:54 INFO hosny: ============================================================
+2026-07-19 19:59:54 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=11944, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-19 20:28:18 INFO hosny: ============================================================
+2026-07-19 20:28:18 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=13692, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-21 18:12:16 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 10252, in _edit_specs_dialog
+    ids.append(int(vals[0]))
+               ~~~^^^^^^^^^
+ValueError: invalid literal for int() with base 10: '\u200e1720\u200e'
+2026-07-21 18:12:24 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 10252, in _edit_specs_dialog
+    ids.append(int(vals[0]))
+               ~~~^^^^^^^^^
+ValueError: invalid literal for int() with base 10: '\u200e1720\u200e'
+2026-07-21 18:12:27 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 10252, in _edit_specs_dialog
+    ids.append(int(vals[0]))
+               ~~~^^^^^^^^^
+ValueError: invalid literal for int() with base 10: '\u200e1720\u200e'
+2026-07-21 18:12:28 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 10252, in _edit_specs_dialog
+    ids.append(int(vals[0]))
+               ~~~^^^^^^^^^
+ValueError: invalid literal for int() with base 10: '\u200e1720\u200e'
+2026-07-21 18:12:29 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 10252, in _edit_specs_dialog
+    ids.append(int(vals[0]))
+               ~~~^^^^^^^^^
+ValueError: invalid literal for int() with base 10: '\u200e1720\u200e'
+2026-07-21 18:12:29 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 10252, in _edit_specs_dialog
+    ids.append(int(vals[0]))
+               ~~~^^^^^^^^^
+ValueError: invalid literal for int() with base 10: '\u200e1720\u200e'
+2026-07-23 13:46:50 INFO hosny: ============================================================
+2026-07-23 13:46:50 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=21252, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-23 13:55:53 INFO hosny: ============================================================
+2026-07-23 13:55:53 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=9536, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-23 17:00:46 INFO hosny: ============================================================
+2026-07-23 17:00:46 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=22204, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-23 17:35:25 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyWarehouse.py", line 10055, in _remove_selected_dialog
+    ids = [int(r[0]) for r in rows]
+           ~~~^^^^^^
+ValueError: invalid literal for int() with base 10: '\u200e1699\u200e'
+2026-07-23 17:36:21 INFO hosny: ============================================================
+2026-07-23 17:36:21 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=25056, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-23 18:27:51 INFO hosny: ============================================================
+2026-07-23 18:27:51 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=13012, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-23 18:55:48 INFO hosny: ============================================================
+2026-07-23 18:55:48 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=10284, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-23 19:14:02 INFO hosny: ============================================================
+2026-07-23 19:14:02 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=17428, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-23 22:22:58 INFO hosny: ============================================================
+2026-07-23 22:22:58 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=18040, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-24 04:44:09 INFO hosny: ============================================================
+2026-07-24 04:44:09 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=10384, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-24 04:44:09 INFO hosny: created 4
+2026-07-24 04:44:09 INFO hosny: 4 2026-07-23T19:22:14 legacy-movement 10 35 16340
+2026-07-24 04:44:09 INFO hosny: 3 2026-07-23T19:12:34 legacy-movement 12 7 2525
+2026-07-24 04:44:09 INFO hosny: 2 2026-07-23T19:02:21 legacy-movement 11 29 10995
+2026-07-24 04:44:09 INFO hosny: 1 2026-07-23T18:09:12 legacy-movement 19 33 11510
+2026-07-24 04:44:16 INFO hosny: ============================================================
+2026-07-24 04:44:16 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=21040, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-24 04:44:17 INFO hosny: created 0
+2026-07-24 04:44:17 INFO hosny: [(4, '2026-07-23T19:22:14', 'legacy-movement', 10, 35, 16340), (3, '2026-07-23T19:12:34', 'legacy-movement', 12, 7, 2525), (2, '2026-07-23T19:02:21', 'legacy-movement', 11, 29, 10995), (1, '2026-07-23T18:09:12', 'legacy-movement', 19, 33, 11510)]
+2026-07-24 04:45:57 INFO hosny: ============================================================
+2026-07-24 04:45:57 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=22848, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-24 13:59:11 INFO hosny: ============================================================
+2026-07-24 13:59:11 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=13144, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-24 14:29:52 INFO hosny: ============================================================
+2026-07-24 14:29:52 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=25880, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-24 14:46:15 INFO hosny: ============================================================
+2026-07-24 14:46:15 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=20444, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-24 15:29:28 INFO hosny: ============================================================
+2026-07-24 15:29:28 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=27760, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-24 15:32:17 INFO hosny: ============================================================
+2026-07-24 15:32:17 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=27788, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-24 15:32:17 INFO hosny: merged 0
+2026-07-24 15:32:17 INFO hosny: [(44, '2026-07-24T15:00:00', 'auto-equalization', 53), (12, '2026-07-24T14:00:00', 'auto-equalization', 32)]
+2026-07-24 15:33:33 INFO hosny: ============================================================
+2026-07-24 15:33:33 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=20736, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 00:06:47 INFO hosny: ============================================================
+2026-07-25 00:06:47 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=21060, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 00:34:12 INFO hosny: ============================================================
+2026-07-25 00:34:12 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=22504, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 00:37:45 INFO hosny: ============================================================
+2026-07-25 00:37:45 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=29452, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 00:42:37 INFO hosny: ============================================================
+2026-07-25 00:42:37 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=28104, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-25 00:42:37 INFO hosny: marked repr= 'â\x80\x8e14â\x80\x8e' stripped= 'â\x80\x8e14â\x80\x8e' norm= 'Â\x80\x8e14Â\x80\x8e'
+2026-07-25 00:42:37 INFO hosny: lookup_marked_size= None
+2026-07-25 00:42:37 ERROR hosny: UNCAUGHT EXCEPTION
+Traceback (most recent call last):
+  File "<stdin>", line 24, in <module>
+TypeError: float() argument must be a string or a real number, not 'NoneType'
+2026-07-25 00:43:14 INFO hosny: ============================================================
+2026-07-25 00:43:14 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=21744, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-25 00:43:14 INFO hosny: marked repr= '\u200e14\u200e'
+2026-07-25 00:43:14 INFO hosny: stripped= '14'
+2026-07-25 00:43:14 INFO hosny: norm= '14'
+2026-07-25 00:43:14 INFO hosny: direct clean rows= []
+2026-07-25 00:43:14 INFO hosny: direct marked normalized rows= []
+2026-07-25 00:44:06 INFO hosny: ============================================================
+2026-07-25 00:44:06 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=29116, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 01:15:40 INFO hosny: ============================================================
+2026-07-25 01:15:40 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=29100, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-25 01:15:41 INFO hosny: propagation= {'updated': 0, 'skipped': 0, 'checked': 0}
+2026-07-25 01:15:41 INFO hosny: row_1380_price= 100.0
+2026-07-25 01:17:53 INFO hosny: ============================================================
+2026-07-25 01:17:53 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=32832, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 11:11:26 INFO hosny: ============================================================
+2026-07-25 11:11:26 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=35948, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 11:44:09 INFO hosny: ============================================================
+2026-07-25 11:44:09 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=34564, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 15:03:04 INFO hosny: ============================================================
+2026-07-25 15:03:04 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=33196, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 15:52:17 INFO hosny: ============================================================
+2026-07-25 15:52:17 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=6900, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 16:26:42 INFO hosny: ============================================================
+2026-07-25 16:26:42 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=2252, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-25 16:26:43 INFO hosny: voided 79
+2026-07-25 16:26:43 INFO hosny: voided 80
+2026-07-25 16:26:43 INFO hosny: voided 81
+2026-07-25 16:26:43 INFO hosny: voided 82
+2026-07-25 16:26:43 INFO hosny: voided 83
+2026-07-25 16:26:43 INFO hosny: voided 84
+2026-07-25 16:26:43 INFO hosny: voided 85
+2026-07-25 16:27:05 INFO hosny: ============================================================
+2026-07-25 16:27:05 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=1232, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-25 16:27:05 INFO hosny: ok bill 1
+2026-07-25 16:27:05 INFO hosny: blocked shortage لا توجد كمية كافية للصنف Tee / School / Blue / M (المطلوب 1، المتاح 0).
+2026-07-25 16:27:27 INFO hosny: ============================================================
+2026-07-25 16:27:27 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=14248, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-25 16:27:27 ERROR hosny: loaded
+2026-07-25 16:27:27 ERROR hosny: ok bill 1
+2026-07-25 16:27:27 ERROR hosny: blocked shortage لا توجد كمية كافية للصنف Tee / School / Blue / M (المطلوب 1، المتاح 0).
+2026-07-25 16:27:27 ERROR hosny: done
+2026-07-25 16:27:45 INFO hosny: ============================================================
+2026-07-25 16:27:45 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=284, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-25 16:28:51 INFO hosny: ============================================================
+2026-07-25 16:28:51 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=9344, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-25 16:33:43 INFO hosny: ============================================================
+2026-07-25 16:33:43 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=4456, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 16:41:32 INFO hosny: ============================================================
+2026-07-25 16:41:32 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=2940, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-25 16:47:05 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "tkinter\__init__.py", line 862, in callit
+  File "HosnyWarehouse.py", line 6226, in _maybe_close_after_blur
+    if self._suspend_set:
+    
+  File "tkinter\__init__.py", line 806, in focus_get
+  File "tkinter\__init__.py", line 1677, in nametowidget
+KeyError: 'popdown'
+2026-07-25 18:17:46 INFO hosny: ============================================================
+2026-07-25 18:17:46 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=17744, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 18:17:46 INFO hosny: branch_count 6
+2026-07-25 18:17:46 INFO hosny: POS-ZAY rows 318 unrelated_zero_rows 0 incoming_sum 1887
+2026-07-25 18:17:46 INFO hosny: POS-OCT rows 14 unrelated_zero_rows 0 incoming_sum 9
+2026-07-25 18:17:46 INFO hosny: POS-OBO rows 0 unrelated_zero_rows 0 incoming_sum 0
+2026-07-25 18:17:46 INFO hosny: POS-GESR rows 0 unrelated_zero_rows 0 incoming_sum 0
+2026-07-25 18:17:46 INFO hosny: POS-BAH rows 0 unrelated_zero_rows 0 incoming_sum 0
+2026-07-25 18:17:47 INFO hosny: POS-CEN rows 0 unrelated_zero_rows 0 incoming_sum 0
+2026-07-25 18:17:57 INFO hosny: ============================================================
+2026-07-25 18:17:57 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=2384, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 18:21:01 INFO hosny: ============================================================
+2026-07-25 18:21:01 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=21228, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 18:41:40 INFO hosny: ============================================================
+2026-07-25 18:41:40 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=21812, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 18:41:56 INFO hosny: ============================================================
+2026-07-25 18:41:56 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=17240, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 18:42:12 INFO hosny: ============================================================
+2026-07-25 18:42:12 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=19016, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 18:42:32 INFO hosny: ============================================================
+2026-07-25 18:42:32 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=11512, cwd=G:\TestManagementSystem\Hosny-Management-System\ادارة المخازن)
+2026-07-25 18:58:53 INFO hosny: ============================================================
+2026-07-25 18:58:53 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=21040, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-25 18:58:53 INFO hosny: targeted_tests passed
+2026-07-25 19:00:47 INFO hosny: ============================================================
+2026-07-25 19:00:47 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=19296, cwd=G:\TestManagementSystem\Hosny-Management-System)

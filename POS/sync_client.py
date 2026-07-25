@@ -25,9 +25,11 @@ Design notes
 from __future__ import annotations
 
 import json
+import os
 import random
 import sqlite3
 import ssl
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -193,18 +195,26 @@ def _set_sync_state(
     new_err = last_error  # explicit pass-through: caller can clear with None
 
     with conn:
-        conn.execute(
+        cur = conn.execute(
             """
-            INSERT INTO sync_state (channel, last_pulled_seq, last_push_at, last_pull_at, last_error)
-                 VALUES ('main', ?, ?, ?, ?)
-            ON CONFLICT(channel) DO UPDATE SET
-                last_pulled_seq = excluded.last_pulled_seq,
-                last_push_at    = excluded.last_push_at,
-                last_pull_at    = excluded.last_pull_at,
-                last_error      = excluded.last_error
+            UPDATE sync_state
+               SET last_pulled_seq = ?,
+                   last_push_at    = ?,
+                   last_pull_at    = ?,
+                   last_error      = ?
+             WHERE channel = 'main'
             """,
             (new_seq, new_push, new_pull, new_err),
         )
+        if cur.rowcount == 0:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO sync_state
+                    (channel, last_pulled_seq, last_push_at, last_pull_at, last_error)
+                VALUES ('main', ?, ?, ?, ?)
+                """,
+                (new_seq, new_push, new_pull, new_err),
+            )
 
 
 # ------------------------------ HTTP helpers ------------------------------ #
@@ -213,8 +223,48 @@ class SyncError(Exception):
     """Any recoverable client-side sync failure. Carries a short reason."""
 
 
+def _candidate_ca_files() -> List[str]:
+    """CA bundle locations, ordered from deploy-local to Python defaults."""
+    candidates: List[str] = []
+    bases = []
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", "")))
+        if exe_dir:
+            bases.append(exe_dir)
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        bases.append(str(meipass))
+    bases.append(os.path.dirname(os.path.abspath(__file__)))
+
+    for base in bases:
+        candidates.append(os.path.join(base, "cacert.pem"))
+
+    try:
+        import certifi  # type: ignore
+
+        candidates.append(certifi.where())
+    except Exception:
+        pass
+
+    seen = set()
+    existing = []
+    for path in candidates:
+        norm = os.path.abspath(path)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        if os.path.isfile(norm):
+            existing.append(norm)
+    return existing
+
+
 def _build_ssl_ctx(verify: bool) -> Optional[ssl.SSLContext]:
     if verify:
+        for cafile in _candidate_ca_files():
+            try:
+                return ssl.create_default_context(cafile=cafile)
+            except Exception:
+                continue
         return ssl.create_default_context()
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -567,21 +617,38 @@ class SyncClient:
                 # applier's transaction rolled back.
                 with self.conn:
                     if next_attempts >= DEAD_LETTER_MAX_ATTEMPTS:
+                        cur = self.conn.execute(
+                            """
+                            UPDATE sync_dead_letter
+                               SET apply_error = ?,
+                                   attempts = ?,
+                                   last_failed_at = ?
+                             WHERE event_uuid = ?
+                            """,
+                            (err_text, next_attempts, now, event_uuid),
+                        )
+                        if cur.rowcount == 0:
+                            self.conn.execute(
+                                """
+                                INSERT OR IGNORE INTO sync_dead_letter
+                                    (event_uuid, event_type, server_seq, source_device, payload_json,
+                                     apply_error, attempts, first_failed_at, last_failed_at)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    event_uuid, event_type, int(server_seq), source_dev, payload_json,
+                                    err_text, next_attempts, now, now,
+                                ),
+                            )
                         self.conn.execute(
                             """
-                            INSERT INTO sync_dead_letter
-                                (event_uuid, event_type, server_seq, source_device, payload_json,
-                                 apply_error, attempts, first_failed_at, last_failed_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT(event_uuid) DO UPDATE SET
-                                apply_error = excluded.apply_error,
-                                attempts = excluded.attempts,
-                                last_failed_at = excluded.last_failed_at
+                            UPDATE sync_dead_letter
+                               SET apply_error = ?,
+                                   attempts = ?,
+                                   last_failed_at = ?
+                             WHERE event_uuid = ?
                             """,
-                            (
-                                event_uuid, event_type, int(server_seq), source_dev, payload_json,
-                                err_text, next_attempts, now, now,
-                            ),
+                            (err_text, next_attempts, now, event_uuid),
                         )
                         self.conn.execute(
                             """
@@ -980,24 +1047,37 @@ class SyncClient:
                 role = (d.get("role") or "").strip()
                 if not name or not role:
                     continue
-                self.conn.execute(
+                cur = self.conn.execute(
                     """
-                    INSERT INTO known_devices
-                        (device_name, device_uuid, role, last_seen_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(device_name) DO UPDATE SET
-                        device_uuid  = excluded.device_uuid,
-                        role         = excluded.role,
-                        last_seen_at = excluded.last_seen_at,
-                        updated_at   = excluded.updated_at
+                    UPDATE known_devices
+                       SET device_uuid  = ?,
+                           role         = ?,
+                           last_seen_at = ?,
+                           updated_at   = ?
+                     WHERE device_name = ?
                     """,
                     (
-                        name,
                         d.get("device_uuid"),
                         role,
                         d.get("last_seen_at"),
                         now,
+                        name,
                     ),
                 )
+                if cur.rowcount == 0:
+                    self.conn.execute(
+                        """
+                        INSERT OR IGNORE INTO known_devices
+                            (device_name, device_uuid, role, last_seen_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            name,
+                            d.get("device_uuid"),
+                            role,
+                            d.get("last_seen_at"),
+                            now,
+                        ),
+                    )
                 written += 1
         return written

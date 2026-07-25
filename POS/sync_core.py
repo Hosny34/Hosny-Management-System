@@ -14,7 +14,7 @@ This module is strictly additive. It does three things:
 Phase 1 does NOT talk to any server. The outbox is populated but never
 drained. Phase 2 (manual sync button) will read from it.
 
-Compatible with Python 3.10+. No external dependencies.
+Compatible with Python 3.7.3+. No external dependencies.
 """
 
 from __future__ import annotations
