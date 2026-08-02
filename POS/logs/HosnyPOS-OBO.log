@@ -1,0 +1,14 @@
+2026-07-27 23:31:53 INFO hosny: ============================================================
+2026-07-27 23:31:53 INFO hosny: HosnyPOS-OBO starting up (frozen=True, pid=47340, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-27 23:36:05 INFO hosny: ============================================================
+2026-07-27 23:36:05 INFO hosny: HosnyPOS-OBO starting up (frozen=False, pid=40792, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-27 23:36:05 INFO hosny: {'sales_total': 190.0, 'reservation_paid': 20.0, 'reservation_delivered': 30.0, 'return_total': 10.0, 'void_total': 40.0, 'exchange_in': 25.0, 'exchange_out': 15.0, 'cash_in': 215.0, 'visa_in': 50.0, 'cash_out': 65.0, 'visa_out': 0.0, 'net_total': 200.0}
+2026-07-27 23:36:07 INFO hosny: school_accounts_cashflow_ok
+2026-07-27 23:40:19 INFO hosny: ============================================================
+2026-07-27 23:40:19 INFO hosny: HosnyPOS-OBO starting up (frozen=False, pid=43136, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-27 23:44:00 INFO hosny: ============================================================
+2026-07-27 23:44:00 INFO hosny: HosnyPOS-OBO starting up (frozen=False, pid=41256, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-27 23:44:47 INFO hosny: ============================================================
+2026-07-27 23:44:47 INFO hosny: HosnyPOS-OBO starting up (frozen=False, pid=43496, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-28 13:05:19 INFO hosny: ============================================================
+2026-07-28 13:05:19 INFO hosny: HosnyPOS-OBO starting up (frozen=True, pid=47836, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)

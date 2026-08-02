@@ -1,0 +1,264 @@
+[2026-07-28 23:30:05] update started
+[2026-07-28 23:30:06] backup created at G:\TestManagementSystem\Hosny-Management-System\POS\backups\2026.07.28.231234_20260728_233006
+[2026-07-28 23:30:06] copied build_pos.bat
+[2026-07-28 23:30:06] copied build_pos_win7_x86.bat
+[2026-07-28 23:30:06] copied cacert.pem
+[2026-07-28 23:30:06] copied Fonts
+[2026-07-28 23:30:06] copied HosnyPOS-win7-x86.spec
+[2026-07-28 23:30:06] copied HosnyPOS.py
+[2026-07-28 23:30:06] copied HosnyPOS.spec
+[2026-07-28 23:30:06] copied logging_setup.py
+[2026-07-28 23:30:06] copied part2_ui.py
+[2026-07-28 23:30:06] copied pos_updater.py
+[2026-07-28 23:30:06] copied pos_version.py
+[2026-07-28 23:30:06] copied sync_appliers.py
+[2026-07-28 23:30:06] copied sync_client.py
+[2026-07-28 23:30:06] copied sync_core.py
+[2026-07-28 23:30:06] copied sync_periodic.py
+[2026-07-28 23:30:06] copied sync_ui.py
+[2026-07-28 23:30:06] copied update_client.py
+[2026-07-28 23:30:06] running G:\TestManagementSystem\Hosny-Management-System\POS\build_pos.bat
+[2026-07-28 23:30:37] dist output promoted
+[2026-07-28 23:30:37] shortcut updated: C:\Users\LENOVO\Desktop\Hosny POS.lnk
+[2026-07-28 23:30:37] update completed
+[2026-07-28 23:44:22] update started
+[2026-07-28 23:44:23] backup created at G:\TestManagementSystem\Hosny-Management-System\POS\backups\2026.07.28.234215_20260728_234422
+[2026-07-28 23:44:23] copied build_pos.bat
+[2026-07-28 23:44:23] copied build_pos_win7_x86.bat
+[2026-07-28 23:44:23] copied cacert.pem
+[2026-07-28 23:44:23] copied Fonts
+[2026-07-28 23:44:23] copied HosnyPOS-win7-x86.spec
+[2026-07-28 23:44:23] copied HosnyPOS.py
+[2026-07-28 23:44:23] copied HosnyPOS.spec
+[2026-07-28 23:44:23] copied logging_setup.py
+[2026-07-28 23:44:23] copied part2_ui.py
+[2026-07-28 23:44:23] copied pos_updater.py
+[2026-07-28 23:44:23] copied pos_version.py
+[2026-07-28 23:44:23] copied sync_appliers.py
+[2026-07-28 23:44:23] copied sync_client.py
+[2026-07-28 23:44:23] copied sync_core.py
+[2026-07-28 23:44:23] copied sync_periodic.py
+[2026-07-28 23:44:23] copied sync_ui.py
+[2026-07-28 23:44:23] copied update_client.py
+[2026-07-28 23:44:23] running G:\TestManagementSystem\Hosny-Management-System\POS\build_pos.bat
+[2026-07-28 23:44:47] dist output promoted
+[2026-07-28 23:44:48] shortcut updated: C:\Users\LENOVO\Desktop\Hosny POS.lnk
+[2026-07-28 23:44:48] restart launched: pid=68592 path=G:\TestManagementSystem\Hosny-Management-System\POS\HosnyPOS.exe
+[2026-07-28 23:44:48] update completed
+[2026-07-28 23:50:13] update started
+[2026-07-28 23:50:14] backup created at G:\TestManagementSystem\Hosny-Management-System\POS\backups\2026.07.28.234835_20260728_235014
+[2026-07-28 23:50:14] copied build_pos.bat
+[2026-07-28 23:50:14] copied build_pos_win7_x86.bat
+[2026-07-28 23:50:14] copied cacert.pem
+[2026-07-28 23:50:14] copied Fonts
+[2026-07-28 23:50:14] copied HosnyPOS-win7-x86.spec
+[2026-07-28 23:50:14] copied HosnyPOS.py
+[2026-07-28 23:50:14] copied HosnyPOS.spec
+[2026-07-28 23:50:14] copied logging_setup.py
+[2026-07-28 23:50:14] copied part2_ui.py
+[2026-07-28 23:50:14] copied pos_updater.py
+[2026-07-28 23:50:14] copied pos_version.py
+[2026-07-28 23:50:14] copied sync_appliers.py
+[2026-07-28 23:50:14] copied sync_client.py
+[2026-07-28 23:50:14] copied sync_core.py
+[2026-07-28 23:50:14] copied sync_periodic.py
+[2026-07-28 23:50:14] copied sync_ui.py
+[2026-07-28 23:50:14] copied update_client.py
+[2026-07-28 23:50:14] running G:\TestManagementSystem\Hosny-Management-System\POS\build_pos.bat
+[2026-07-28 23:50:38] update failed: build_pos.bat failed with exit code 1. Make sure this POS PC has a Python installation that can import tkinter.
+[2026-07-28 23:50:38] backup restored from G:\TestManagementSystem\Hosny-Management-System\POS\backups\2026.07.28.234835_20260728_235014
+[2026-07-28 23:50:38] restart launched: pid=58812 path=G:\TestManagementSystem\Hosny-Management-System\POS\HosnyPOS.exe
+[2026-07-28 23:51:03] update started
+[2026-07-28 23:51:04] backup created at G:\TestManagementSystem\Hosny-Management-System\POS\backups\2026.07.28.234835_20260728_235104
+[2026-07-28 23:51:04] copied build_pos.bat
+[2026-07-28 23:51:04] copied build_pos_win7_x86.bat
+[2026-07-28 23:51:04] copied cacert.pem
+[2026-07-28 23:51:04] copied Fonts
+[2026-07-28 23:51:04] copied HosnyPOS-win7-x86.spec
+[2026-07-28 23:51:04] copied HosnyPOS.py
+[2026-07-28 23:51:04] copied HosnyPOS.spec
+[2026-07-28 23:51:04] copied logging_setup.py
+[2026-07-28 23:51:04] copied part2_ui.py
+[2026-07-28 23:51:04] copied pos_updater.py
+[2026-07-28 23:51:04] copied pos_version.py
+[2026-07-28 23:51:04] copied sync_appliers.py
+[2026-07-28 23:51:04] copied sync_client.py
+[2026-07-28 23:51:04] copied sync_core.py
+[2026-07-28 23:51:04] copied sync_periodic.py
+[2026-07-28 23:51:04] copied sync_ui.py
+[2026-07-28 23:51:04] copied update_client.py
+[2026-07-28 23:51:04] running G:\TestManagementSystem\Hosny-Management-System\POS\build_pos.bat
+[2026-07-28 23:51:27] update failed: build_pos.bat failed with exit code 1. Make sure this POS PC has a Python installation that can import tkinter.
+[2026-07-28 23:51:27] backup restored from G:\TestManagementSystem\Hosny-Management-System\POS\backups\2026.07.28.234835_20260728_235104
+[2026-07-28 23:51:27] restart launched: pid=69172 path=G:\TestManagementSystem\Hosny-Management-System\POS\HosnyPOS.exe
+[2026-07-29 00:35:06] update started
+[2026-07-29 00:35:07] backup created at G:\TestManagementSystem\Hosny-Management-System\POS\backups\2026.07.29.000857_20260729_003507
+[2026-07-29 00:35:07] copied build_pos.bat
+[2026-07-29 00:35:07] copied build_pos_win7_x86.bat
+[2026-07-29 00:35:07] copied cacert.pem
+[2026-07-29 00:35:07] copied Fonts
+[2026-07-29 00:35:07] copied HosnyPOS-win7-x86.spec
+[2026-07-29 00:35:07] update failed: [WinError 32] The process cannot access the file because it is being used by another process
+[2026-07-29 00:35:07] rollback failed: [WinError 5] Access is denied: 'G:\\TestManagementSystem\\Hosny-Management-System\\POS\\HosnyPOS.exe'
+[2026-07-29 00:35:07] restart launched: pid=64148 path=G:\TestManagementSystem\Hosny-Management-System\POS\HosnyPOS.exe
+[2026-07-29 00:41:40] update started
+[2026-07-29 00:41:40] backup created at G:\TestManagementSystem\Hosny-Management-System\POS\backups\2026.07.29.004046_20260729_004140
+[2026-07-29 00:41:40] copied build_pos.bat
+[2026-07-29 00:41:40] copied build_pos_win7_x86.bat
+[2026-07-29 00:41:40] copied cacert.pem
+[2026-07-29 00:41:40] copied Fonts
+[2026-07-29 00:41:40] copied HosnyPOS-win7-x86.spec
+[2026-07-29 00:41:40] copied HosnyPOS.py
+[2026-07-29 00:41:40] copied HosnyPOS.spec
+[2026-07-29 00:41:40] copied logging_setup.py
+[2026-07-29 00:41:40] copied part2_ui.py
+[2026-07-29 00:41:40] copied pos_updater.py
+[2026-07-29 00:41:40] copied pos_version.py
+[2026-07-29 00:41:40] copied prebuilt
+[2026-07-29 00:41:40] copied prebuilt_update.json
+[2026-07-29 00:41:40] copied sync_appliers.py
+[2026-07-29 00:41:40] copied sync_client.py
+[2026-07-29 00:41:40] copied sync_core.py
+[2026-07-29 00:41:40] copied sync_periodic.py
+[2026-07-29 00:41:40] copied sync_ui.py
+[2026-07-29 00:41:40] copied update_client.py
+[2026-07-29 00:41:40] verifying prebuilt executable: G:\TestManagementSystem\Hosny-Management-System\sync_server\Hosny-sync-server\updates\pos\work\source\POS\prebuilt\HosnyPOS.exe
+[2026-07-29 00:41:44] prebuilt package prepared in dist
+[2026-07-29 00:41:44] update failed: [WinError 32] The process cannot access the file because it is being used by another process
+[2026-07-29 00:41:44] rollback failed: [WinError 5] Access is denied: 'G:\\TestManagementSystem\\Hosny-Management-System\\POS\\HosnyPOS.exe'
+[2026-07-29 00:48:02] update started
+[2026-07-29 00:48:04] backup created at G:\TestManagementSystem\Hosny-Management-System\POS\backups\2026.07.29.004046_20260729_004804
+[2026-07-29 00:48:04] copied build_pos.bat
+[2026-07-29 00:48:04] copied build_pos_win7_x86.bat
+[2026-07-29 00:48:04] copied cacert.pem
+[2026-07-29 00:48:04] copied Fonts
+[2026-07-29 00:48:04] copied HosnyPOS-win7-x86.spec
+[2026-07-29 00:48:04] copied HosnyPOS.py
+[2026-07-29 00:48:04] copied HosnyPOS.spec
+[2026-07-29 00:48:04] copied logging_setup.py
+[2026-07-29 00:48:04] copied part2_ui.py
+[2026-07-29 00:48:04] copied pos_updater.py
+[2026-07-29 00:48:04] copied pos_version.py
+[2026-07-29 00:48:04] copied prebuilt
+[2026-07-29 00:48:04] copied prebuilt_update.json
+[2026-07-29 00:48:04] copied sync_appliers.py
+[2026-07-29 00:48:04] copied sync_client.py
+[2026-07-29 00:48:04] copied sync_core.py
+[2026-07-29 00:48:04] copied sync_periodic.py
+[2026-07-29 00:48:04] copied sync_ui.py
+[2026-07-29 00:48:04] copied update_client.py
+[2026-07-29 00:48:04] verifying prebuilt executable: G:\TestManagementSystem\Hosny-Management-System\sync_server\Hosny-sync-server\updates\pos\work\source\POS\prebuilt\HosnyPOS.exe
+[2026-07-29 00:48:07] prebuilt package prepared in dist
+[2026-07-29 00:48:08] dist output promoted
+[2026-07-29 00:48:08] shortcut updated: C:\Users\LENOVO\Desktop\Hosny POS.lnk
+[2026-07-29 00:48:08] update completed
+[2026-07-29 00:52:08] update started
+[2026-07-29 00:52:11] backup created at G:\TestManagementSystem\Hosny-Management-System\POS\backups\2026.07.29.004856_20260729_005210
+[2026-07-29 00:52:11] copied build_pos.bat
+[2026-07-29 00:52:11] copied build_pos_win7_x86.bat
+[2026-07-29 00:52:11] copied cacert.pem
+[2026-07-29 00:52:11] copied Fonts
+[2026-07-29 00:52:11] copied HosnyPOS-win7-x86.spec
+[2026-07-29 00:52:11] copied HosnyPOS.py
+[2026-07-29 00:52:11] copied HosnyPOS.spec
+[2026-07-29 00:52:11] copied logging_setup.py
+[2026-07-29 00:52:11] copied part2_ui.py
+[2026-07-29 00:52:11] copied pos_updater.py
+[2026-07-29 00:52:11] copied pos_version.py
+[2026-07-29 00:52:11] copied prebuilt
+[2026-07-29 00:52:11] copied prebuilt_update.json
+[2026-07-29 00:52:11] copied sync_appliers.py
+[2026-07-29 00:52:11] copied sync_client.py
+[2026-07-29 00:52:11] copied sync_core.py
+[2026-07-29 00:52:11] copied sync_periodic.py
+[2026-07-29 00:52:11] copied sync_ui.py
+[2026-07-29 00:52:11] copied update_client.py
+[2026-07-29 00:52:11] verifying prebuilt executable: G:\TestManagementSystem\Hosny-Management-System\sync_server\Hosny-sync-server\updates\pos\work\source\POS\prebuilt\HosnyPOS.exe
+[2026-07-29 00:52:14] prebuilt package prepared in dist
+[2026-07-29 00:52:14] dist output promoted
+[2026-07-29 00:52:14] shortcut updated: C:\Users\LENOVO\Desktop\Hosny POS.lnk
+[2026-07-29 00:52:14] update completed
+[2026-07-29 01:11:46] update started
+[2026-07-29 01:11:47] backup created at G:\TestManagementSystem\Hosny-Management-System\POS\backups\2026.07.29.005406_20260729_011147
+[2026-07-29 01:11:47] copied build_pos.bat
+[2026-07-29 01:11:47] copied build_pos_win7_x86.bat
+[2026-07-29 01:11:47] copied cacert.pem
+[2026-07-29 01:11:47] copied Fonts
+[2026-07-29 01:11:47] copied HosnyPOS-win7-x86.spec
+[2026-07-29 01:11:47] copied HosnyPOS.py
+[2026-07-29 01:11:47] copied HosnyPOS.spec
+[2026-07-29 01:11:47] copied logging_setup.py
+[2026-07-29 01:11:47] copied part2_ui.py
+[2026-07-29 01:11:47] copied pos_updater.py
+[2026-07-29 01:11:47] copied pos_version.py
+[2026-07-29 01:11:47] copied prebuilt
+[2026-07-29 01:11:47] copied prebuilt_update.json
+[2026-07-29 01:11:47] copied sync_appliers.py
+[2026-07-29 01:11:47] copied sync_client.py
+[2026-07-29 01:11:47] copied sync_core.py
+[2026-07-29 01:11:47] copied sync_periodic.py
+[2026-07-29 01:11:47] copied sync_ui.py
+[2026-07-29 01:11:47] copied update_client.py
+[2026-07-29 01:11:47] verifying prebuilt executable: C:\Users\LENOVO\AppData\Local\Temp\HosnyPOSUpdates\2026.07.29.005406_20260729_011137\work\source\POS\prebuilt\HosnyPOS.exe
+[2026-07-29 01:11:50] prebuilt package prepared in dist
+[2026-07-29 01:11:50] dist output promoted
+[2026-07-29 01:11:51] shortcut updated: C:\Users\LENOVO\Desktop\Hosny POS.lnk
+[2026-07-29 01:11:51] restart launched: pid=75524 path=G:\TestManagementSystem\Hosny-Management-System\POS\HosnyPOS.exe
+[2026-07-29 01:11:51] update completed
+[2026-07-29 01:18:39] update started
+[2026-07-29 01:18:41] backup created at G:\TestManagementSystem\Hosny-Management-System\POS\backups\2026.07.29.011522_20260729_011841
+[2026-07-29 01:18:41] copied build_pos.bat
+[2026-07-29 01:18:41] copied build_pos_win7_x86.bat
+[2026-07-29 01:18:41] copied cacert.pem
+[2026-07-29 01:18:41] copied Fonts
+[2026-07-29 01:18:41] copied HosnyPOS-win7-x86.spec
+[2026-07-29 01:18:41] copied HosnyPOS.py
+[2026-07-29 01:18:41] copied HosnyPOS.spec
+[2026-07-29 01:18:41] copied logging_setup.py
+[2026-07-29 01:18:41] copied part2_ui.py
+[2026-07-29 01:18:41] copied pos_updater.py
+[2026-07-29 01:18:41] copied pos_version.py
+[2026-07-29 01:18:41] copied prebuilt
+[2026-07-29 01:18:41] copied prebuilt_update.json
+[2026-07-29 01:18:41] copied sync_appliers.py
+[2026-07-29 01:18:41] copied sync_client.py
+[2026-07-29 01:18:41] copied sync_core.py
+[2026-07-29 01:18:41] copied sync_periodic.py
+[2026-07-29 01:18:41] copied sync_ui.py
+[2026-07-29 01:18:41] copied update_client.py
+[2026-07-29 01:18:41] verifying prebuilt executable: C:\Users\LENOVO\AppData\Local\Temp\HosnyPOSUpdates\2026.07.29.011522_20260729_011831\work\source\POS\prebuilt\HosnyPOS.exe
+[2026-07-29 01:18:46] prebuilt package prepared in dist
+[2026-07-29 01:18:46] dist output promoted
+[2026-07-29 01:18:47] shortcut updated: C:\Users\LENOVO\OneDrive\Desktop\Hosny POS.lnk
+[2026-07-29 01:18:47] shortcut updated: C:\Users\LENOVO\Desktop\Hosny POS.lnk
+[2026-07-29 01:18:47] shortcut updated: C:\Users\Public\Desktop\Hosny POS.lnk
+[2026-07-29 01:18:47] restart launched: pid=75896 path=G:\TestManagementSystem\Hosny-Management-System\POS\HosnyPOS.exe
+[2026-07-29 01:18:47] update completed
+[2026-07-29 01:33:27] update started
+[2026-07-29 01:33:30] backup created at G:\TestManagementSystem\Hosny-Management-System\POS\backups\2026.07.29.012841_20260729_013327
+[2026-07-29 01:33:30] copied build_pos.bat
+[2026-07-29 01:33:30] copied build_pos_win7_x86.bat
+[2026-07-29 01:33:30] copied cacert.pem
+[2026-07-29 01:33:30] copied Fonts
+[2026-07-29 01:33:30] copied HosnyPOS-win7-x86.spec
+[2026-07-29 01:33:30] copied HosnyPOS.py
+[2026-07-29 01:33:30] copied HosnyPOS.spec
+[2026-07-29 01:33:30] copied logging_setup.py
+[2026-07-29 01:33:30] copied part2_ui.py
+[2026-07-29 01:33:30] copied pos_updater.py
+[2026-07-29 01:33:30] copied pos_version.py
+[2026-07-29 01:33:30] copied prebuilt
+[2026-07-29 01:33:30] copied prebuilt_update.json
+[2026-07-29 01:33:30] copied sync_appliers.py
+[2026-07-29 01:33:30] copied sync_client.py
+[2026-07-29 01:33:30] copied sync_core.py
+[2026-07-29 01:33:30] copied sync_periodic.py
+[2026-07-29 01:33:30] copied sync_ui.py
+[2026-07-29 01:33:30] copied update_client.py
+[2026-07-29 01:33:30] verifying prebuilt executable: C:\Users\LENOVO\AppData\Local\Temp\HosnyPOSUpdates\2026.07.29.012841_20260729_013319\work\source\POS\prebuilt\HosnyPOS.exe
+[2026-07-29 01:33:32] prebuilt package prepared in dist
+[2026-07-29 01:33:32] dist output promoted
+[2026-07-29 01:33:33] shortcut updated: C:\Users\LENOVO\OneDrive\Desktop\Hosny POS.lnk
+[2026-07-29 01:33:33] duplicate shortcut removed: C:\Users\LENOVO\Desktop\Hosny POS.lnk
+[2026-07-29 01:33:33] restart launched: pid=29704 path=G:\TestManagementSystem\Hosny-Management-System\POS\HosnyPOS.exe
+[2026-07-29 01:33:33] update completed

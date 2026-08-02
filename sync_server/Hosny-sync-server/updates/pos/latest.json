@@ -1,0 +1,39 @@
+{
+  "app": "POS",
+  "files": [
+    "POS/Fonts/V100009_.TTF",
+    "POS/HosnyPOS-win7-x64.spec",
+    "POS/HosnyPOS-win7-x86.spec",
+    "POS/HosnyPOS.py",
+    "POS/HosnyPOS.spec",
+    "POS/build_pos.bat",
+    "POS/build_pos_win7_x64.bat",
+    "POS/build_pos_win7_x86.bat",
+    "POS/cacert.pem",
+    "POS/logging_setup.py",
+    "POS/pos_db_backup.py",
+    "POS/pos_updater.py",
+    "POS/pos_version.py",
+    "POS/requirements-win7-x64.txt",
+    "POS/requirements-win7-x86.txt",
+    "POS/sync_appliers.py",
+    "POS/sync_client.py",
+    "POS/sync_core.py",
+    "POS/sync_periodic.py",
+    "POS/sync_ui.py",
+    "POS/update_client.py",
+    "POS/verify_pe_arch.py"
+  ],
+  "hashes": {
+    "package_sha256": "f66a510a91af6e91a7fb4f47021e19281c8b663020d78c62f0159fba9fc15824"
+  },
+  "notes": "POS update",
+  "package_file": "HosnyPOS-2026.8.2.2.zip",
+  "published_at": "2026-08-02T09:31:11Z",
+  "required_files": [
+    "POS/HosnyPOS.py",
+    "POS/HosnyPOS.spec",
+    "POS/build_pos.bat"
+  ],
+  "version": "2026.8.2.2"
+}

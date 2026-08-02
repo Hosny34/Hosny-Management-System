@@ -2,7 +2,7 @@
 # Helper script to append Part 2 (UI helpers + IncomeFrame) to HosnyWarehouse.py
 import os
 
-TARGET = r"c:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن\HosnyWarehouse.py"
+TARGET = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Warehouse", "HosnyWarehouse.py"))
 
 PART2 = """
 

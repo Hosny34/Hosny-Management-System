@@ -14,13 +14,14 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from config import MAX_PULL_BATCH, MAX_PUSH_BATCH
+from config import MAX_PULL_BATCH, MAX_PUSH_BATCH, POS_UPDATES_DIR
 import auth
 import db
 
@@ -87,6 +88,21 @@ class WaitResponse(BaseModel):
     next_seq: int
     server_time: str
     max_server_seq: int = 0
+
+
+class AdminResetDeviceRequest(BaseModel):
+    device_name: str
+    target_scope: Optional[str] = None
+
+
+class AdminResetAllRequest(BaseModel):
+    confirm: str
+
+
+class PosUpdateLatestResponse(BaseModel):
+    available: bool
+    manifest: Optional[Dict[str, Any]] = None
+    server_time: str
 
 
 # ------------------------------- Auth dep ------------------------------ #
@@ -315,3 +331,84 @@ def sync_status(device: Dict[str, Any] = Depends(warehouse_only)) -> Dict[str, A
         "server_time": _utc_now_iso(),
         "devices": db.device_status_summary(),
     }
+
+
+def _pos_updates_dir() -> Path:
+    return Path(POS_UPDATES_DIR).resolve()
+
+
+def _read_latest_pos_manifest() -> Optional[Dict[str, Any]]:
+    manifest_path = _pos_updates_dir() / "latest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=f"invalid POS update manifest: {ex}")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=500, detail="invalid POS update manifest")
+    return data
+
+
+@app.get("/v1/updates/pos/latest", response_model=PosUpdateLatestResponse)
+def pos_update_latest(
+    device: Dict[str, Any] = Depends(current_device),
+) -> PosUpdateLatestResponse:
+    if device["role"] not in ("pos", "warehouse"):
+        raise HTTPException(status_code=403, detail="invalid device role")
+    manifest = _read_latest_pos_manifest()
+    return PosUpdateLatestResponse(
+        available=manifest is not None,
+        manifest=manifest,
+        server_time=_utc_now_iso(),
+    )
+
+
+@app.get("/v1/updates/pos/package/{filename}")
+def pos_update_package(
+    filename: str,
+    device: Dict[str, Any] = Depends(current_device),
+) -> FileResponse:
+    if device["role"] not in ("pos", "warehouse"):
+        raise HTTPException(status_code=403, detail="invalid device role")
+    safe_name = Path(filename).name
+    if safe_name != filename or not safe_name.lower().endswith(".zip"):
+        raise HTTPException(status_code=404, detail="package not found")
+    package_path = (_pos_updates_dir() / safe_name).resolve()
+    updates_dir = _pos_updates_dir()
+    try:
+        package_path.relative_to(updates_dir)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="package not found")
+    if not package_path.is_file():
+        raise HTTPException(status_code=404, detail="package not found")
+    return FileResponse(
+        str(package_path),
+        media_type="application/zip",
+        filename=safe_name,
+    )
+
+
+@app.post("/v1/admin/reset-device")
+def admin_reset_device(
+    body: AdminResetDeviceRequest,
+) -> Dict[str, Any]:
+    device_name = auth.validate_simple_device_name(body.device_name)
+    target_scope = (body.target_scope or "").strip()
+    if not target_scope:
+        role = auth.infer_role_from_device_name(device_name)
+        target_scope = "warehouse" if role == "warehouse" else ("pos:" + device_name)
+    result = db.reset_device_state(device_name, target_scope)
+    result["server_time"] = _utc_now_iso()
+    return result
+
+
+@app.post("/v1/admin/reset-all")
+def admin_reset_all(
+    body: AdminResetAllRequest,
+) -> Dict[str, Any]:
+    if (body.confirm or "").strip().upper() != "RESET ALL":
+        raise HTTPException(status_code=422, detail="confirmation text must be RESET ALL")
+    result = db.reset_all_state()
+    result["server_time"] = _utc_now_iso()
+    return result

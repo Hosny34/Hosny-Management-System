@@ -3,11 +3,140 @@
 from __future__ import annotations
 
 from typing import *
+import re
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from factory_core import *  # noqa: F401,F403
+
+_DIGIT_TRANSLATION = str.maketrans({
+    "\u0660": "0", "\u0661": "1", "\u0662": "2", "\u0663": "3", "\u0664": "4",
+    "\u0665": "5", "\u0666": "6", "\u0667": "7", "\u0668": "8", "\u0669": "9",
+    "\u06f0": "0", "\u06f1": "1", "\u06f2": "2", "\u06f3": "3", "\u06f4": "4",
+    "\u06f5": "5", "\u06f6": "6", "\u06f7": "7", "\u06f8": "8", "\u06f9": "9",
+})
+_LTR_MARK = "\u200e"
+_RTL_MARK = "\u200f"
+_NUMBER_RUN_RE = re.compile(r"(?<!\u200e)([0-9](?:[0-9.,:/\\\- ]*[0-9])?)(?!\u200e)")
+
+
+def western_digits(value: Any) -> str:
+    return ("" if value is None else str(value)).translate(_DIGIT_TRANSLATION)
+
+
+def _strip_digit_marks(value: Any) -> str:
+    return western_digits(value).replace(_LTR_MARK, "").replace(_RTL_MARK, "")
+
+
+def western_digits_for_display(value: Any) -> str:
+    text = _strip_digit_marks(value)
+    return _NUMBER_RUN_RE.sub(lambda m: _LTR_MARK + m.group(1) + _LTR_MARK, text)
+
+
+def _westernize_value(value: Any) -> Any:
+    if value is None:
+        return value
+    if isinstance(value, (list, tuple)):
+        return type(value)(_westernize_value(v) for v in value)
+    return western_digits_for_display(value)
+
+
+def _westernize_options(options: Dict[str, Any]) -> None:
+    for key in ("text", "value", "values"):
+        if key in options:
+            options[key] = _westernize_value(options[key])
+
+
+def _install_western_digit_tk_patch() -> None:
+    if getattr(tk, "_hosny_western_digits_patch", False):
+        return
+    tk._hosny_western_digits_patch = True
+
+    original_stringvar_set = tk.StringVar.set
+    original_stringvar_get = tk.StringVar.get
+
+    def stringvar_set(self, value):
+        return original_stringvar_set(self, _westernize_value(value))
+
+    def stringvar_get(self):
+        return _strip_digit_marks(original_stringvar_get(self))
+
+    tk.StringVar.set = stringvar_set
+    tk.StringVar.get = stringvar_get
+
+    for entry_cls in (tk.Entry, ttk.Entry, ttk.Combobox):
+        original_get = entry_cls.get
+
+        def get(self, _original_get=original_get):
+            return _strip_digit_marks(_original_get(self))
+
+        entry_cls.get = get
+
+    def patch_widget_class(cls):
+        original_init = cls.__init__
+        original_configure = cls.configure
+
+        def __init__(self, *args, **kwargs):
+            _westernize_options(kwargs)
+            original_init(self, *args, **kwargs)
+
+        def configure(self, cnf=None, **kwargs):
+            if isinstance(cnf, dict):
+                cnf = dict(cnf)
+                _westernize_options(cnf)
+            _westernize_options(kwargs)
+            return original_configure(self, cnf, **kwargs)
+
+        cls.__init__ = __init__
+        cls.configure = configure
+        cls.config = configure
+
+    for widget_cls in (
+        tk.Label, tk.Button, tk.LabelFrame, tk.Checkbutton, tk.Radiobutton,
+        ttk.Label, ttk.Button, ttk.LabelFrame, ttk.Checkbutton, ttk.Radiobutton,
+        ttk.Combobox,
+    ):
+        patch_widget_class(widget_cls)
+
+    original_title = tk.Wm.title
+
+    def title(self, string=None):
+        if string is not None:
+            string = western_digits_for_display(string)
+        return original_title(self, string)
+
+    tk.Wm.title = title
+
+    original_heading = ttk.Treeview.heading
+    original_insert = ttk.Treeview.insert
+    original_item = ttk.Treeview.item
+    original_set = ttk.Treeview.set
+
+    def heading(self, column, option=None, **kwargs):
+        _westernize_options(kwargs)
+        return original_heading(self, column, option, **kwargs)
+
+    def insert(self, parent, index, iid=None, **kwargs):
+        _westernize_options(kwargs)
+        return original_insert(self, parent, index, iid, **kwargs)
+
+    def item(self, item, option=None, **kwargs):
+        _westernize_options(kwargs)
+        return original_item(self, item, option, **kwargs)
+
+    def set_value(self, item, column=None, value=None):
+        if value is not None:
+            value = _westernize_value(value)
+        return original_set(self, item, column, value)
+
+    ttk.Treeview.heading = heading
+    ttk.Treeview.insert = insert
+    ttk.Treeview.item = item
+    ttk.Treeview.set = set_value
+
+
+_install_western_digit_tk_patch()
 
 def setup_style(root: tk.Tk) -> None:
     style = ttk.Style(root)

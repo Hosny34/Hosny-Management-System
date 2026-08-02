@@ -10,15 +10,17 @@ Does NOT touch sync_inbox (idempotent by event_uuid) or sync_outbox
 """
 from __future__ import annotations
 import os, sqlite3
+from pathlib import Path
 
+REPO = Path(__file__).resolve().parent
 DBS = [
-    r"C:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن\warehouse_data.sqlite3",
-    r"C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-ZAY\warehouse_data.sqlite3",
-    r"C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-OCT\warehouse_data.sqlite3",
-    r"C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-STOCK-MONITOR\warehouse_data.sqlite3",
+    REPO / "Warehouse" / "warehouse_data.sqlite3",
+    REPO / "POS" / "warehouse_data.sqlite3",
+    REPO / "POS-STOCK-MONITOR" / "warehouse_data.sqlite3",
 ]
 
 for p in DBS:
+    p = str(p)
     if not os.path.exists(p):
         print("skip (missing):", p); continue
     c = sqlite3.connect(p)

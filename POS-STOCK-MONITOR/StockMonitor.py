@@ -5,6 +5,8 @@ import os
 import json
 import sqlite3
 import sys
+import re
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 try:
     import logging_setup
@@ -16,6 +18,149 @@ import tkinter as tk
 from datetime import datetime, timezone
 from tkinter import messagebox, ttk
 from typing import Any, Dict, List, Sequence, Tuple
+
+_DIGIT_TRANSLATION = str.maketrans({
+    "\u0660": "0", "\u0661": "1", "\u0662": "2", "\u0663": "3", "\u0664": "4",
+    "\u0665": "5", "\u0666": "6", "\u0667": "7", "\u0668": "8", "\u0669": "9",
+    "\u06f0": "0", "\u06f1": "1", "\u06f2": "2", "\u06f3": "3", "\u06f4": "4",
+    "\u06f5": "5", "\u06f6": "6", "\u06f7": "7", "\u06f8": "8", "\u06f9": "9",
+})
+_LTR_MARK = "\u200e"
+_RTL_MARK = "\u200f"
+_NUMBER_RUN_RE = re.compile(r"(?<!\u200e)([0-9](?:[0-9.,:/\\\- ]*[0-9])?)(?!\u200e)")
+
+
+def western_digits(value: Any) -> str:
+    return ("" if value is None else str(value)).translate(_DIGIT_TRANSLATION)
+
+
+def format_money(value: Any) -> str:
+    raw = western_digits(value).replace(_LTR_MARK, "").replace(_RTL_MARK, "").strip()
+    if not raw:
+        raw = "0"
+    try:
+        dec = Decimal(raw)
+    except (InvalidOperation, ValueError, TypeError):
+        try:
+            dec = Decimal(str(float(value or 0)))
+        except Exception:
+            return "0"
+    dec = dec.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return western_digits(str(int(dec)))
+
+
+def _strip_digit_marks(value: Any) -> str:
+    return western_digits(value).replace(_LTR_MARK, "").replace(_RTL_MARK, "")
+
+
+def western_digits_for_display(value: Any) -> str:
+    text = _strip_digit_marks(value)
+    return _NUMBER_RUN_RE.sub(lambda m: _LTR_MARK + m.group(1) + _LTR_MARK, text)
+
+
+def _westernize_value(value: Any) -> Any:
+    if value is None:
+        return value
+    if isinstance(value, (list, tuple)):
+        return type(value)(_westernize_value(v) for v in value)
+    return western_digits_for_display(value)
+
+
+def _westernize_options(options: Dict[str, Any]) -> None:
+    for key in ("text", "value", "values"):
+        if key in options:
+            options[key] = _westernize_value(options[key])
+
+
+def _install_western_digit_tk_patch() -> None:
+    if getattr(tk, "_hosny_western_digits_patch", False):
+        return
+    tk._hosny_western_digits_patch = True
+
+    original_stringvar_set = tk.StringVar.set
+    original_stringvar_get = tk.StringVar.get
+
+    def stringvar_set(self, value):
+        return original_stringvar_set(self, _westernize_value(value))
+
+    def stringvar_get(self):
+        return _strip_digit_marks(original_stringvar_get(self))
+
+    tk.StringVar.set = stringvar_set
+    tk.StringVar.get = stringvar_get
+
+    for entry_cls in (tk.Entry, ttk.Entry, ttk.Combobox):
+        original_get = entry_cls.get
+
+        def get(self, _original_get=original_get):
+            return _strip_digit_marks(_original_get(self))
+
+        entry_cls.get = get
+
+    def patch_widget_class(cls):
+        original_init = cls.__init__
+        original_configure = cls.configure
+
+        def __init__(self, *args, **kwargs):
+            _westernize_options(kwargs)
+            original_init(self, *args, **kwargs)
+
+        def configure(self, cnf=None, **kwargs):
+            if isinstance(cnf, dict):
+                cnf = dict(cnf)
+                _westernize_options(cnf)
+            _westernize_options(kwargs)
+            return original_configure(self, cnf, **kwargs)
+
+        cls.__init__ = __init__
+        cls.configure = configure
+        cls.config = configure
+
+    for widget_cls in (
+        tk.Label, tk.Button, tk.LabelFrame, tk.Checkbutton, tk.Radiobutton,
+        ttk.Label, ttk.Button, ttk.LabelFrame, ttk.Checkbutton, ttk.Radiobutton,
+        ttk.Combobox,
+    ):
+        patch_widget_class(widget_cls)
+
+    original_title = tk.Wm.title
+
+    def title(self, string=None):
+        if string is not None:
+            string = western_digits_for_display(string)
+        return original_title(self, string)
+
+    tk.Wm.title = title
+
+    original_heading = ttk.Treeview.heading
+    original_insert = ttk.Treeview.insert
+    original_item = ttk.Treeview.item
+    original_set = ttk.Treeview.set
+
+    def heading(self, column, option=None, **kwargs):
+        _westernize_options(kwargs)
+        return original_heading(self, column, option, **kwargs)
+
+    def insert(self, parent, index, iid=None, **kwargs):
+        _westernize_options(kwargs)
+        return original_insert(self, parent, index, iid, **kwargs)
+
+    def item(self, item, option=None, **kwargs):
+        _westernize_options(kwargs)
+        return original_item(self, item, option, **kwargs)
+
+    def set_value(self, item, column=None, value=None):
+        if value is not None:
+            value = _westernize_value(value)
+        return original_set(self, item, column, value)
+
+    ttk.Treeview.heading = heading
+    ttk.Treeview.insert = insert
+    ttk.Treeview.item = item
+    ttk.Treeview.set = set_value
+
+
+_install_western_digit_tk_patch()
 
 
 # In source mode, keep assets/DB beside this script folder.
@@ -37,7 +182,7 @@ BRANCH_UI_NAME_BY_DEVICE = {
     "POS-OBO": "فرع العبور",
     "POS-GESR": "فرع جسر السويس",
 }
-WAREHOUSE_DIR = os.path.abspath(os.path.join(SOURCE_DIR, "..", "ادارة المخازن"))
+WAREHOUSE_DIR = os.path.abspath(os.path.join(SOURCE_DIR, "..", "Warehouse"))
 if not getattr(sys, "frozen", False) and WAREHOUSE_DIR not in sys.path:
     sys.path.insert(0, WAREHOUSE_DIR)
 
@@ -684,7 +829,7 @@ class StockMonitorApp(tk.Tk):
             meta = self._metas.get(pick)
             if meta:
                 self._meta_var.set(
-                    f"{_branch_display_name(pick)} | آخر لقطة: {_fmt_local_ts(meta['snapshot_at'])}  |  عدد الصفوف: {meta['row_count']}  |  القيمة: {meta['total_value']:.2f}"
+                    f"{_branch_display_name(pick)} | آخر لقطة: {_fmt_local_ts(meta['snapshot_at'])}  |  عدد الصفوف: {meta['row_count']}  |  القيمة: {format_money(meta['total_value'])}"
                 )
             else:
                 self._meta_var.set("لا توجد لقطة مخزون مباشرة لهذا الاسم (قد يكون محفوظًا بالـ UUID)")
@@ -706,7 +851,7 @@ class StockMonitorApp(tk.Tk):
                     _fmt_local_ts(r["snapshot_at"], ""),
                     r["age_min"],
                     r["rows"],
-                    "{:.2f}".format(float(r["value"])),
+                    format_money(float(r["value"])),
                     r["alert"],
                 ),
             )
@@ -750,12 +895,12 @@ class StockMonitorApp(tk.Tk):
                 if q not in blob:
                     continue
             value = float(price) * int(count)
-            self._tree.insert("", tk.END, values=(br_ui, it, sc, cl, sz, f"{price:.2f}", int(count), f"{value:.2f}"))
+            self._tree.insert("", tk.END, values=(br_ui, it, sc, cl, sz, f"{format_money(price)}", int(count), f"{format_money(value)}"))
             shown += 1
             total_qty += int(count)
             total_val += value
         _apply_zebra_tags(self._tree)
-        self._status_var.set(f"يُعرض {shown} صف  |  إجمالي الكمية: {total_qty}  |  إجمالي القيمة: {total_val:.2f}")
+        self._status_var.set(f"يُعرض {shown} صف  |  إجمالي الكمية: {total_qty}  |  إجمالي القيمة: {format_money(total_val)}")
 
     def _clear_filters(self) -> None:
         self._type_var.set("")

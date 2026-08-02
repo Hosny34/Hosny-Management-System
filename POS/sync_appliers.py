@@ -90,6 +90,52 @@ def _ensure_item_default_price(
     )
 
 
+def _upsert_zero_stock_catalog_row(
+    conn: sqlite3.Connection,
+    item_type: str,
+    school: str,
+    color: str,
+    size: str,
+    unit_price: float,
+) -> bool:
+    """Ensure a POS can select a catalog item even before stock arrives."""
+    row = conn.execute(
+        """
+        SELECT id, count, unit_price
+          FROM stocks
+         WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+         ORDER BY
+           CASE WHEN ABS(unit_price - ?) < 0.001 THEN 0 ELSE 1 END,
+           count DESC,
+           id ASC
+         LIMIT 1
+        """,
+        (item_type, school, color, size, float(unit_price)),
+    ).fetchone()
+    if row:
+        row_id = row["id"] if isinstance(row, sqlite3.Row) else row[0]
+        row_count = row["count"] if isinstance(row, sqlite3.Row) else row[1]
+        row_price = row["unit_price"] if isinstance(row, sqlite3.Row) else row[2]
+        if int(row_count or 0) == 0 and abs(float(row_price or 0) - float(unit_price)) >= 0.001:
+            conn.execute(
+                "UPDATE stocks SET unit_price=? WHERE id=?",
+                (float(unit_price), int(row_id)),
+            )
+        return False
+
+    conn.execute(
+        """
+        INSERT INTO stocks(item_type, school, color, size, unit_price, count)
+        VALUES (?, ?, ?, ?, ?, 0)
+        """,
+        (item_type, school, color, size, float(unit_price)),
+    )
+    return True
+
+
 def _apply_size_profile_rows(conn: sqlite3.Connection, profiles: Any) -> int:
     """Upsert warehouse-originated size profile rows on the POS DB.
 
@@ -110,30 +156,106 @@ def _apply_size_profile_rows(conn: sqlite3.Connection, profiles: Any) -> int:
         cl = _clean(p.get("color"))
         if not (it and sc and cl):
             continue
-        conn.execute(
-            """
-            INSERT INTO size_profiles
-                (item_type, school, color,
-                 num_start_1, num_end_1, num_start_2, num_end_2,
-                 has_alpha, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-            ON CONFLICT(item_type, school, color) DO UPDATE SET
-                num_start_1 = excluded.num_start_1,
-                num_end_1   = excluded.num_end_1,
-                num_start_2 = excluded.num_start_2,
-                num_end_2   = excluded.num_end_2,
-                has_alpha   = excluded.has_alpha,
-                updated_at  = datetime('now')
-            """,
-            (
-                it, sc, cl,
-                p.get("num_start_1"), p.get("num_end_1"),
-                p.get("num_start_2"), p.get("num_end_2"),
-                int(p.get("has_alpha") or 0),
-            ),
+        values = (
+            p.get("num_start_1"), p.get("num_end_1"),
+            p.get("num_start_2"), p.get("num_end_2"),
+            int(p.get("has_alpha") or 0),
         )
+        cur = conn.execute(
+            """
+            UPDATE size_profiles
+               SET num_start_1 = ?,
+                   num_end_1   = ?,
+                   num_start_2 = ?,
+                   num_end_2   = ?,
+                   has_alpha   = ?,
+                   updated_at  = datetime('now')
+             WHERE item_type = ?
+               AND school = ?
+               AND color = ?
+            """,
+            (*values, it, sc, cl),
+        )
+        if cur.rowcount == 0:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO size_profiles
+                    (item_type, school, color,
+                     num_start_1, num_end_1, num_start_2, num_end_2,
+                     has_alpha, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                """,
+                (it, sc, cl, *values),
+            )
         n += 1
     return n
+
+
+def _update_item_default_price(
+    conn: sqlite3.Connection,
+    item_type: str,
+    price: float,
+) -> None:
+    cur = conn.execute(
+        "UPDATE item_defaults SET default_price = ? WHERE item_type = ?",
+        (float(price), item_type),
+    )
+    if cur.rowcount == 0:
+        conn.execute(
+            "INSERT OR IGNORE INTO item_defaults(item_type, default_price) VALUES(?, ?)",
+            (item_type, float(price)),
+        )
+
+
+def _upsert_pos_stock_snapshot_meta(
+    conn: sqlite3.Connection,
+    source_name: str,
+    snapshot_at: str,
+    inserted: int,
+    total_value: float,
+    app_version: str = "",
+) -> None:
+    if _has_column(conn, "pos_stocks_snapshot_meta", "app_version"):
+        cur = conn.execute(
+            """
+            UPDATE pos_stocks_snapshot_meta
+               SET snapshot_at = ?,
+                   row_count   = ?,
+                   total_value = ?,
+                   app_version = ?
+             WHERE source_device = ?
+            """,
+            (snapshot_at, inserted, total_value, app_version, source_name),
+        )
+        if cur.rowcount == 0:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO pos_stocks_snapshot_meta
+                    (source_device, snapshot_at, row_count, total_value, app_version)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (source_name, snapshot_at, inserted, total_value, app_version),
+            )
+        return
+    cur = conn.execute(
+        """
+        UPDATE pos_stocks_snapshot_meta
+           SET snapshot_at = ?,
+               row_count   = ?,
+               total_value = ?
+         WHERE source_device = ?
+        """,
+        (snapshot_at, inserted, total_value, source_name),
+    )
+    if cur.rowcount == 0:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO pos_stocks_snapshot_meta
+                (source_device, snapshot_at, row_count, total_value)
+            VALUES (?, ?, ?, ?)
+            """,
+            (source_name, snapshot_at, inserted, total_value),
+        )
 
 
 def _delete_old_spec_history_if_unused(
@@ -239,7 +361,7 @@ def apply_spec_renamed(
         try:
             conn.execute(
                 """
-                INSERT INTO size_profiles
+                INSERT OR IGNORE INTO size_profiles
                     (item_type, school, color,
                      num_start_1, num_end_1, num_start_2, num_end_2,
                      has_alpha, updated_at)
@@ -250,7 +372,6 @@ def apply_spec_renamed(
                  WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
                    AND LOWER(TRIM(school)) = LOWER(TRIM(?))
                    AND LOWER(TRIM(color)) = LOWER(TRIM(?))
-                ON CONFLICT(item_type, school, color) DO NOTHING
                 """,
                 (*new_prof_key, *old_prof_key),
             )
@@ -329,6 +450,7 @@ def apply_stock_transfer_out(
 
     queued_rows = 0
     total_qty = 0
+    catalog_rows = 0
 
     for item in items:
         it = _clean(item.get("item_type"))
@@ -346,21 +468,20 @@ def apply_stock_transfer_out(
 
         if not (it and sc and cl and sz):
             raise ApplyError(f"incomplete shipment line specs: {item}")
-        if qty <= 0:
-            # Silently skip zero-qty lines rather than failing the
-            # whole apply — warehouse UI may have produced them.
-            continue
-
         _upsert_spec_history(conn, {"item_type": it, "school": sc, "color": cl, "size": sz})
         _ensure_item_default_price(conn, it, price)
 
+        if qty <= 0:
+            if _upsert_zero_stock_catalog_row(conn, it, sc, cl, sz, price):
+                catalog_rows += 1
+            continue
+
         conn.execute(
             """
-            INSERT INTO incoming_shipment_items_pending(
+            INSERT OR IGNORE INTO incoming_shipment_items_pending(
                 shipment_uuid, line_index, item_type, school, color, size,
                 unit_price, expected_qty, received_qty, status
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'PENDING')
-            ON CONFLICT(shipment_uuid, line_index) DO NOTHING
             """,
             (shipment_uuid or event_uuid, queued_rows, it, sc, cl, sz, price, qty),
         )
@@ -368,28 +489,29 @@ def apply_stock_transfer_out(
         total_qty += qty
 
     profile_rows = _apply_size_profile_rows(conn, payload.get("size_profiles"))
-    conn.execute(
-        """
-        INSERT INTO incoming_shipment_alerts(
-            sync_event_uuid, shipment_uuid, from_device, note, total_qty, created_at, shown_at
-        ) VALUES (?, ?, ?, ?, ?, ?, NULL)
-        ON CONFLICT(sync_event_uuid) DO NOTHING
-        """,
-        (
-            event_uuid,
-            shipment_uuid or event_uuid,
-            from_dev,
-            note_base,
-            total_qty,
-            _now_iso(),
-        ),
-    )
+    if queued_rows > 0:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO incoming_shipment_alerts(
+                sync_event_uuid, shipment_uuid, from_device, note, total_qty, created_at, shown_at
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                event_uuid,
+                shipment_uuid or event_uuid,
+                from_dev,
+                note_base,
+                total_qty,
+                _now_iso(),
+            ),
+        )
 
     return {
         "queued_rows": queued_rows,
+        "catalog_rows": catalog_rows,
         "total_qty":  total_qty,
         "shipment":   shipment_uuid or None,
-        "needs_verification": True,
+        "needs_verification": queued_rows > 0,
         "size_profiles_applied": profile_rows,
     }
 
@@ -471,11 +593,7 @@ def apply_price_update(
     # price when the item has no stock left later.
     item_types = {r[1] for r in rows}
     for it in item_types:
-        conn.execute(
-            "INSERT INTO item_defaults(item_type, default_price) VALUES(?, ?) "
-            "ON CONFLICT(item_type) DO UPDATE SET default_price = excluded.default_price",
-            (it, new_price),
-        )
+        _update_item_default_price(conn, it, new_price)
 
     return {"updated": len(rows)}
 
@@ -507,9 +625,23 @@ def apply_pos_stock_snapshot(
     if not source_name:
         raise ApplyError("snapshot missing source_device_name")
     snapshot_at = _clean(payload.get("snapshot_at")) or _now_iso()
+    app_version = _clean(payload.get("app_version"))
     rows = payload.get("rows") or []
     if not isinstance(rows, list):
         raise ApplyError("snapshot rows must be a list")
+
+    current = conn.execute(
+        "SELECT snapshot_at FROM pos_stocks_snapshot_meta WHERE source_device = ?",
+        (source_name,),
+    ).fetchone()
+    current_snapshot_at = _clean(current[0] if current else "")
+    if current_snapshot_at and snapshot_at < current_snapshot_at:
+        return {
+            "skipped": True,
+            "reason": "stale stock snapshot",
+            "current_snapshot_at": current_snapshot_at,
+            "snapshot_at": snapshot_at,
+        }
 
     # Replace the whole mirror for this source.
     conn.execute(
@@ -541,6 +673,22 @@ def apply_pos_stock_snapshot(
         inserted += 1
         total_value += price * count
 
+    _upsert_pos_stock_snapshot_meta(conn, source_name, snapshot_at, inserted, total_value, app_version)
+
+    return {"mirrored_rows": inserted, "total_value": total_value}
+
+
+def _refresh_pos_stock_snapshot_meta(conn: sqlite3.Connection, source_name: str, snapshot_at: str) -> None:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS row_count, COALESCE(SUM(count * unit_price), 0) AS total_value
+          FROM pos_stocks_mirror
+         WHERE source_device = ?
+        """,
+        (source_name,),
+    ).fetchone()
+    row_count = int((row[0] if row else 0) or 0)
+    total_value = float((row[1] if row else 0.0) or 0.0)
     conn.execute(
         """INSERT INTO pos_stocks_snapshot_meta
                (source_device, snapshot_at, row_count, total_value)
@@ -549,10 +697,119 @@ def apply_pos_stock_snapshot(
                snapshot_at = excluded.snapshot_at,
                row_count   = excluded.row_count,
                total_value = excluded.total_value""",
-        (source_name, snapshot_at, inserted, total_value),
+        (source_name, snapshot_at, row_count, total_value),
     )
 
-    return {"mirrored_rows": inserted, "total_value": total_value}
+
+def apply_pos_stock_audit_applied(
+    conn: sqlite3.Connection,
+    payload: Dict[str, Any],
+    event_uuid: str,
+) -> Dict[str, Any]:
+    """Warehouse-side applier for a POS physical-count adjustment.
+
+    The POS has already changed its local `stocks` rows. The warehouse
+    mirror must therefore set the affected branch-stock rows to the
+    counted `actual` quantity, not add the diff as a warehouse sale or
+    warehouse shipment.
+    """
+    source_name = _clean(payload.get("source_device_name")) or _src_device(conn, payload, event_uuid)
+    if not source_name:
+        raise ApplyError("POS_STOCK_AUDIT_APPLIED: missing source device")
+    audit_uuid = _clean(payload.get("audit_uuid")) or event_uuid
+    if conn.execute(
+        "SELECT 1 FROM pos_stock_audit_reports_mirror WHERE audit_uuid = ? LIMIT 1",
+        (audit_uuid,),
+    ).fetchone():
+        return {"already_applied": True}
+
+    lines = payload.get("lines") or []
+    if not isinstance(lines, list) or not lines:
+        raise ApplyError("POS_STOCK_AUDIT_APPLIED: missing lines")
+
+    created_at = _clean(payload.get("created_at")) or _now_iso()
+    reason = _clean(payload.get("reason"))
+    try:
+        report_id = int(payload.get("report_id")) if payload.get("report_id") is not None else None
+    except (TypeError, ValueError):
+        report_id = None
+    total_diff = int(payload.get("total_diff") or 0)
+    total_value = float(payload.get("total_value") or 0)
+
+    conn.execute(
+        """
+        INSERT INTO pos_stock_audit_reports_mirror
+            (audit_uuid, source_device, local_report_id, reason, created_at,
+             total_diff, total_value, event_uuid, received_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            audit_uuid,
+            source_name,
+            report_id,
+            reason,
+            created_at,
+            total_diff,
+            total_value,
+            event_uuid,
+            _now_iso(),
+        ),
+    )
+
+    applied_rows = 0
+    for raw in lines:
+        if not isinstance(raw, dict):
+            continue
+        it = _clean(raw.get("item_type"))
+        sc = _clean(raw.get("school"))
+        cl = _clean(raw.get("color"))
+        sz = _clean(raw.get("size"))
+        if not (it and sc and cl and sz):
+            raise ApplyError("POS_STOCK_AUDIT_APPLIED: incomplete line specs")
+        try:
+            expected = int(raw.get("expected") or 0)
+            actual = int(raw.get("actual") or 0)
+            diff = int(raw.get("diff", actual - expected) or 0)
+            price = float(raw.get("unit_price") or 0)
+            diff_value = float(raw.get("diff_value", diff * price) or 0)
+        except (TypeError, ValueError):
+            raise ApplyError("POS_STOCK_AUDIT_APPLIED: invalid line numbers")
+        if actual < 0:
+            raise ApplyError("POS_STOCK_AUDIT_APPLIED: actual count cannot be negative")
+
+        conn.execute(
+            """
+            INSERT INTO pos_stock_audit_items_mirror
+                (audit_uuid, source_device, item_type, school, color, size,
+                 expected_qty, actual_qty, diff_qty, unit_price, diff_value)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (audit_uuid, source_name, it, sc, cl, sz, expected, actual, diff, price, diff_value),
+        )
+
+        conn.execute(
+            """
+            DELETE FROM pos_stocks_mirror
+             WHERE source_device = ?
+               AND LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+            """,
+            (source_name, it, sc, cl, sz),
+        )
+        if actual > 0:
+            conn.execute(
+                """INSERT INTO pos_stocks_mirror
+                   (source_device, item_type, school, color, size,
+                    unit_price, count, snapshot_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (source_name, it, sc, cl, sz, price, actual, created_at),
+            )
+        applied_rows += 1
+
+    _refresh_pos_stock_snapshot_meta(conn, source_name, created_at)
+    return {"audit_uuid": audit_uuid, "applied_rows": applied_rows}
 
 
 def apply_stock_return_to_warehouse(
@@ -607,8 +864,6 @@ def _queue_branch_inventory_items(
             price = float(item.get("unit_price") or 0)
         except (TypeError, ValueError):
             raise ApplyError(f"invalid unit_price in return line: {item}")
-        badge = int(item.get("has_badge") or 0)
-
         if not (it and sc and cl and sz):
             raise ApplyError(f"incomplete queue line specs: {item}")
         if qty <= 0:
@@ -619,8 +874,8 @@ def _queue_branch_inventory_items(
             INSERT INTO branch_inventory_queue
                 (sync_event_uuid, queue_kind, source_device, requested_target_device,
                  external_ref, line_index, created_at, item_type, school, color,
-                 size, unit_price, qty, has_badge, note, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
+                 size, unit_price, qty, note, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
             """,
             (
                 event_uuid,
@@ -636,7 +891,6 @@ def _queue_branch_inventory_items(
                 sz,
                 price,
                 qty,
-                badge,
                 _clean(payload.get("note")),
             ),
         )
@@ -988,24 +1242,10 @@ def apply_wh_pos_reservation_created(
         alloc_paid = paid_batch if idx == 0 else 0.0
         conn.execute(
             """
-            INSERT INTO pos_reservations_mirror
+            INSERT OR REPLACE INTO pos_reservations_mirror
                 (source_device, reservation_key, customer, item_type, school, color, size,
                  qty, unit_price, total_amount, paid_amount, status, shift_id, last_event_uuid, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'معلق', ?, ?, ?)
-            ON CONFLICT(source_device, reservation_key) DO UPDATE SET
-                customer     = excluded.customer,
-                item_type    = excluded.item_type,
-                school       = excluded.school,
-                color        = excluded.color,
-                size         = excluded.size,
-                qty          = excluded.qty,
-                unit_price   = excluded.unit_price,
-                total_amount = excluded.total_amount,
-                paid_amount  = excluded.paid_amount,
-                status       = 'معلق',
-                shift_id     = excluded.shift_id,
-                last_event_uuid = excluded.last_event_uuid,
-                updated_at   = excluded.updated_at
             """,
             (
                 src, key, customer, it, sc, cl, sz,
@@ -1285,6 +1525,39 @@ def apply_wh_pos_ledger_sale_exchanged(
     return {"amount": diff}
 
 
+def apply_wh_pos_ledger_sale_bill_type_corrected(
+    conn: sqlite3.Connection,
+    payload: Dict[str, Any],
+    event_uuid: str,
+) -> Dict[str, Any]:
+    src = _src_device(conn, payload, event_uuid)
+    if not src:
+        raise ApplyError("SALE_BILL_TYPE_CORRECTED: missing source_device")
+    amount_delta = float(payload.get("amount_delta") or 0)
+    day = _ledger_day(conn, event_uuid)
+    bid = payload.get("bill_id")
+    try:
+        bid_int = int(bid) if bid is not None else None
+    except (TypeError, ValueError):
+        bid_int = None
+    _ledger_append(
+        conn,
+        src=src,
+        event_uuid=event_uuid,
+        event_type="SALE_BILL_TYPE_CORRECTED",
+        category="bill_correction",
+        amount=amount_delta,
+        day=day,
+        related_id=bid_int,
+        meta={
+            "from_bill_type": _clean(payload.get("from_bill_type")),
+            "to_bill_type": _clean(payload.get("to_bill_type")),
+            "reason": _clean(payload.get("reason")),
+        },
+    )
+    return {"amount": amount_delta}
+
+
 # ----------------------------- registry ------------------------------- #
 
 ApplierFn = Callable[[sqlite3.Connection, Dict[str, Any], str], Dict[str, Any]]
@@ -1301,6 +1574,7 @@ _POS_REGISTRY: Dict[str, ApplierFn] = {
 
 _WAREHOUSE_REGISTRY: Dict[str, ApplierFn] = {
     "POS_STOCK_SNAPSHOT": apply_pos_stock_snapshot,
+    "POS_STOCK_AUDIT_APPLIED": apply_pos_stock_audit_applied,
     "STOCK_RETURN_TO_WAREHOUSE": apply_stock_return_to_warehouse,
     "POS_TRANSFER_VIA_WAREHOUSE": apply_pos_transfer_via_warehouse,
     "RESERVATION_CREATED": apply_wh_pos_reservation_created,
@@ -1311,6 +1585,7 @@ _WAREHOUSE_REGISTRY: Dict[str, ApplierFn] = {
     "SALE_RETURNED": apply_wh_pos_ledger_sale_returned,
     "SALE_VOIDED": apply_wh_pos_ledger_sale_voided,
     "SALE_EXCHANGED": apply_wh_pos_ledger_sale_exchanged,
+    "SALE_BILL_TYPE_CORRECTED": apply_wh_pos_ledger_sale_bill_type_corrected,
 }
 
 

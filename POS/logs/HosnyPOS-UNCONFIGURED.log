@@ -1,0 +1,11 @@
+2026-07-28 18:06:25 INFO hosny: ============================================================
+2026-07-28 18:06:25 INFO hosny: HosnyPOS-UNCONFIGURED starting up (frozen=True, pid=41688, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-28 19:38:56 INFO hosny: ============================================================
+2026-07-28 19:38:56 INFO hosny: HosnyPOS-UNCONFIGURED starting up (frozen=True, pid=57164, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-28 19:47:40 INFO hosny: ============================================================
+2026-07-28 19:47:40 INFO hosny: HosnyPOS-UNCONFIGURED starting up (frozen=False, pid=61288, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-28 19:47:40 INFO hosny: C:\Users\LENOVO\AppData\Local\Temp\codex_receipt_check.html
+2026-07-28 19:47:40 INFO hosny: C:\Users\LENOVO\AppData\Local\Temp\codex_receipt_check_autoprint.html
+2026-07-28 19:47:40 INFO hosny: {'page_80_auto': True, 'min_150': True, 'print_button': True, 'no_auto_onload_print': True}
+2026-07-28 20:00:38 INFO hosny: ============================================================
+2026-07-28 20:00:38 INFO hosny: HosnyPOS-UNCONFIGURED starting up (frozen=True, pid=47740, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)

@@ -3,7 +3,7 @@
 import os
 
 project_dir = os.path.abspath(os.getcwd())
-warehouse_sync_dir = os.path.abspath(os.path.join(project_dir, "..", "ادارة المخازن"))
+warehouse_sync_dir = os.path.abspath(os.path.join(project_dir, "..", "Warehouse"))
 
 a = Analysis(
     ['StockMonitor.py'],
