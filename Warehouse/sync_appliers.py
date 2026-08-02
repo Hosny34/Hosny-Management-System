@@ -36,7 +36,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 
@@ -54,6 +54,29 @@ def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
 
 def _clean(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _timestamp_sort_value(value: Any) -> str:
+    text = _clean(value)
+    if not text:
+        return ""
+    raw = text.replace(" ", "T")
+    try:
+        if raw.endswith("Z"):
+            dt = datetime.fromisoformat(raw[:-1] + "+00:00")
+        else:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone(timedelta(hours=3)))
+        return dt.astimezone(timezone.utc).isoformat()
+    except Exception:
+        return text
+
+
+def _timestamp_is_older(candidate: Any, current: Any) -> bool:
+    cand = _timestamp_sort_value(candidate)
+    cur = _timestamp_sort_value(current)
+    return bool(cand and cur and cand < cur)
 
 
 def _round_up_to_step(value: float, step: int = 5) -> float:
@@ -259,6 +282,50 @@ def _delete_old_spec_history_if_unused(
         )
 
 
+def _apply_spec_value_renames(conn: sqlite3.Connection, payload: Dict[str, Any]) -> int:
+    """Apply broad value-level spec renames carried with SPEC_RENAMED events."""
+    fields = {"item_type", "school", "color", "size"}
+    renames = payload.get("value_renames") or []
+    if not isinstance(renames, list):
+        return 0
+    updated = 0
+    for raw in renames:
+        if not isinstance(raw, dict):
+            continue
+        field = _clean(raw.get("field"))
+        old_value = _clean(raw.get("old_value"))
+        new_value = _clean(raw.get("new_value"))
+        if field not in fields or not old_value or not new_value or old_value == new_value:
+            continue
+        for table in (
+            "stocks",
+            "movements",
+            "bill_items",
+            "reservations",
+            "reservation_alerts",
+            "incoming_shipment_items_pending",
+            "pos_stocks_mirror",
+            "pos_reservations_mirror",
+        ):
+            try:
+                cur = conn.execute(
+                    f"UPDATE {table} SET {field} = ? WHERE LOWER(TRIM({field})) = LOWER(TRIM(?))",
+                    (new_value, old_value),
+                )
+                updated += int(cur.rowcount or 0)
+            except sqlite3.OperationalError:
+                pass
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO spec_history(field,value) VALUES(?,?)",
+                (field, new_value),
+            )
+            _delete_old_spec_history_if_unused(conn, field, old_value)
+        except sqlite3.OperationalError:
+            pass
+    return updated
+
+
 def apply_spec_renamed(
     conn: sqlite3.Connection,
     payload: Dict[str, Any],
@@ -275,6 +342,9 @@ def apply_spec_renamed(
     if not all(old_spec.values()) or not all(new_spec.values()):
         raise ApplyError("SPEC_RENAMED requires complete old/new specs")
     if old_spec == new_spec:
+        value_updates = _apply_spec_value_renames(conn, payload)
+        if value_updates:
+            return {"updated_rows": int(value_updates), "old_spec": old_spec, "new_spec": new_spec, "event_uuid": str(event_uuid)}
         return {"skipped": True, "reason": "old and new specs are identical"}
 
     set_sql = ", ".join(f"{fld}=?" for fld in fields)
@@ -357,6 +427,8 @@ def apply_spec_renamed(
     for fld in fields:
         if old_spec[fld] != new_spec[fld]:
             _delete_old_spec_history_if_unused(conn, fld, old_spec[fld])
+
+    updated_tables += _apply_spec_value_renames(conn, payload)
 
     return {
         "updated_rows": int(updated_tables),
@@ -588,7 +660,7 @@ def apply_pos_stock_snapshot(
         (source_name,),
     ).fetchone()
     current_snapshot_at = _clean(current[0] if current else "")
-    if current_snapshot_at and snapshot_at < current_snapshot_at:
+    if _timestamp_is_older(snapshot_at, current_snapshot_at):
         return {
             "skipped": True,
             "reason": "stale stock snapshot",
@@ -653,7 +725,13 @@ def apply_pos_stock_snapshot(
     return {"mirrored_rows": inserted, "total_value": total_value}
 
 
-def _refresh_pos_stock_snapshot_meta(conn: sqlite3.Connection, source_name: str, snapshot_at: str) -> None:
+def _refresh_pos_stock_snapshot_meta(
+    conn: sqlite3.Connection,
+    source_name: str,
+    snapshot_at: str,
+    *,
+    update_snapshot_at: bool = True,
+) -> None:
     row = conn.execute(
         """
         SELECT COUNT(*) AS row_count, COALESCE(SUM(count * unit_price), 0) AS total_value
@@ -664,16 +742,32 @@ def _refresh_pos_stock_snapshot_meta(conn: sqlite3.Connection, source_name: str,
     ).fetchone()
     row_count = int((row[0] if row else 0) or 0)
     total_value = float((row[1] if row else 0.0) or 0.0)
-    conn.execute(
-        """INSERT INTO pos_stocks_snapshot_meta
-               (source_device, snapshot_at, row_count, total_value)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(source_device) DO UPDATE SET
-               snapshot_at = excluded.snapshot_at,
-               row_count   = excluded.row_count,
-               total_value = excluded.total_value""",
-        (source_name, snapshot_at, row_count, total_value),
-    )
+    if update_snapshot_at:
+        conn.execute(
+            """INSERT INTO pos_stocks_snapshot_meta
+                   (source_device, snapshot_at, row_count, total_value)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(source_device) DO UPDATE SET
+                   snapshot_at = excluded.snapshot_at,
+                   row_count   = excluded.row_count,
+                   total_value = excluded.total_value""",
+            (source_name, snapshot_at, row_count, total_value),
+        )
+    else:
+        current = conn.execute(
+            "SELECT snapshot_at FROM pos_stocks_snapshot_meta WHERE source_device = ?",
+            (source_name,),
+        ).fetchone()
+        preserved_snapshot_at = _clean(current[0] if current else "") or snapshot_at
+        conn.execute(
+            """INSERT INTO pos_stocks_snapshot_meta
+                   (source_device, snapshot_at, row_count, total_value)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(source_device) DO UPDATE SET
+                   row_count   = excluded.row_count,
+                   total_value = excluded.total_value""",
+            (source_name, preserved_snapshot_at, row_count, total_value),
+        )
 
 
 def apply_pos_stock_audit_applied(
@@ -783,8 +877,102 @@ def apply_pos_stock_audit_applied(
             )
         applied_rows += 1
 
-    _refresh_pos_stock_snapshot_meta(conn, source_name, created_at)
+    _refresh_pos_stock_snapshot_meta(conn, source_name, created_at, update_snapshot_at=False)
     return {"audit_uuid": audit_uuid, "applied_rows": applied_rows}
+
+
+def apply_pos_stock_audit_snapshot(
+    conn: sqlite3.Connection,
+    payload: Dict[str, Any],
+    event_uuid: str,
+) -> Dict[str, Any]:
+    """Warehouse-side applier for a POS audit-report snapshot."""
+    source_name = _clean(payload.get("source_device_name")) or _src_device(conn, payload, event_uuid)
+    if not source_name:
+        raise ApplyError("POS_STOCK_AUDIT_SNAPSHOT: missing source device")
+    reports = payload.get("reports") or []
+    if not isinstance(reports, list):
+        raise ApplyError("POS_STOCK_AUDIT_SNAPSHOT: reports must be a list")
+
+    conn.execute(
+        "DELETE FROM pos_stock_audit_items_mirror WHERE source_device = ?",
+        (source_name,),
+    )
+    conn.execute(
+        "DELETE FROM pos_stock_audit_reports_mirror WHERE source_device = ?",
+        (source_name,),
+    )
+
+    report_count = 0
+    line_count = 0
+    received_at = _now_iso()
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        try:
+            report_id = int(report.get("report_id"))
+        except (TypeError, ValueError):
+            continue
+        audit_uuid = f"{source_name}:{report_id}"
+        created_at = _clean(report.get("created_at")) or received_at
+        reason = _clean(report.get("reason"))
+        try:
+            total_diff = int(report.get("total_diff") or 0)
+            total_value = float(report.get("total_value") or 0)
+        except (TypeError, ValueError):
+            total_diff = 0
+            total_value = 0.0
+        conn.execute(
+            """
+            INSERT INTO pos_stock_audit_reports_mirror
+                (audit_uuid, source_device, local_report_id, reason, created_at,
+                 total_diff, total_value, event_uuid, received_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                audit_uuid,
+                source_name,
+                report_id,
+                reason,
+                created_at,
+                total_diff,
+                total_value,
+                event_uuid,
+                received_at,
+            ),
+        )
+        report_count += 1
+        lines = report.get("lines") or []
+        if not isinstance(lines, list):
+            continue
+        for raw in lines:
+            if not isinstance(raw, dict):
+                continue
+            it = _clean(raw.get("item_type"))
+            sc = _clean(raw.get("school"))
+            cl = _clean(raw.get("color"))
+            sz = _clean(raw.get("size"))
+            if not (it and sc and cl and sz):
+                continue
+            try:
+                expected = int(raw.get("expected") or 0)
+                actual = int(raw.get("actual") or 0)
+                diff = int(raw.get("diff", actual - expected) or 0)
+                price = float(raw.get("unit_price") or 0)
+                diff_value = float(raw.get("diff_value", diff * price) or 0)
+            except (TypeError, ValueError):
+                continue
+            conn.execute(
+                """
+                INSERT INTO pos_stock_audit_items_mirror
+                    (audit_uuid, source_device, item_type, school, color, size,
+                     expected_qty, actual_qty, diff_qty, unit_price, diff_value)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (audit_uuid, source_name, it, sc, cl, sz, expected, actual, diff, price, diff_value),
+            )
+            line_count += 1
+    return {"source_device": source_name, "reports": report_count, "lines": line_count}
 
 
 def apply_stock_return_to_warehouse(
@@ -1634,6 +1822,7 @@ _POS_REGISTRY: Dict[str, ApplierFn] = {
 _WAREHOUSE_REGISTRY: Dict[str, ApplierFn] = {
     "POS_STOCK_SNAPSHOT": apply_pos_stock_snapshot,
     "POS_STOCK_AUDIT_APPLIED": apply_pos_stock_audit_applied,
+    "POS_STOCK_AUDIT_SNAPSHOT": apply_pos_stock_audit_snapshot,
     "STOCK_RETURN_TO_WAREHOUSE": apply_stock_return_to_warehouse,
     "POS_TRANSFER_VIA_WAREHOUSE": apply_pos_transfer_via_warehouse,
     "SHIFT_OPENED": apply_wh_pos_shift_opened,

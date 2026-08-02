@@ -21,6 +21,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 POS_DIR = str(REPO / "POS")
 POS_FILE = REPO / "POS" / "HosnyPOS.py"
+POS_SYNC_APPLIERS_FILE = REPO / "POS" / "sync_appliers.py"
 WAREHOUSE_DIR = str(REPO / "Warehouse")
 WAREHOUSE_FILE = REPO / "Warehouse" / "HosnyWarehouse.py"
 WAREHOUSE_SYNC_CORE_FILE = REPO / "Warehouse" / "sync_core.py"
@@ -331,6 +332,13 @@ class TestPosStockAuditSync(unittest.TestCase):
                 VALUES ('POS-TEST-AUDIT','Audit Tee','Audit School','Navy','10',120,5,'2026-07-28 10:00:00')
                 """
             )
+            wh.execute(
+                """
+                INSERT INTO pos_stocks_snapshot_meta
+                    (source_device, snapshot_at, row_count, total_value, app_version)
+                VALUES ('POS-TEST-AUDIT', '2026-07-28 10:00:00', 1, 600.0, '2026.07.28.1')
+                """
+            )
             wh.commit()
             payload = json.loads(outbox["payload_json"])
             result = wh_appliers.apply_pos_stock_audit_applied(wh, payload, outbox["event_uuid"])
@@ -347,10 +355,289 @@ class TestPosStockAuditSync(unittest.TestCase):
                 """
             ).fetchone()[0]
             self.assertEqual(int(count or 0), 3)
+            meta = wh.execute(
+                """
+                SELECT snapshot_at, row_count, total_value
+                  FROM pos_stocks_snapshot_meta
+                 WHERE source_device='POS-TEST-AUDIT'
+                """
+            ).fetchone()
+            self.assertEqual(meta[0], "2026-07-28 10:00:00")
+            self.assertEqual(int(meta[1] or 0), 1)
+            self.assertAlmostEqual(float(meta[2] or 0), 360.0, places=2)
             audit_rows = wh.execute("SELECT COUNT(*) FROM pos_stock_audit_items_mirror").fetchone()[0]
             self.assertEqual(int(audit_rows), 1)
         finally:
             wh.close()
+
+    def test_repeated_audit_report_sync_uses_unique_audit_events(self):
+        self._db = _open_db(self._path)
+        db = self._db
+        db.conn.execute(
+            """
+            UPDATE device_identity
+               SET device_name = 'POS-TEST-AUDIT', device_role = 'pos'
+             WHERE id = 1
+            """
+        )
+        stock_id = db.add_stock("Audit Tee", "Audit School", "Navy", "10", 315.0, 5)
+        report_id = db.create_stock_audit_report([
+            {
+                "stock_id": stock_id,
+                "item_type": "Audit Tee",
+                "school": "Audit School",
+                "color": "Navy",
+                "size": "10",
+                "unit_price": 315.0,
+                "expected": 5,
+                "actual": 4,
+                "diff": -1,
+            }
+        ], reason="auto-equalization")
+        first = {
+            "stock_id": stock_id,
+            "item_type": "Audit Tee",
+            "school": "Audit School",
+            "color": "Navy",
+            "size": "10",
+            "unit_price": 315.0,
+            "expected": 5,
+            "actual": 4,
+            "diff": -1,
+        }
+        second = dict(first, expected=4, actual=5, diff=1)
+        db.record_pos_stock_audit_applied(report_id, [first], reason="auto-equalization")
+        db.record_pos_stock_audit_applied(report_id, [second], reason="auto-equalization")
+
+        outbox_rows = db.conn.execute(
+            """
+            SELECT event_uuid, payload_json
+              FROM sync_outbox
+             WHERE event_type = 'POS_STOCK_AUDIT_APPLIED'
+             ORDER BY local_seq ASC
+            """
+        ).fetchall()
+        self.assertEqual(len(outbox_rows), 2)
+        payloads = [json.loads(r["payload_json"]) for r in outbox_rows]
+        self.assertNotEqual(payloads[0]["audit_uuid"], payloads[1]["audit_uuid"])
+        self.assertTrue(str(payloads[0]["audit_uuid"]).startswith(f"POS-TEST-AUDIT:{report_id}:"))
+        self.assertTrue(str(payloads[1]["audit_uuid"]).startswith(f"POS-TEST-AUDIT:{report_id}:"))
+
+        wh_core = _load_module("warehouse_sync_core_repeat_audit_autotest", WAREHOUSE_SYNC_CORE_FILE)
+        wh_appliers = _load_module("warehouse_sync_appliers_repeat_audit_autotest", WAREHOUSE_SYNC_APPLIERS_FILE)
+        wh = sqlite3.connect(":memory:")
+        try:
+            wh_core.apply_sync_migration(wh)
+            wh.execute(
+                """
+                INSERT INTO pos_stocks_mirror
+                    (source_device,item_type,school,color,size,unit_price,count,snapshot_at)
+                VALUES ('POS-TEST-AUDIT','Audit Tee','Audit School','Navy','10',315,5,'2026-08-02 10:00:00')
+                """
+            )
+            wh.execute(
+                """
+                INSERT INTO pos_stocks_snapshot_meta
+                    (source_device, snapshot_at, row_count, total_value, app_version)
+                VALUES ('POS-TEST-AUDIT', '2026-08-02 10:00:00', 1, 1575.0, '2026.08.02.5')
+                """
+            )
+            wh.commit()
+            for row, payload in zip(outbox_rows, payloads):
+                wh_appliers.apply_pos_stock_audit_applied(wh, payload, row["event_uuid"])
+            count = wh.execute(
+                """
+                SELECT COALESCE(SUM(count), 0)
+                  FROM pos_stocks_mirror
+                 WHERE source_device='POS-TEST-AUDIT'
+                   AND item_type='Audit Tee'
+                   AND school='Audit School'
+                   AND color='Navy'
+                   AND size='10'
+                """
+            ).fetchone()[0]
+            self.assertEqual(int(count or 0), 5)
+            total = wh.execute(
+                """
+                SELECT COALESCE(SUM(total_value), 0)
+                  FROM pos_stock_audit_reports_mirror
+                 WHERE source_device='POS-TEST-AUDIT'
+                """
+            ).fetchone()[0]
+            self.assertAlmostEqual(float(total or 0), 0.0, places=2)
+        finally:
+            wh.close()
+
+    def test_audit_snapshot_replaces_stale_partial_audit_mirror(self):
+        wh_core = _load_module("warehouse_sync_core_audit_snapshot_autotest", WAREHOUSE_SYNC_CORE_FILE)
+        wh_appliers = _load_module("warehouse_sync_appliers_audit_snapshot_autotest", WAREHOUSE_SYNC_APPLIERS_FILE)
+        wh = sqlite3.connect(":memory:")
+        try:
+            wh_core.apply_sync_migration(wh)
+            wh.execute(
+                """
+                INSERT INTO pos_stock_audit_reports_mirror
+                    (audit_uuid, source_device, local_report_id, reason, created_at,
+                     total_diff, total_value, event_uuid, received_at)
+                VALUES ('POS-TEST-AUDIT:1', 'POS-TEST-AUDIT', 1, 'auto-equalization',
+                        '2026-08-02T12:52:10', -1, -315, 'old-event', '2026-08-02T12:52:30')
+                """
+            )
+            wh.execute(
+                """
+                INSERT INTO pos_stock_audit_items_mirror
+                    (audit_uuid, source_device, item_type, school, color, size,
+                     expected_qty, actual_qty, diff_qty, unit_price, diff_value)
+                VALUES ('POS-TEST-AUDIT:1', 'POS-TEST-AUDIT', 'Audit Tee', 'Audit School',
+                        'Navy', '12', 5, 4, -1, 315, -315)
+                """
+            )
+            payload = {
+                "source_device_name": "POS-TEST-AUDIT",
+                "snapshot_at": "2026-08-02T14:30:00",
+                "reports": [
+                    {
+                        "report_id": 1,
+                        "created_at": "2026-08-02T12:52:15",
+                        "reason": "auto-equalization",
+                        "diff_count": 2,
+                        "total_diff": 0,
+                        "total_value": 0.0,
+                        "lines": [
+                            {
+                                "item_type": "Audit Tee",
+                                "school": "Audit School",
+                                "color": "Navy",
+                                "size": "12",
+                                "expected": 5,
+                                "actual": 4,
+                                "diff": -1,
+                                "unit_price": 315.0,
+                                "diff_value": -315.0,
+                            },
+                            {
+                                "item_type": "Audit Tee",
+                                "school": "Audit School",
+                                "color": "Navy",
+                                "size": "12",
+                                "expected": 4,
+                                "actual": 5,
+                                "diff": 1,
+                                "unit_price": 315.0,
+                                "diff_value": 315.0,
+                            },
+                        ],
+                    }
+                ],
+            }
+            result = wh_appliers.apply_pos_stock_audit_snapshot(wh, payload, "snapshot-event")
+            self.assertEqual(result["reports"], 1)
+            self.assertEqual(result["lines"], 2)
+            row = wh.execute(
+                """
+                SELECT COUNT(*) AS c, COALESCE(SUM(total_diff), 0) AS qty,
+                       COALESCE(SUM(total_value), 0) AS value
+                  FROM pos_stock_audit_reports_mirror
+                 WHERE source_device='POS-TEST-AUDIT'
+                """
+            ).fetchone()
+            self.assertEqual(int(row[0] or 0), 1)
+            self.assertEqual(int(row[1] or 0), 0)
+            self.assertAlmostEqual(float(row[2] or 0), 0.0, places=2)
+        finally:
+            wh.close()
+
+
+class TestPosStockSnapshotSync(unittest.TestCase):
+    """Warehouse must compare POS stock snapshot timestamps by instant."""
+
+    def test_utc_snapshot_after_local_snapshot_is_not_skipped(self):
+        wh_core = _load_module("warehouse_sync_core_snapshot_time_autotest", WAREHOUSE_SYNC_CORE_FILE)
+        wh_appliers = _load_module("warehouse_sync_appliers_snapshot_time_autotest", WAREHOUSE_SYNC_APPLIERS_FILE)
+        wh = sqlite3.connect(":memory:")
+        try:
+            wh_core.apply_sync_migration(wh)
+            wh.execute(
+                """
+                INSERT INTO pos_stocks_snapshot_meta
+                    (source_device, snapshot_at, row_count, total_value, app_version)
+                VALUES ('POS-OCT', '2026-08-02T12:52:10', 1, 1260.0, '2026.8.2.2')
+                """
+            )
+            wh.execute(
+                """
+                INSERT INTO pos_stocks_mirror
+                    (source_device,item_type,school,color,size,unit_price,count,snapshot_at)
+                VALUES ('POS-OCT','Audit Tee','Audit School','Navy','12',315,4,'2026-08-02T12:52:10')
+                """
+            )
+            result = wh_appliers.apply_pos_stock_snapshot(
+                wh,
+                {
+                    "source_device_name": "POS-OCT",
+                    "snapshot_at": "2026-08-02T11:35:24.885389Z",
+                    "app_version": "2026.8.2.10",
+                    "rows": [
+                        {
+                            "item_type": "Audit Tee",
+                            "school": "Audit School",
+                            "color": "Navy",
+                            "size": "12",
+                            "unit_price": 315.0,
+                            "count": 5,
+                        }
+                    ],
+                },
+                "snapshot-utc-newer",
+            )
+            self.assertFalse(result.get("skipped"))
+            meta = wh.execute(
+                "SELECT total_value, app_version FROM pos_stocks_snapshot_meta WHERE source_device='POS-OCT'"
+            ).fetchone()
+            self.assertAlmostEqual(float(meta[0] or 0), 1575.0, places=2)
+            self.assertEqual(meta[1], "2026.8.2.10")
+        finally:
+            wh.close()
+
+
+class TestSpecRenameSync(unittest.TestCase):
+    """Spec rename events must repair leftover branch aliases generically."""
+
+    def setUp(self):
+        self._path = _db_path()
+        self._db: SqliteDatabase | None = None
+        self.addCleanup(lambda p=self._path: os.path.isfile(p) and os.remove(p))
+        self.addCleanup(lambda: _close_db(self._db))
+
+    def test_value_rename_updates_leftover_pos_stock_school(self):
+        self._db = _open_db(self._path)
+        db = self._db
+        db.add_stock("تيشيرت صيفي", "الالمانية", "احمر ف كحلي", "4", 260.0, 6)
+        appliers = _load_module("pos_sync_appliers_value_rename_autotest", POS_SYNC_APPLIERS_FILE)
+        payload = {
+            "old_spec": {
+                "item_type": "تيشيرت صيفي",
+                "school": "الالمانية KG",
+                "color": "احمر ف كحلي",
+                "size": "4",
+            },
+            "new_spec": {
+                "item_type": "تيشيرت صيفي",
+                "school": "الالمانية KG",
+                "color": "احمر ف كحلي",
+                "size": "4",
+            },
+            "changed_fields": [],
+            "value_renames": [
+                {"field": "school", "old_value": "الالمانية", "new_value": "الالمانية KG"},
+            ],
+        }
+        result = appliers.apply_spec_renamed(db.conn, payload, "event-value-rename")
+        self.assertGreaterEqual(int(result["updated_rows"]), 1)
+        old_count = _stock_sum(db, "تيشيرت صيفي", "الالمانية", "احمر ف كحلي", "4")
+        new_count = _stock_sum(db, "تيشيرت صيفي", "الالمانية KG", "احمر ف كحلي", "4")
+        self.assertEqual(old_count, 0)
+        self.assertEqual(new_count, 6)
 
 
 class TestWarehouseBranchStockViews(unittest.TestCase):
@@ -430,6 +717,113 @@ class TestWarehouseBranchStockViews(unittest.TestCase):
         monitor = {r["branch_device"]: r for r in db.list_pos_branch_monitor("2026-07-30", "2026-07-30")}
         self.assertEqual(monitor["POS-ZAY"]["last_sync_at"], "2026-07-30T18:30:00.000000Z")
         self.assertEqual(monitor["POS-ZAY"]["snapshot_at"], "2026-07-30T17:02:54.000000Z")
+
+    def test_monitor_app_version_uses_latest_sync_payload_not_stale_snapshot(self):
+        wh_mod = _load_warehouse_module()
+        self._db = wh_mod.SqliteDatabase(path=self._path, legacy_json=str(REPO / "nonexistent_warehouse_legacy.json"))
+        db = self._db
+        with db.conn:
+            db.conn.execute(
+                """
+                INSERT OR REPLACE INTO known_devices
+                    (device_name, device_uuid, role, last_seen_at, updated_at)
+                VALUES ('POS-ZAY', 'uuid-zay', 'pos', '2026-08-02T11:20:00Z', '2026-08-02T11:20:05Z')
+                """
+            )
+            db.conn.execute(
+                """
+                INSERT OR REPLACE INTO pos_stocks_snapshot_meta
+                    (source_device, snapshot_at, row_count, total_value, app_version)
+                VALUES ('POS-ZAY', '2026-08-02T10:00:00Z', 1, 100.0, '2026.8.2.2')
+                """
+            )
+            db.conn.execute(
+                """
+                INSERT OR REPLACE INTO sync_inbox
+                    (event_uuid, event_type, server_seq, source_device, payload_json,
+                     applied_at, apply_status, apply_attempts, apply_at)
+                VALUES ('version-event', 'POS_STOCK_AUDIT_SNAPSHOT', 50, 'POS-ZAY', ?,
+                        '2026-08-02T11:21:00Z', 'ok', 1, '2026-08-02T11:21:01Z')
+                """,
+                (json.dumps({
+                    "source_device_name": "POS-ZAY",
+                    "app_version": "2026.8.2.5",
+                    "reports": [],
+                }, ensure_ascii=False),),
+            )
+
+        monitor = {r["branch_device"]: r for r in db.list_pos_branch_monitor("2026-08-02", "2026-08-02")}
+        self.assertEqual(monitor["POS-ZAY"]["app_version"], "2026.8.2.5")
+
+    def test_monitor_app_version_uses_latest_apply_time_when_server_seq_resets(self):
+        wh_mod = _load_warehouse_module()
+        self._db = wh_mod.SqliteDatabase(path=self._path, legacy_json=str(REPO / "nonexistent_warehouse_legacy.json"))
+        db = self._db
+        with db.conn:
+            db.conn.execute(
+                """
+                INSERT OR REPLACE INTO known_devices
+                    (device_name, device_uuid, role, last_seen_at, updated_at)
+                VALUES ('POS-ZAY', 'uuid-zay', 'pos', '2026-08-02T11:40:00Z', '2026-08-02T11:40:05Z')
+                """
+            )
+            for event_uuid, server_seq, apply_at, version in (
+                ("new-version-low-seq", 10, "2026-08-02T11:35:00Z", "2026.8.2.10"),
+                ("old-version-high-seq", 170, "2026-08-02T10:37:00Z", "2026.08.02.3"),
+            ):
+                db.conn.execute(
+                    """
+                    INSERT OR REPLACE INTO sync_inbox
+                        (event_uuid, event_type, server_seq, source_device, payload_json,
+                         applied_at, apply_status, apply_attempts, apply_at)
+                    VALUES (?, 'POS_STOCK_SNAPSHOT', ?, 'POS-ZAY', ?,
+                            ?, 'ok', 1, ?)
+                    """,
+                    (
+                        event_uuid,
+                        server_seq,
+                        json.dumps({"source_device_name": "POS-ZAY", "app_version": version, "rows": []}),
+                        apply_at,
+                        apply_at,
+                    ),
+                )
+
+        monitor = {r["branch_device"]: r for r in db.list_pos_branch_monitor("2026-08-02", "2026-08-02")}
+        self.assertEqual(monitor["POS-ZAY"]["app_version"], "2026.8.2.10")
+
+    def test_monitor_zero_net_audit_does_not_warn(self):
+        wh_mod = _load_warehouse_module()
+        self._db = wh_mod.SqliteDatabase(path=self._path, legacy_json=str(REPO / "nonexistent_warehouse_legacy.json"))
+        db = self._db
+        with db.conn:
+            db.conn.execute(
+                """
+                INSERT OR REPLACE INTO known_devices
+                    (device_name, device_uuid, role, last_seen_at, updated_at)
+                VALUES ('POS-ZAY', 'uuid-zay', 'pos', '2026-08-02T11:40:00Z', '2026-08-02T11:40:05Z')
+                """
+            )
+            db.conn.execute(
+                """
+                INSERT OR REPLACE INTO pos_stocks_snapshot_meta
+                    (source_device, snapshot_at, row_count, total_value, app_version)
+                VALUES ('POS-ZAY', '2026-08-02T11:35:00Z', 1, 100.0, '2026.8.2.10')
+                """
+            )
+            db.conn.execute(
+                """
+                INSERT INTO pos_stock_audit_reports_mirror
+                    (audit_uuid, source_device, local_report_id, reason, created_at,
+                     total_diff, total_value, event_uuid, received_at)
+                VALUES ('POS-ZAY:1', 'POS-ZAY', 1, 'auto-equalization',
+                        '2026-08-02T12:52:15', 0, 0, 'audit-snapshot', '2026-08-02T11:36:00Z')
+                """
+            )
+
+        monitor = {r["branch_device"]: r for r in db.list_pos_branch_monitor("2026-08-02", "2026-08-02")}
+        self.assertEqual(monitor["POS-ZAY"]["audit_adjust_qty"], 0)
+        self.assertAlmostEqual(float(monitor["POS-ZAY"]["audit_adjust_value"]), 0.0, places=2)
+        self.assertEqual(monitor["POS-ZAY"]["status"], "جيد")
 
 
 class TestWarehousePriceProfiles(unittest.TestCase):
@@ -956,6 +1350,14 @@ class TestItemTypeOrdering(unittest.TestCase):
         branch_shell = object.__new__(wh_mod.BranchStockWindow)
         branch_shell._all_rows = [(item, "School O", "Black", "10", 100.0, 1) for item in reversed(expected)]
         self.assertEqual(branch_shell._branch_distinct("item_type", {}), expected)
+
+    def test_unknown_item_types_sort_after_preferred_items(self):
+        wh_mod = _load_warehouse_module()
+        hoodie = "\u0647\u0648\u062f\u064a"
+        shirt = "\u062a\u064a\u0634\u064a\u0631\u062a \u0635\u064a\u0641\u064a"
+        trouser = "\u0628\u0646\u0637\u0644\u0648\u0646"
+        self.assertEqual(_MOD.sort_item_type_values([hoodie, trouser, shirt]), [shirt, trouser, hoodie])
+        self.assertEqual(wh_mod.sort_warehouse_item_type_values([hoodie, trouser, shirt]), [shirt, trouser, hoodie])
 
 
 class TestSchoolAccountsCashFlow(unittest.TestCase):

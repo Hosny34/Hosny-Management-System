@@ -1032,9 +1032,6 @@ class SyncClient:
             json.dumps(snapshot_rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         meta_key = f"pos_stock_snapshot_hash:{device_name}"
-        if _sync_meta_get(self.conn, meta_key) == snapshot_hash:
-            return None
-
         payload = {
             "source_device_name": device_name,
             "snapshot_at":        snapshot_at,

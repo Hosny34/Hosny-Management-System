@@ -10,6 +10,7 @@ import time
 import tempfile
 import webbrowser
 import re
+import uuid
 import unicodedata
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from dataclasses import dataclass
@@ -6740,7 +6741,7 @@ class SqliteDatabase:
                 "diff_value": float(diff * price),
             })
         payload = {
-            "audit_uuid": f"{source_device}:{int(report_id)}",
+            "audit_uuid": f"{source_device}:{int(report_id)}:{uuid.uuid4().hex}",
             "source_device_name": source_device,
             "report_id": int(report_id),
             "reason": str(reason or ""),
@@ -8560,7 +8561,7 @@ class POSFrame(ttk.Frame):
             btn.pack(side=tk.LEFT, padx=3, pady=3)
 
     # ------------------------------------------------------------------ navigation
-    # Flow: Schools -> Colors -> Items -> Sizes
+    # Flow: Schools -> Items -> Colors -> Sizes
 
     def _render_schools(self):
         """Entry point: show school buttons."""
@@ -8594,15 +8595,18 @@ class POSFrame(ttk.Frame):
     def _select_school(self, school: str):
         self._sel_school = school
         self._price_user_edited = False
-        self._render_colors()
+        self._render_items()
 
     def _render_items(self):
-        """Show item type buttons for the selected school + color."""
+        """Show item type buttons for the selected school."""
         self._sel_item = None
         self._sel_size = None
-        self._crumb_var.set(
-            f"المدرسة: {self._sel_school}  \u27f6  اللون: {self._sel_color}  \u27f6  اختر النوع"
-        )
+        if self._sel_color:
+            self._crumb_var.set(
+                f"المدرسة: {self._sel_school}  \u27f6  اللون: {self._sel_color}  \u27f6  اختر النوع"
+            )
+        else:
+            self._crumb_var.set(f"المدرسة: {self._sel_school}  \u27f6  اختر النوع")
         self._clear_grid()
 
         item_f = self._flt_item.get() or None
@@ -8616,30 +8620,32 @@ class POSFrame(ttk.Frame):
         except Exception:
             items = []
 
+        items = sort_item_type_values(items)
         if item_f:
             items = [i for i in items if i == item_f]
 
         self._mk_grid_buttons(items, self._select_item, cols=4)
-        ttk.Button(self._grid_host, text="\u25c4 رجوع إلى الألوان", command=self._render_colors)\
+        ttk.Button(self._grid_host, text="\u25c4 رجوع إلى المدارس", command=self._render_schools)\
             .pack(anchor="w", padx=4, pady=4)
 
     def _select_item(self, item_type: str):
         self._sel_item = item_type
         self._price_user_edited = False
-        self._render_sizes()
+        self._render_colors()
 
     def _render_colors(self):
-        """Show color buttons for selected school."""
+        """Show color buttons for selected school + item type."""
         self._sel_color = None
         self._sel_size = None
-        self._crumb_var.set(f"المدرسة: {self._sel_school}  \u27f6  اختر اللون")
+        self._crumb_var.set(
+            f"المدرسة: {self._sel_school}  \u27f6  النوع: {self._sel_item}  \u27f6  اختر اللون"
+        )
         self._clear_grid()
 
         color_f = self._flt_color.get() or None
-        item_f = self._flt_item.get() or None
         constraints: Dict[str, Any] = {"school": self._sel_school}
-        if item_f:
-            constraints["item_type"] = item_f
+        if self._sel_item:
+            constraints["item_type"] = self._sel_item
         try:
             colors = self.db.get_distinct_filtered("color", constraints)
         except Exception:
@@ -8649,13 +8655,13 @@ class POSFrame(ttk.Frame):
             colors = [c for c in colors if c == color_f]
 
         self._mk_grid_buttons(colors, self._select_color, cols=4)
-        ttk.Button(self._grid_host, text="\u25c4 رجوع إلى المدارس", command=self._render_schools)\
+        ttk.Button(self._grid_host, text="\u25c4 رجوع إلى الأنواع", command=self._render_items)\
             .pack(anchor="w", padx=4, pady=4)
 
     def _select_color(self, color: str):
         self._sel_color = color
         self._price_user_edited = False
-        self._render_items()
+        self._render_sizes()
 
     @staticmethod
     def _spec_match(a: str, b: str) -> bool:
@@ -8776,7 +8782,7 @@ class POSFrame(ttk.Frame):
     def _render_sizes(self, preserve_size: Optional[str] = None):
         self._sel_size = None
         self._crumb_var.set(
-            f"المدرسة: {self._sel_school}  \u27f6  اللون: {self._sel_color}  \u27f6  النوع: {self._sel_item}  \u27f6  اختر المقاس"
+            f"المدرسة: {self._sel_school}  \u27f6  النوع: {self._sel_item}  \u27f6  اللون: {self._sel_color}  \u27f6  اختر المقاس"
         )
         self._clear_grid()
 
@@ -9052,17 +9058,17 @@ class POSFrame(ttk.Frame):
             self._sel_item = it
             self._sel_color = cl
             self._render_sizes()
-        elif sc and cl:
-            self._sel_school = sc
-            self._sel_color = cl
-            self._render_items()
         elif sc and it:
             self._sel_school = sc
             self._sel_item = it
             self._render_colors()
+        elif sc and cl:
+            self._sel_school = sc
+            self._sel_color = cl
+            self._render_items()
         elif sc:
             self._sel_school = sc
-            self._render_colors()
+            self._render_items()
         else:
             self._render_schools()
 
@@ -9082,10 +9088,10 @@ class POSFrame(ttk.Frame):
         if not query:
             if self._sel_school and self._sel_color and self._sel_item:
                 self._render_sizes()
-            elif self._sel_school and self._sel_color:
-                self._render_items()
-            elif self._sel_school:
+            elif self._sel_school and self._sel_item:
                 self._render_colors()
+            elif self._sel_school:
+                self._render_items()
             else:
                 self._render_schools()
             return
@@ -9156,10 +9162,10 @@ class POSFrame(ttk.Frame):
 
         if self._sel_school and self._sel_color and self._sel_item:
             self._render_sizes()
-        elif self._sel_school and self._sel_color:
-            self._render_items()
-        elif self._sel_school:
+        elif self._sel_school and self._sel_item:
             self._render_colors()
+        elif self._sel_school:
+            self._render_items()
         else:
             self._render_schools()
 

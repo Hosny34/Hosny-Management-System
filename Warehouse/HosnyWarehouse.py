@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 
-APP_VERSION = "2026.08.02.1"
+APP_VERSION = "2026.8.2.11"
 APP_TITLE = "إدارة المخازن"
 
 _DIGIT_TRANSLATION = str.maketrans({
@@ -3104,10 +3104,18 @@ class SqliteDatabase:
                 "size": str(old_sz or "").strip(),
             }
             if old_spec != new_spec:
+                changed_fields = [
+                    fld for fld in ("item_type", "school", "color", "size")
+                    if old_spec.get(fld) != new_spec.get(fld)
+                ]
                 rename_events.append({
                     "old_spec": old_spec,
                     "new_spec": new_spec,
-                    "changed_fields": [fld for fld in ("item_type", "school", "color", "size") if old_spec.get(fld) != new_spec.get(fld)],
+                    "changed_fields": changed_fields,
+                    "value_renames": [
+                        {"field": fld, "old_value": old_spec[fld], "new_value": new_spec[fld]}
+                        for fld in changed_fields
+                    ],
                 })
         return rename_events
 
@@ -5681,6 +5689,7 @@ class SqliteDatabase:
                     "dead_letters": 0,
                     "status": "",
                     "notes": "",
+                    "_app_version_seen_at": "",
                 }
             return out[dev]
 
@@ -5736,6 +5745,52 @@ class SqliteDatabase:
                 row["stock_value"] = float(r["total_value"] or 0.0)
                 latest_source_by_branch[row["branch_device"]] = (src, snap)
             row["last_sync_at"] = latest_timestamp_text(row.get("last_sync_at"), snap)
+
+        try:
+            version_rows = self.conn.execute(
+                """
+                SELECT source_device, payload_json, COALESCE(apply_at, applied_at, '') AS seen_at
+                  FROM sync_inbox
+                 WHERE payload_json LIKE '%"app_version"%'
+                 ORDER BY server_seq ASC
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            version_rows = []
+        for vr in version_rows:
+            try:
+                payload = json.loads(vr["payload_json"] or "{}")
+            except Exception:
+                continue
+            app_version = str(payload.get("app_version") or "").strip()
+            if not app_version:
+                continue
+            source_name = str(payload.get("source_device_name") or vr["source_device"] or "").strip()
+            branch_dev = configured_branch_device_name(source_name)
+            if not branch_dev:
+                try:
+                    row = self.conn.execute(
+                        """
+                        SELECT device_name FROM known_devices
+                         WHERE TRIM(device_uuid) = TRIM(?)
+                            OR LOWER(TRIM(device_name)) = LOWER(?)
+                         LIMIT 1
+                        """,
+                        (source_name, source_name),
+                    ).fetchone()
+                    if row and row[0]:
+                        branch_dev = configured_branch_device_name(str(row[0] or ""))
+                except sqlite3.OperationalError:
+                    branch_dev = None
+            if not branch_dev:
+                continue
+            row = _ensure(branch_dev)
+            seen_at = str(vr["seen_at"] or "")
+            latest_seen = latest_timestamp_text(row.get("_app_version_seen_at"), seen_at)
+            if latest_seen == seen_at or not row.get("app_version"):
+                row["app_version"] = app_version
+                row["_app_version_seen_at"] = seen_at
+            row["last_sync_at"] = latest_timestamp_text(row.get("last_sync_at"), seen_at)
 
         for dev, row in out.items():
             row["sync_age_min"] = timestamp_age_minutes(row.get("last_sync_at"))
@@ -5887,7 +5942,7 @@ class SqliteDatabase:
             row["audit_adjust_qty"] = int(audit.get("audit_qty") or 0)
             row["audit_adjust_value"] = float(audit.get("audit_value") or 0.0)
             row["latest_audit_at"] = str(audit.get("latest_audit_at") or "")
-            if int(row["audit_adjust_count"]):
+            if int(row["audit_adjust_qty"]) or abs(float(row["audit_adjust_value"])) > 0.0001:
                 notes.append(
                     "جرد POS: %s / %s"
                     % (
@@ -10330,15 +10385,15 @@ class OutcomeFrame(ttk.Frame):
         self._sel_size = None
         self._price_user_edited = False
 
-        # Render: School -> Color -> Item -> Size
+        # Render: School -> Item -> Color -> Size
         if school and item_type and color:
             self._render_sizes()
-        elif school and color:
-            self._render_items()
         elif school and item_type:
             self._render_colors()
+        elif school and color:
+            self._render_items()
         elif school:
-            self._render_colors()
+            self._render_items()
         else:
             self._render_schools()
 
@@ -10531,27 +10586,35 @@ class OutcomeFrame(ttk.Frame):
         show_toast(self, f"تم التحديد: {item_type} / {school} / {color}")
 
     def _render_items(self):
-        """Show item types for the selected school + color."""
+        """Show item types for the selected school."""
         self._sel_item = None
         self._sel_size = None
         self._clear_grid()
 
         if self._sel_school:
-            self._crumb_var.set(f"المدرسة: {self._sel_school}  ⟶  اللون: {self._sel_color}  ⟶  اختر النوع")
+            if self._sel_color:
+                self._crumb_var.set(
+                    f"المدرسة: {self._sel_school}  ⟶  اللون: {self._sel_color}  ⟶  اختر النوع"
+                )
+            else:
+                self._crumb_var.set(f"المدرسة: {self._sel_school}  ⟶  اختر النوع")
             try:
+                constraints = {
+                    "warehouse_no": self._sel_warehouse_no,
+                    "school": self._sel_school,
+                }
+                if self._sel_color:
+                    constraints["color"] = self._sel_color
                 items = sort_warehouse_item_type_values({
                     str(r.get("item_type") or "").strip()
-                    for r in self.db.current_inventory({
-                        "warehouse_no": self._sel_warehouse_no,
-                        "school": self._sel_school,
-                        "color": self._sel_color,
-                    })
+                    for r in self.db.current_inventory(constraints)
                     if str(r.get("item_type") or "").strip()
                 })
             except Exception:
                 items = []
+            items = sort_warehouse_item_type_values(items)
             self._mk_grid_buttons(items, self._select_item, cols=4)
-            tk.Button(self._grid_host, text="◀ رجوع إلى الألوان", command=self._render_colors,
+            tk.Button(self._grid_host, text="◀ رجوع إلى المدارس", command=self._render_schools,
                       **self._BTN_GRAY).pack(anchor="w", padx=4, pady=4)
             self._bind_grid_scroll()
         else:
@@ -10566,6 +10629,7 @@ class OutcomeFrame(ttk.Frame):
                 })
             except Exception:
                 items = []
+            items = sort_warehouse_item_type_values(items)
             self._mk_grid_buttons(items, self._select_item, cols=4)
             self._bind_grid_scroll()
 
@@ -10574,18 +10638,18 @@ class OutcomeFrame(ttk.Frame):
         self._sel_item = item_type
         self._price_user_edited = False
         self._sync_filters_to_combos()
-        self._render_sizes()
+        self._render_colors()
 
     def _select_school(self, school: str):
         self._sel_school = school
         self._price_user_edited = False
         self._sync_filters_to_combos()
-        self._render_colors()
+        self._render_items()
 
     def _render_colors(self):
         self._sel_color = None
         self._sel_size = None
-        self._crumb_var.set(f"{self._sel_school}  ⟶  اختر اللون")
+        self._crumb_var.set(f"{self._sel_school}  ⟶  {self._sel_item}  ⟶  اختر اللون")
         self._clear_grid()
         constraints = {
             "warehouse_no": self._sel_warehouse_no,
@@ -10596,7 +10660,7 @@ class OutcomeFrame(ttk.Frame):
         rows = self.db.current_inventory(constraints)
         colors = sorted({str(r.get("color") or "").strip() for r in rows if str(r.get("color") or "").strip()})
         self._mk_grid_buttons(colors, self._select_color, cols=4)
-        tk.Button(self._grid_host, text="◀ رجوع إلى المدارس", command=self._render_schools,
+        tk.Button(self._grid_host, text="◀ رجوع إلى الأنواع", command=self._render_items,
                   **self._BTN_GRAY).pack(anchor="w", padx=4, pady=4)
         self._bind_grid_scroll()
 
@@ -10604,7 +10668,7 @@ class OutcomeFrame(ttk.Frame):
         self._sel_color = color
         self._price_user_edited = False
         self._sync_filters_to_combos()
-        self._render_items()
+        self._render_sizes()
 
     @staticmethod
     def _spec_match(a: str, b: str) -> bool:
@@ -10640,7 +10704,7 @@ class OutcomeFrame(ttk.Frame):
     def _render_sizes(self, preserve_size: Optional[str] = None):
         self._sel_size = None
         self._crumb_var.set(
-            f"{self._sel_school}  ⟶  {self._sel_color}  ⟶  {self._sel_item}  ⟶  اختر المقاس"
+            f"{self._sel_school}  ⟶  {self._sel_item}  ⟶  {self._sel_color}  ⟶  اختر المقاس"
         )
         self._clear_grid()
 
@@ -15391,6 +15455,8 @@ class BranchStockWindow(tk.Toplevel):
                    command=self._reload_devices).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="مزامنة الآن",
                    command=self._run_sync_and_reload).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="إصلاح مواصفات…",
+                   command=self._repair_selected_spec).pack(side=tk.LEFT, padx=4)
 
         # Filter row
         filt = ttk.LabelFrame(self, text="تصنيف")
@@ -15545,7 +15611,7 @@ class BranchStockWindow(tk.Toplevel):
                 SELECT item_type, school, color, size, unit_price, count
                   FROM pos_stocks_mirror
                  WHERE source_device = ?
-                 ORDER BY item_type, school, color, size
+                 ORDER BY school, item_type, color, size
                 """,
                 (source_name,),
             ).fetchall()
@@ -15556,6 +15622,11 @@ class BranchStockWindow(tk.Toplevel):
             (r[0], r[1], r[2], r[3], float(r[4] or 0), int(r[5] or 0))
             for r in rows
         ]
+        self._all_rows.sort(key=lambda r: (
+            str(r[1] or "").casefold(),
+            warehouse_item_sort_key(r[0], r[2]),
+            warehouse_size_sort_key(r[3]),
+        ))
         self._refresh_filter_values()
         self._apply_filter()
 
@@ -15595,6 +15666,209 @@ class BranchStockWindow(tk.Toplevel):
         self._filter_var.set("")
         self._refresh_filter_values()
         self._apply_filter()
+
+    def _selected_branch_row(self) -> Optional[Dict[str, Any]]:
+        sel = self._tree.selection()
+        if not sel:
+            return None
+        vals = self._tree.item(sel[0], "values") or ()
+        if len(vals) < 4:
+            return None
+        return {
+            "item_type": str(vals[0] or "").strip(),
+            "school": str(vals[1] or "").strip(),
+            "color": str(vals[2] or "").strip(),
+            "size": str(vals[3] or "").strip(),
+        }
+
+    def _repair_selected_spec(self):
+        old_spec = self._selected_branch_row()
+        if not old_spec:
+            messagebox.showwarning("حدد صفاً", "اختر صفاً من مخزون الفرع أولاً.", parent=self)
+            return
+        pick = (self._device_var.get() or "").strip()
+        branch_device = getattr(self, "_device_ui_to_raw", {}).get(pick, pick)
+        source_name = getattr(self, "_device_source_by_raw", {}).get(branch_device, branch_device)
+        if not branch_device or not source_name:
+            messagebox.showwarning("حدد الفرع", "اختر فرع POS أولاً.", parent=self)
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("إصلاح مواصفات فرع POS")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            frm,
+            text=f"{branch_display_name(branch_device)}: {old_spec['item_type']} / {old_spec['school']} / {old_spec['color']} / {old_spec['size']}",
+            font=("", 10, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(frm, text="اكتب القيم الصحيحة. الحقول الفارغة تبقى كما هي.").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
+
+        item_var = tk.StringVar(value=old_spec["item_type"])
+        school_var = tk.StringVar(value=old_spec["school"])
+        color_var = tk.StringVar(value=old_spec["color"])
+        size_var = tk.StringVar(value="")
+        old_item_var = tk.StringVar(value="")
+        old_school_var = tk.StringVar(value="")
+        old_color_var = tk.StringVar(value="")
+        old_size_var = tk.StringVar(value="")
+        all_sizes_var = tk.BooleanVar(value=True)
+
+        fields = [
+            ("النوع الصحيح:", item_var),
+            ("المدرسة الصحيحة:", school_var),
+            ("اللون الصحيح:", color_var),
+            ("المقاس الصحيح:", size_var),
+        ]
+        for row, (label, var) in enumerate(fields, start=2):
+            ttk.Label(frm, text=label).grid(row=row, column=0, sticky="e", padx=6, pady=4)
+            ttk.Entry(frm, textvariable=var, width=36).grid(row=row, column=1, sticky="ew", padx=6, pady=4)
+        ttk.Label(frm, text="إذا كان الفرع ما زال يعرض قيمة قديمة، اكتبها هنا.").grid(
+            row=6, column=0, columnspan=2, sticky="w", pady=(8, 2)
+        )
+        old_fields = [
+            ("النوع القديم في الفرع:", old_item_var),
+            ("المدرسة القديمة في الفرع:", old_school_var),
+            ("اللون القديم في الفرع:", old_color_var),
+            ("المقاس القديم في الفرع:", old_size_var),
+        ]
+        for row, (label, var) in enumerate(old_fields, start=7):
+            ttk.Label(frm, text=label).grid(row=row, column=0, sticky="e", padx=6, pady=4)
+            ttk.Entry(frm, textvariable=var, width=36).grid(row=row, column=1, sticky="ew", padx=6, pady=4)
+        ttk.Checkbutton(
+            frm,
+            text="تطبيق على كل المقاسات لنفس النوع/المدرسة/اللون",
+            variable=all_sizes_var,
+        ).grid(row=11, column=0, columnspan=2, sticky="w", padx=6, pady=(6, 2))
+        frm.columnconfigure(1, weight=1)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=12, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(btns, text="إلغاء", command=dlg.destroy).pack(side=tk.RIGHT)
+
+        def _clean(value: Any, fallback: str = "") -> str:
+            text = str(value or "").strip()
+            return text if text else fallback
+
+        def on_ok():
+            new_base = {
+                "item_type": _clean(item_var.get(), old_spec["item_type"]),
+                "school": _clean(school_var.get(), old_spec["school"]),
+                "color": _clean(color_var.get(), old_spec["color"]),
+                "size": _clean(size_var.get(), old_spec["size"]),
+            }
+            if all_sizes_var.get() and str(size_var.get() or "").strip():
+                messagebox.showwarning(
+                    "نطاق غير مناسب",
+                    "عند تطبيق الإصلاح على كل المقاسات، اترك حقل المقاس فارغاً.",
+                    parent=dlg,
+                )
+                return
+            value_renames = []
+            for field, old_var, correct_value in (
+                ("item_type", old_item_var, new_base["item_type"]),
+                ("school", old_school_var, new_base["school"]),
+                ("color", old_color_var, new_base["color"]),
+                ("size", old_size_var, new_base["size"]),
+            ):
+                old_value = str(old_var.get() or "").strip()
+                if old_value and old_value != correct_value:
+                    value_renames.append({
+                        "field": field,
+                        "old_value": old_value,
+                        "new_value": correct_value,
+                    })
+            scope = f"pos:{branch_device}"
+            try:
+                with self.db.conn:
+                    if all_sizes_var.get():
+                        size_rows = self.db.conn.execute(
+                            """
+                            SELECT DISTINCT size
+                              FROM pos_stocks_mirror
+                             WHERE source_device = ?
+                               AND item_type = ?
+                               AND school = ?
+                               AND color = ?
+                            """,
+                            (
+                                source_name,
+                                old_spec["item_type"],
+                                old_spec["school"],
+                                old_spec["color"],
+                            ),
+                        ).fetchall()
+                        sizes = [str(r[0] or "").strip() for r in size_rows if str(r[0] or "").strip()]
+                    else:
+                        sizes = [old_spec["size"]]
+                    if not sizes:
+                        sizes = [old_spec["size"]]
+
+                    event_count = 0
+                    row_count = 0
+                    for size in sizes:
+                        old_payload = dict(old_spec)
+                        old_payload["size"] = size
+                        new_payload = dict(new_base)
+                        new_payload["size"] = size if all_sizes_var.get() else new_base["size"]
+                        if old_payload == new_payload and not value_renames:
+                            continue
+                        changed_fields = [
+                            fld for fld in ("item_type", "school", "color", "size")
+                            if old_payload.get(fld) != new_payload.get(fld)
+                        ]
+                        self.db._record_sync_event_or_raise(
+                            "SPEC_RENAMED",
+                            {
+                                "old_spec": old_payload,
+                                "new_spec": new_payload,
+                                "changed_fields": changed_fields,
+                                "value_renames": value_renames + [
+                                    {"field": fld, "old_value": old_payload[fld], "new_value": new_payload[fld]}
+                                    for fld in changed_fields
+                                ],
+                            },
+                            target_scope=scope,
+                        )
+                        cur = self.db.conn.execute(
+                            """
+                            UPDATE pos_stocks_mirror
+                               SET item_type = ?, school = ?, color = ?, size = ?
+                             WHERE source_device = ?
+                               AND item_type = ?
+                               AND school = ?
+                               AND color = ?
+                               AND size = ?
+                            """,
+                            (
+                                new_payload["item_type"],
+                                new_payload["school"],
+                                new_payload["color"],
+                                new_payload["size"],
+                                source_name,
+                                old_payload["item_type"],
+                                old_payload["school"],
+                                old_payload["color"],
+                                old_payload["size"],
+                            ),
+                        )
+                        row_count += int(cur.rowcount or 0)
+                        event_count += 1
+                dlg.destroy()
+                show_toast(
+                    self,
+                    f"تم تسجيل إصلاح {event_count} مقاس وتحديث {row_count} صف. شغّل المزامنة ليصل الإصلاح إلى الفرع.",
+                )
+                self._reload_stock()
+            except Exception as ex:
+                messagebox.showerror("فشل الإصلاح", str(ex), parent=dlg)
+
+        ttk.Button(btns, text="حفظ وإرسال للفرع", command=on_ok).pack(side=tk.RIGHT, padx=6)
 
     def _apply_filter(self):
         q = (self._filter_var.get() or "").strip().lower()

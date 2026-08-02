@@ -559,6 +559,7 @@ class SyncClient:
             try:
                 note(f"[{cycle_id}] تحديث لقطة المخزون...")
                 self.emit_stock_snapshot_event(cfg)
+                self.emit_stock_audit_snapshot_event(cfg)
             except Exception as e:
                 note(f"تعذّر إنشاء لقطة المخزون: {e}")
 
@@ -1148,9 +1149,6 @@ class SyncClient:
             json.dumps(snapshot_rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         meta_key = f"pos_stock_snapshot_hash:{device_name}"
-        if _sync_meta_get(self.conn, meta_key) == snapshot_hash:
-            return None
-
         payload = {
             "source_device_name": device_name,
             "snapshot_at":        snapshot_at,
@@ -1201,6 +1199,100 @@ class SyncClient:
             return None
 
         _sync_meta_set(self.conn, meta_key, snapshot_hash)
+        return event_uuid
+
+    def emit_stock_audit_snapshot_event(
+        self, cfg: Optional[Dict[str, Any]] = None
+    ) -> Optional[str]:
+        """POS-side: snapshot stock-audit report history for warehouse."""
+        if cfg is None:
+            cfg = load_sync_config(self.conn)
+        if (cfg.get("device_role") or "").lower() != "pos":
+            return None
+        device_name = cfg.get("device_name") or "POS-UNCONFIGURED"
+
+        try:
+            reports = self.conn.execute(
+                """
+                SELECT id, created_at, reason, diff_count, total_diff, total_value
+                  FROM stock_audit_reports
+                 ORDER BY id ASC
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return None
+
+        report_rows = []
+        for report in reports:
+            report_id = int(report[0])
+            lines = self.conn.execute(
+                """
+                SELECT item_type, school, color, size, expected, actual,
+                       diff, unit_price, diff_value
+                  FROM stock_audit_report_lines
+                 WHERE report_id = ?
+                 ORDER BY id ASC
+                """,
+                (report_id,),
+            ).fetchall()
+            report_rows.append({
+                "report_id": report_id,
+                "created_at": report[1],
+                "reason": report[2],
+                "diff_count": int(report[3] or 0),
+                "total_diff": int(report[4] or 0),
+                "total_value": float(report[5] or 0),
+                "lines": [
+                    {
+                        "item_type": row[0],
+                        "school": row[1],
+                        "color": row[2],
+                        "size": row[3],
+                        "expected": int(row[4] or 0),
+                        "actual": int(row[5] or 0),
+                        "diff": int(row[6] or 0),
+                        "unit_price": float(row[7] or 0),
+                        "diff_value": float(row[8] or 0),
+                    }
+                    for row in lines
+                ],
+            })
+
+        payload = {
+            "source_device_name": device_name,
+            "snapshot_at": _utc_now_iso(),
+            "app_version": APP_VERSION,
+            "reports": report_rows,
+        }
+
+        import uuid as _uuid
+        event_uuid = str(_uuid.uuid4())
+        now = _utc_now_iso()
+        has_target = self._has_target_scope_column()
+        try:
+            if has_target:
+                self.conn.execute(
+                    """
+                    INSERT INTO sync_outbox
+                        (event_uuid, event_type, payload_json,
+                         created_at, status, attempts, target_scope)
+                    VALUES (?, 'POS_STOCK_AUDIT_SNAPSHOT', ?, ?, 'pending', 0, 'warehouse')
+                    """,
+                    (event_uuid, json.dumps(payload, ensure_ascii=False, default=str), now),
+                )
+            else:
+                payload["__target_scope__"] = "warehouse"
+                self.conn.execute(
+                    """
+                    INSERT INTO sync_outbox
+                        (event_uuid, event_type, payload_json,
+                         created_at, status, attempts)
+                    VALUES (?, 'POS_STOCK_AUDIT_SNAPSHOT', ?, ?, 'pending', 0)
+                    """,
+                    (event_uuid, json.dumps(payload, ensure_ascii=False, default=str), now),
+                )
+        except sqlite3.OperationalError:
+            return None
         return event_uuid
 
     def refresh_device_list(

@@ -54,13 +54,16 @@ def _next_numeric_version(repo: Path) -> str:
     versions = []
     for value in candidates:
         if VERSION_RE.match(value):
-            parts = tuple(int(part) for part in value.split("."))
-            versions.append(parts)
+            raw_parts = value.split(".")
+            parts = tuple(int(part) for part in raw_parts)
+            widths = tuple(len(part) for part in raw_parts)
+            versions.append((parts, widths))
     if not versions:
-        return "1.1"
-    latest = list(max(versions))
+        return "2026.08.02.1"
+    latest, widths = max(versions, key=lambda item: item[0])
+    latest = list(latest)
     latest[-1] += 1
-    return ".".join(str(part) for part in latest)
+    return ".".join(str(part).zfill(widths[idx]) for idx, part in enumerate(latest))
 
 
 def _write_version(repo: Path, version: str) -> None:

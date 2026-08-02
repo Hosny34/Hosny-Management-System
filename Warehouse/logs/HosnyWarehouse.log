@@ -936,3 +936,36 @@ KeyError: 'popdown'
 2026-08-02 12:06:36 INFO hosny: ============================================================
 2026-08-02 12:06:36 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=107552, cwd=G:\TestManagementSystem\Hosny-Management-System\Warehouse)
 2026-08-02 12:21:55 INFO hosny: Warehouse DB hourly backup created: G:\TestManagementSystem\Hosny-Management-System\Warehouse\db_backups\hourly\warehouse_data-WAREHOUSE-latest.sqlite3 (0.9s)
+2026-08-02 13:11:58 INFO hosny: ============================================================
+2026-08-02 13:11:58 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=114104, cwd=G:\TestManagementSystem\Hosny-Management-System\Warehouse)
+2026-08-02 13:27:04 INFO hosny: Warehouse DB hourly backup created: G:\TestManagementSystem\Hosny-Management-System\Warehouse\db_backups\hourly\warehouse_data-WAREHOUSE-latest.sqlite3 (1.1s)
+2026-08-02 13:32:24 INFO hosny: ============================================================
+2026-08-02 13:32:24 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=30824, cwd=G:\TestManagementSystem\Hosny-Management-System\Warehouse)
+2026-08-02 13:47:30 INFO hosny: ============================================================
+2026-08-02 13:47:30 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=46560, cwd=G:\TestManagementSystem\Hosny-Management-System\Warehouse)
+2026-08-02 14:02:40 INFO hosny: Warehouse DB hourly backup created: G:\TestManagementSystem\Hosny-Management-System\Warehouse\db_backups\hourly\warehouse_data-WAREHOUSE-latest.sqlite3 (3.7s)
+2026-08-02 14:22:29 INFO hosny: ============================================================
+2026-08-02 14:22:29 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=116636, cwd=G:\TestManagementSystem\Hosny-Management-System\Warehouse)
+2026-08-02 14:32:20 INFO hosny: ============================================================
+2026-08-02 14:32:20 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=66332, cwd=G:\TestManagementSystem\Hosny-Management-System\Warehouse)
+2026-08-02 14:41:30 INFO hosny: ============================================================
+2026-08-02 14:41:30 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=107840, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-08-02 14:41:40 INFO hosny: {"branch_device": "POS-OCT", "branch_name": "فرع اكتوبر", "last_seen_at": "2026-08-02T11:37:49.596511Z", "last_sync_at": "2026-08-02T11:37:49.596511Z", "sync_age_min": 3, "snapshot_at": "2026-08-02T11:35:24.885389Z", "snapshot_age_min": 6, "app_version": "2026.8.2.10", "stock_rows": 268, "stock_qty": 2909, "stock_value": 934995.0, "audit_adjust_count": 1, "audit_adjust_qty": 0, "audit_adjust_value": 0.0, "latest_audit_at": "2026-08-02T12:52:15", "sales_amt": 0.0, "returns_amt": 0.0, "voids_amt": 0.0, "exchange_amt": 0.0, "reservation_cash": 0.0, "cash_net": 0.0, "active_reservations": 6, "reserved_qty": 6, "reserved_total": 33.0, "reserved_paid": 16.0, "shift_status": "OPEN", "shift_started_at": "2026-08-02T12:04:19", "shift_ended_at": "", "inbox_errors": 0, "dead_letters": 0, "status": "جيد", "notes": "", "visa_net": 0.0, "total_collected": 0.0}
+2026-08-02 14:41:51 INFO hosny: ============================================================
+2026-08-02 14:41:51 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=117444, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-08-02 14:42:00 INFO hosny: {"branch_device": "POS-OCT", "branch_name": "فرع اكتوبر", "last_seen_at": "2026-08-02T11:37:49.596511Z", "last_sync_at": "2026-08-02T11:37:49.596511Z", "sync_age_min": 4, "snapshot_at": "2026-08-02T11:35:24.885389Z", "snapshot_age_min": 6, "app_version": "2026.8.2.10", "stock_rows": 268, "stock_qty": 2909, "stock_value": 934995.0, "audit_adjust_count": 1, "audit_adjust_qty": 0, "audit_adjust_value": 0.0, "latest_audit_at": "2026-08-02T12:52:15", "sales_amt": 0.0, "returns_amt": 0.0, "voids_amt": 0.0, "exchange_amt": 0.0, "reservation_cash": 0.0, "cash_net": 0.0, "active_reservations": 6, "reserved_qty": 6, "reserved_total": 33.0, "reserved_paid": 16.0, "shift_status": "OPEN", "shift_started_at": "2026-08-02T12:04:19", "shift_ended_at": "", "inbox_errors": 0, "dead_letters": 0, "status": "جيد", "notes": "", "visa_net": 0.0, "total_collected": 0.0}
+2026-08-02 14:42:10 INFO hosny: ============================================================
+2026-08-02 14:42:10 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=115092, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-08-02 14:42:18 INFO hosny: rows 6
+2026-08-02 14:42:18 INFO hosny: {"branch_device": "POS-OCT", "branch_name": "فرع اكتوبر", "last_sync_at": "2026-08-02T11:37:49.596511Z", "app_version": "2026.8.2.10", "stock_qty": 2909, "stock_value": 934995.0, "audit_qty": 0, "audit_value": 0.0, "status": "جيد", "notes": ""}
+2026-08-02 14:42:18 INFO hosny: {"branch_device": "POS-CEN", "branch_name": "فرع السنتر", "last_sync_at": "2026-07-29T20:15:23.388511Z", "app_version": "2026.07.29.211516", "stock_qty": 225, "stock_value": 57945.0, "audit_qty": 0, "audit_value": 0.0, "status": "حرج", "notes": "المزامنة قديمة، أخطاء مزامنة"}
+2026-08-02 14:42:18 INFO hosny: {"branch_device": "POS-OBO", "branch_name": "فرع العبور", "last_sync_at": "2026-08-02T11:37:46.724387Z", "app_version": "2026.08.01.195253", "stock_qty": 2256, "stock_value": 888980.0, "audit_qty": 0, "audit_value": 0.0, "status": "جيد", "notes": ""}
+2026-08-02 14:42:18 INFO hosny: {"branch_device": "POS-BAH", "branch_name": "فرع بهتيم", "last_sync_at": "2026-07-30T14:06:14.430603Z", "app_version": "2026.07.29.012841", "stock_qty": 11, "stock_value": 2795.0, "audit_qty": 0, "audit_value": 0.0, "status": "حرج", "notes": "المزامنة قديمة"}
+2026-08-02 14:42:18 INFO hosny: {"branch_device": "POS-GESR", "branch_name": "فرع جسر السويس", "last_sync_at": "", "app_version": "", "stock_qty": 0, "stock_value": 0.0, "audit_qty": 0, "audit_value": 0.0, "status": "حرج", "notes": "لا توجد مزامنة، لا توجد لقطة مخزون"}
+2026-08-02 14:42:18 INFO hosny: {"branch_device": "POS-ZAY", "branch_name": "فرع زايد", "last_sync_at": "2026-08-02T11:38:05.807105Z", "app_version": "2026.8.2.10", "stock_qty": 1797, "stock_value": 572890.0, "audit_qty": 0, "audit_value": 0.0, "status": "جيد", "notes": ""}
+2026-08-02 14:42:28 INFO hosny: ============================================================
+2026-08-02 14:42:28 INFO hosny: HosnyWarehouse starting up (frozen=False, pid=120268, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-08-02 14:43:57 INFO hosny: ============================================================
+2026-08-02 14:43:57 INFO hosny: HosnyWarehouse starting up (frozen=True, pid=26644, cwd=G:\TestManagementSystem\Hosny-Management-System\Warehouse)
+2026-08-02 16:15:09 INFO hosny: Warehouse DB hourly backup created: G:\TestManagementSystem\Hosny-Management-System\Warehouse\db_backups\hourly\warehouse_data-WAREHOUSE-latest.sqlite3 (2.6s)
+2026-08-02 19:09:58 INFO hosny: Warehouse DB hourly backup created: G:\TestManagementSystem\Hosny-Management-System\Warehouse\db_backups\hourly\warehouse_data-WAREHOUSE-latest.sqlite3 (3.2s)
