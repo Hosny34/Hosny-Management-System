@@ -25,15 +25,15 @@
     "POS/verify_pe_arch.py"
   ],
   "hashes": {
-    "package_sha256": "04815e234535906252d74308c235796e571111397d5f85e8f5e91ffca340ba57"
+    "package_sha256": "f66a510a91af6e91a7fb4f47021e19281c8b663020d78c62f0159fba9fc15824"
   },
-  "notes": "Fix Windows 7 x86 POS updater/build routing",
-  "package_file": "HosnyPOS-1.8.zip",
-  "published_at": "2026-08-02T09:15:05Z",
+  "notes": "POS update",
+  "package_file": "HosnyPOS-2026.8.2.2.zip",
+  "published_at": "2026-08-02T09:31:11Z",
   "required_files": [
     "POS/HosnyPOS.py",
     "POS/HosnyPOS.spec",
     "POS/build_pos.bat"
   ],
-  "version": "1.8"
+  "version": "2026.8.2.2"
 }

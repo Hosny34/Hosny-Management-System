@@ -1,3 +1,3 @@
 # -*- coding: utf-8 -*-
 
-APP_VERSION = "2026.08.02.1"
+APP_VERSION = "2026.8.2.2"

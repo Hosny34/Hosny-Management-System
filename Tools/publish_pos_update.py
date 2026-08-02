@@ -54,8 +54,8 @@ def _next_numeric_version(repo: Path) -> str:
     versions = []
     for value in candidates:
         if VERSION_RE.match(value):
-        parts = tuple(int(part) for part in value.split("."))
-        versions.append(parts)
+            parts = tuple(int(part) for part in value.split("."))
+            versions.append(parts)
     if not versions:
         return "1.1"
     latest = list(max(versions))
