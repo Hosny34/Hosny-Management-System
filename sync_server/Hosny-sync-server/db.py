@@ -92,6 +92,8 @@ def init_schema() -> None:
             ON events(target_scope, server_seq);
         CREATE INDEX IF NOT EXISTS ix_events_source
             ON events(source_device);
+        CREATE INDEX IF NOT EXISTS ix_events_snapshot_compact
+            ON events(event_type, source_device, server_seq);
 
         CREATE TABLE IF NOT EXISTS device_cursors (
             device_uuid     TEXT NOT NULL REFERENCES devices(device_uuid),
@@ -229,10 +231,18 @@ def pull_events(
         "SELECT server_seq, event_uuid, event_type, source_device, "
         "target_scope, payload, created_at "
         "FROM events WHERE target_scope IN (" + placeholders + ") "
-        "AND server_seq > ? ORDER BY server_seq ASC LIMIT ?"
+        "AND server_seq > ? "
+        "AND (event_type <> 'POS_STOCK_SNAPSHOT' OR NOT EXISTS ("
+        "    SELECT 1 FROM events newer "
+        "    WHERE newer.target_scope IN (" + placeholders + ") "
+        "      AND newer.event_type = 'POS_STOCK_SNAPSHOT' "
+        "      AND newer.source_device = events.source_device "
+        "      AND newer.server_seq > events.server_seq"
+        ")) "
+        "ORDER BY server_seq ASC LIMIT ?"
     )
     rows = get_conn().execute(
-        sql, (*scopes, int(since_seq), int(limit))
+        sql, (*scopes, int(since_seq), *scopes, int(limit))
     ).fetchall()
     return [dict(r) for r in rows]
 

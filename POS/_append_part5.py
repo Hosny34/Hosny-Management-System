@@ -1,5 +1,7 @@
 
-TARGET = r"c:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن\HosnyWarehouse.py"
+import os
+
+TARGET = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Warehouse", "HosnyWarehouse.py"))
 
 PART5 = """
 
@@ -346,14 +348,14 @@ class InventoryWindow(tk.Toplevel):
         table_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
         self.table = ttk.Treeview(
             table_wrap,
-            columns=("id", "type", "school", "color", "size", "wh", "pkg", "badge", "price", "count", "value"),
+            columns=("id", "type", "school", "color", "size", "wh", "pkg", "price", "count", "value"),
             show="headings",
             selectmode="extended",
         )
         for col, txt, w in [
             ("id","المعرّف",60), ("type","النوع",140), ("school","المدرسة",160),
             ("color","اللون",80), ("size","المقاس",70), ("wh","المخزن",50),
-            ("pkg","العبوة",60), ("badge","بادج",60), ("price","السعر",80), ("count","الكمية",70), ("value","القيمة",90),
+            ("pkg","العبوة",60), ("price","السعر",80), ("count","الكمية",70), ("value","القيمة",90),
         ]:
             self.table.heading(col, text=txt)
             self.table.column(col, width=w, anchor="center")
@@ -674,7 +676,6 @@ class InventoryWindow(tk.Toplevel):
                 "", tk.END,
                 values=(r["id"], r["item_type"], r["school"], r["color"], r["size"],
                         r["warehouse_no"], r["package_no"],
-                        ("\\u2713" if int(r.get("has_badge") or 0) else ""),
                         f"{float(r['unit_price']):.2f}",
                         r["count"], f"{float(r['value']):.2f}")
             )
@@ -1093,13 +1094,13 @@ class BillsHistoryWindow(tk.Toplevel):
         items_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.items_table = ttk.Treeview(
             items_wrap,
-            columns=("type", "school", "color", "size", "origin", "badge", "wh", "pkg", "price", "qty", "total"),
+            columns=("type", "school", "color", "size", "origin", "wh", "pkg", "price", "qty", "total"),
             show="headings",
             height=12,
         )
         for col, txt, w in [
             ("type","النوع",140), ("school","المدرسة",160), ("color","اللون",80), ("size","المقاس",70),
-            ("origin","المصدر",90), ("badge","بادج",60), ("wh","المخزن",50), ("pkg","العبوة",60), ("price","السعر",80),
+            ("origin","المصدر",90), ("wh","المخزن",50), ("pkg","العبوة",60), ("price","السعر",80),
             ("qty","الكمية",60), ("total","إجمالي",100),
         ]:
             self.items_table.heading(col, text=txt)
@@ -1141,7 +1142,6 @@ class BillsHistoryWindow(tk.Toplevel):
             self.items_table.insert(
                 "", tk.END,
                 values=(ln["item_type"], ln["school"], ln["color"], ln["size"], origin_txt,
-                        "\\u2713" if int(ln.get("has_badge") or 0) else "",
                         wh_txt, pkg_txt, f"{float(ln['unit_price']):.2f}",
                         ln["qty"], f"{float(ln['line_total']):.2f}")
             )
@@ -1163,13 +1163,13 @@ class BillsHistoryWindow(tk.Toplevel):
         )
         if not path:
             return
-        headers = ["type", "school", "color", "size", "origin", "has_badge", "warehouse_no", "package_no", "unit_price", "qty", "line_total"]
+        headers = ["type", "school", "color", "size", "origin", "warehouse_no", "package_no", "unit_price", "qty", "line_total"]
         def _origin_txt(o: Optional[str]) -> str:
             return "من المخزون" if o == "STOCK" else ("من المصنع" if o == "FACTORY" else "")
         rows = [
             [
                 ln["item_type"], ln["school"], ln["color"], ln["size"],
-                _origin_txt(ln.get("origin")), ("\\u2713" if int(ln.get("has_badge") or 0) else ""),
+                _origin_txt(ln.get("origin")),
                 ln["warehouse_no"], ln["package_no"],
                 float(ln["unit_price"]), int(ln["qty"]), float(ln["line_total"]),
             ]
@@ -1239,14 +1239,14 @@ class MovementsWindow(tk.Toplevel):
         table_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0,8))
         self.table = ttk.Treeview(
             table_wrap,
-            columns=("id","ts","direction","type","school","color","size","qty","note","bill_id","stock_id","badge"),
+            columns=("id","ts","direction","type","school","color","size","qty","note","bill_id","stock_id"),
             show="headings",
             height=16,
         )
         for col, txt, w in [
             ("id","المعرّف",70), ("ts","الوقت",170), ("direction","الاتجاه",100), ("type","النوع",150),
             ("school","المدرسة",170), ("color","اللون",100), ("size","المقاس",80), ("qty","الكمية",70),
-            ("note","ملاحظة",200), ("bill_id","الفاتورة",70), ("stock_id","المخزون",70), ("badge","بادج",60),
+            ("note","ملاحظة",200), ("bill_id","الفاتورة",70), ("stock_id","المخزون",70),
         ]:
             self.table.heading(col, text=txt)
             self.table.column(col, width=w, anchor="center")
@@ -1291,8 +1291,7 @@ class MovementsWindow(tk.Toplevel):
                         m.get("item_type",""), m.get("school",""), m.get("color",""), m.get("size",""),
                         m.get("qty"), m.get("note",""),
                         m.get("bill_id") if m.get("bill_id") is not None else "",
-                        m.get("stock_id") if m.get("stock_id") is not None else "",
-                        "\\u2713" if int(m.get("has_badge") or 0) else "")
+                        m.get("stock_id") if m.get("stock_id") is not None else "")
             )
 
     def _clear(self):
@@ -1318,13 +1317,12 @@ class MovementsWindow(tk.Toplevel):
         )
         if not path:
             return
-        headers = ["id","ts","direction","item_type","school","color","size","warehouse_no","package_no","unit_price","qty","note","bill_id","stock_id","has_badge"]
+        headers = ["id","ts","direction","item_type","school","color","size","warehouse_no","package_no","unit_price","qty","note","bill_id","stock_id"]
         table = [[
             m.get("id"), m.get("ts"), m.get("direction"),
             m.get("item_type",""), m.get("school",""), m.get("color",""), m.get("size",""),
             m.get("warehouse_no",""), m.get("package_no",""), m.get("unit_price",""),
-            m.get("qty"), m.get("note",""), m.get("bill_id"), m.get("stock_id"),
-            ("\\u2713" if int(m.get("has_badge") or 0) else "")
+            m.get("qty"), m.get("note",""), m.get("bill_id"), m.get("stock_id")
         ] for m in rows]
         try:
             export_to_excel(path, headers, table)

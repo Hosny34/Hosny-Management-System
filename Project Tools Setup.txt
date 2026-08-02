@@ -1,4 +1,4 @@
-PROJECT TOOLS SETUP GUIDE
+﻿PROJECT TOOLS SETUP GUIDE
 
 This file lists the tools and packages needed to run, build, and maintain this project.
 
@@ -112,15 +112,15 @@ python -m pip install --upgrade pyinstaller
 Build commands (recommended — uses repo `.spec` files, same as CI/manual release builds):
 
 Warehouse:
-cd "C:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن"
+cd "C:\Users\youssef.sherif\Downloads\Hosny-Management-System\Warehouse"
 python -m PyInstaller --noconfirm HosnyWarehouse.spec
 
 POS Zay:
-cd "C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-ZAY"
+cd "C:\Users\youssef.sherif\Downloads\Hosny-Management-System\POS"
 python -m PyInstaller --noconfirm HosnyPOS.spec
 
 POS OCT (optional second branch copy in workspace):
-cd "C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-OCT"
+cd "C:\Users\youssef.sherif\Downloads\Hosny-Management-System\POS"
 python -m PyInstaller --noconfirm HosnyPOS.spec
 
 Legacy one-file build (still works):
@@ -195,7 +195,7 @@ python -m pip install openpyxl pywin32 pyinstaller
 
 Then for sync server:
 
-cd "C:\Users\youssef.sherif\Downloads\ادارة المخازن\sync_server\Hosny-sync-server"
+cd "C:\Users\youssef.sherif\Downloads\Hosny-Management-System\sync_server\Hosny-sync-server"
 python -m pip install -r requirements.txt
 
 
@@ -237,7 +237,7 @@ Check sqlite3:
 sqlite3 --version
 
 Check server deps:
-cd "C:\Users\youssef.sherif\Downloads\ادارة المخازن\sync_server\Hosny-sync-server"
+cd "C:\Users\youssef.sherif\Downloads\Hosny-Management-System\sync_server\Hosny-sync-server"
 python -c "import fastapi, uvicorn, jwt; print('server deps ok')"
 
 Check desktop deps:

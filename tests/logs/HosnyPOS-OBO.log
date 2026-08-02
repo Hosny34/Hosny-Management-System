@@ -1,0 +1,61 @@
+2026-07-27 23:46:25 INFO hosny: ============================================================
+2026-07-27 23:46:25 INFO hosny: HosnyPOS-OBO starting up (frozen=False, pid=41792, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-27 23:46:25 ERROR hosny: test_ENV03_fresh_db_schema_usable (__main__.TestEnvAndSales.test_ENV03_fresh_db_schema_usable)
+2026-07-27 23:46:25 ERROR hosny: ENV-03 (partial): new DB file initializes schema; core tables exist. ...
+2026-07-27 23:46:25 ERROR hosny: ok
+2026-07-27 23:46:25 ERROR hosny: test_RET01_warehouse_return_bill_recorded (__main__.TestEnvAndSales.test_RET01_warehouse_return_bill_recorded)
+2026-07-27 23:46:25 ERROR hosny: RET-01 (DB): bill to المصنع is saved as warehouse return with zero total. ...
+2026-07-27 23:46:25 ERROR hosny: ok
+2026-07-27 23:46:25 ERROR hosny: test_SALE01_normal_sale_reduces_stock (__main__.TestEnvAndSales.test_SALE01_normal_sale_reduces_stock)
+2026-07-27 23:46:25 ERROR hosny: SALE-01: finalize sale creates bill and reduces aggregate stock. ...
+2026-07-27 23:46:25 ERROR hosny: ok
+2026-07-27 23:46:25 ERROR hosny: test_SALE03_multiline_sale (__main__.TestEnvAndSales.test_SALE03_multiline_sale)
+2026-07-27 23:46:25 ERROR hosny: SALE-03: one bill with two specs; totals and both stock reductions. ...
+2026-07-27 23:46:25 ERROR hosny: ok
+2026-07-27 23:46:25 ERROR hosny: test_get_sales_stats_excludes_warehouse_customer (__main__.TestEnvAndSales.test_get_sales_stats_excludes_warehouse_customer)
+2026-07-27 23:46:25 ERROR hosny: Retail stats: warehouse return customer excluded from sales_total / count. ...
+2026-07-27 23:46:25 ERROR hosny: ok
+2026-07-27 23:46:25 ERROR hosny: test_arabic_digits_and_comma (__main__.TestParseMoney.test_arabic_digits_and_comma) ...
+2026-07-27 23:46:25 ERROR hosny: ok
+2026-07-27 23:46:25 ERROR hosny: test_deliver_reservation_inserts_deliver_pay (__main__.TestReservationDeliver.test_deliver_reservation_inserts_deliver_pay) ...
+2026-07-27 23:46:25 ERROR hosny: ERROR
+2026-07-27 23:46:25 ERROR hosny: test_school_accounts_include_reservation_return_void_exchange (__main__.TestSchoolAccountsCashFlow.test_school_accounts_include_reservation_return_void_exchange) ...
+2026-07-27 23:46:25 ERROR hosny: ok
+2026-07-27 23:46:25 ERROR hosny: test_LOCK01_manual_incoming_blocked_under_lockdown (__main__.TestVoidAndLock.test_LOCK01_manual_incoming_blocked_under_lockdown)
+2026-07-27 23:46:25 ERROR hosny: LOCK-01: create_income_bill raises when cashier lockdown enabled. ...
+2026-07-27 23:46:25 ERROR hosny: ok
+2026-07-27 23:46:25 ERROR hosny: test_VOID01_void_restores_stock (__main__.TestVoidAndLock.test_VOID01_void_restores_stock)
+2026-07-27 23:46:25 ERROR hosny: VOID-01 / VOID-03: void with reason restores STOCK-origin qty. ...
+2026-07-27 23:46:25 ERROR hosny: ok
+2026-07-27 23:46:25 ERROR hosny: test_VOID02_void_without_reason_rejected (__main__.TestVoidAndLock.test_VOID02_void_without_reason_rejected)
+2026-07-27 23:46:25 ERROR hosny: VOID-02: empty reason raises. ...
+2026-07-27 23:46:25 ERROR hosny: ok
+2026-07-27 23:46:25 ERROR hosny: ======================================================================
+2026-07-27 23:46:25 ERROR hosny: ERROR: test_deliver_reservation_inserts_deliver_pay (__main__.TestReservationDeliver.test_deliver_reservation_inserts_deliver_pay)
+2026-07-27 23:46:25 ERROR hosny: ----------------------------------------------------------------------
+2026-07-27 23:46:25 ERROR hosny: Traceback (most recent call last):
+2026-07-27 23:46:25 ERROR hosny:   File "G:\TestManagementSystem\Hosny-Management-System\tests\test_scenarios_automated.py", line 236, in test_deliver_reservation_inserts_deliver_pay
+2026-07-27 23:46:25 ERROR hosny:     db.deliver_reservation(rid, 40.0)
+2026-07-27 23:46:25 ERROR hosny:     ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+2026-07-27 23:46:25 ERROR hosny:   File "G:\TestManagementSystem\Hosny-Management-System\POS\HosnyPOS.py", line 4516, in deliver_reservation
+2026-07-27 23:46:25 ERROR hosny:     self._ensure_reservation_delivery_stock([row])
+2026-07-27 23:46:25 ERROR hosny:     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+2026-07-27 23:46:25 ERROR hosny:   File "G:\TestManagementSystem\Hosny-Management-System\POS\HosnyPOS.py", line 4462, in _ensure_reservation_delivery_stock
+2026-07-27 23:46:25 ERROR hosny:     raise ValueError(
+2026-07-27 23:46:25 ERROR hosny:     ...<2 lines>...
+2026-07-27 23:46:25 ERROR hosny:     )
+2026-07-27 23:46:25 ERROR hosny: ValueError: لا يمكن تسليم الحجز لأن بعض الأصناف غير موجودة في المخزون الحالي:
+2026-07-27 23:46:25 ERROR hosny: R / S / C / L: المتاح 0 والمطلوب 1
+2026-07-27 23:46:25 ERROR hosny: ----------------------------------------------------------------------
+2026-07-27 23:46:25 ERROR hosny: Ran 11 tests in 0.625s
+2026-07-27 23:46:25 ERROR hosny: FAILED (errors=1)
+2026-07-27 23:46:40 INFO hosny: ============================================================
+2026-07-27 23:46:40 INFO hosny: HosnyPOS-OBO starting up (frozen=False, pid=36288, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-27 23:46:57 INFO hosny: ============================================================
+2026-07-27 23:46:57 INFO hosny: HosnyPOS-OBO starting up (frozen=False, pid=27520, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-28 00:47:56 INFO hosny: ============================================================
+2026-07-28 00:47:56 INFO hosny: HosnyPOS-OBO starting up (frozen=False, pid=54088, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-28 01:06:58 INFO hosny: ============================================================
+2026-07-28 01:06:58 INFO hosny: HosnyPOS-OBO starting up (frozen=False, pid=52180, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-28 01:08:52 INFO hosny: ============================================================
+2026-07-28 01:08:52 INFO hosny: HosnyPOS-OBO starting up (frozen=False, pid=51900, cwd=G:\TestManagementSystem\Hosny-Management-System)

@@ -24,6 +24,7 @@ Design notes
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -31,6 +32,7 @@ import sqlite3
 import ssl
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -42,6 +44,10 @@ DEFAULT_TIMEOUT = 15.0  # seconds per HTTP request
 PUSH_BATCH_SIZE = 200   # events per /sync/push call
 PULL_BATCH_SIZE = 500   # events per /sync/pull call
 HTTP_RETRY_ATTEMPTS = 3
+try:
+    from pos_version import APP_VERSION
+except Exception:
+    APP_VERSION = ""
 DEAD_LETTER_MAX_ATTEMPTS = 5
 
 
@@ -110,6 +116,37 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _table_row_count(conn: sqlite3.Connection, table: str) -> int:
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    if not exists:
+        return 0
+    return int(conn.execute("SELECT COUNT(*) FROM %s" % table).fetchone()[0] or 0)
+
+
+def _has_business_activity(conn: sqlite3.Connection) -> bool:
+    for table in (
+        "stocks",
+        "bills",
+        "bill_items",
+        "income_bills",
+        "income_bill_items",
+        "movements",
+        "reservations",
+        "shifts",
+        "returns",
+        "return_items",
+    ):
+        try:
+            if _table_row_count(conn, table) > 0:
+                return True
+        except sqlite3.Error:
+            continue
+    return False
+
+
 def load_sync_config(conn: sqlite3.Connection) -> Dict[str, Any]:
     """Return the device identity + cursor state as a single dict."""
     row = conn.execute(
@@ -160,15 +197,54 @@ def save_setup(
     but we keep the api_token column for backward compatibility.
     """
     now = _utc_now_iso()
-    with conn:
-        conn.execute(
-            """
-            UPDATE device_identity
-               SET server_url = ?, device_name = ?, api_token = ?, updated_at = ?
-             WHERE id = 1
-            """,
-            (server_url.rstrip("/"), device_name.strip(), (api_token or "").strip(), now),
+    new_name = device_name.strip()
+    cfg = load_sync_config(conn)
+    old_name = str(cfg.get("device_name") or "").strip()
+    identity_change = (
+        bool(old_name)
+        and old_name.upper() not in {"POS-UNCONFIGURED", "UNCONFIGURED"}
+        and old_name != new_name
+    )
+    if identity_change and _has_business_activity(conn):
+        raise SyncError(
+            "This database is already configured as %s and contains stock/sales/shift data. "
+            "Do not rename it to %s. Close POS, delete warehouse_data.sqlite3, "
+            "warehouse_data.sqlite3-wal, and warehouse_data.sqlite3-shm from the POS folder, "
+            "then open POS again and configure the correct branch."
+            % (old_name, new_name)
         )
+    with conn:
+        if identity_change:
+            conn.execute(
+                """
+                UPDATE device_identity
+                   SET device_uuid = ?, server_url = ?, device_name = ?,
+                       api_token = ?, updated_at = ?
+                 WHERE id = 1
+                """,
+                (str(uuid.uuid4()), server_url.rstrip("/"), new_name, (api_token or "").strip(), now),
+            )
+            conn.execute(
+                """
+                UPDATE sync_state
+                   SET last_pulled_seq = 0,
+                       last_push_at = NULL,
+                       last_pull_at = NULL,
+                       last_error = NULL
+                 WHERE channel = 'main'
+                """
+            )
+            conn.execute("DELETE FROM sync_inbox")
+            conn.execute("DELETE FROM sync_dead_letter")
+        else:
+            conn.execute(
+                """
+                UPDATE device_identity
+                   SET server_url = ?, device_name = ?, api_token = ?, updated_at = ?
+                 WHERE id = 1
+                """,
+                (server_url.rstrip("/"), new_name, (api_token or "").strip(), now),
+            )
 
 
 def _set_sync_state(
@@ -213,8 +289,59 @@ def _set_sync_state(
                     (channel, last_pulled_seq, last_push_at, last_pull_at, last_error)
                 VALUES ('main', ?, ?, ?, ?)
                 """,
-                (new_seq, new_push, new_pull, new_err),
+            (new_seq, new_push, new_pull, new_err),
+        )
+
+
+def _sync_meta_get(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    try:
+        row = conn.execute("SELECT value FROM sync_meta WHERE key = ?", (key,)).fetchone()
+        return None if row is None else row[0]
+    except sqlite3.OperationalError:
+        return None
+
+
+def _sync_meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
+    now = _utc_now_iso()
+    try:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO sync_meta(key, value, updated_at)
+                VALUES(?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (key, value, now),
             )
+    except sqlite3.OperationalError:
+        pass
+
+
+def _snapshot_source_from_payload(payload: Dict[str, Any], fallback: Any = None) -> str:
+    return str(
+        payload.get("source_device_name")
+        or payload.get("source_device")
+        or payload.get("__source_device__")
+        or fallback
+        or ""
+    ).strip()
+
+
+def _checkpoint_wal_if_large(conn: sqlite3.Connection, *, max_wal_bytes: int = 32 * 1024 * 1024) -> None:
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        db_path = row[2] if row and len(row) > 2 else ""
+        if not db_path:
+            return
+        wal_path = db_path + "-wal"
+        if os.path.exists(wal_path) and os.path.getsize(wal_path) >= max_wal_bytes:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        else:
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    except Exception:
+        pass
 
 
 # ------------------------------ HTTP helpers ------------------------------ #
@@ -329,6 +456,11 @@ class SyncClient:
     def __init__(self, conn: sqlite3.Connection, verify_tls: bool = True) -> None:
         self.conn = conn
         self.verify_tls = verify_tls
+        try:
+            self.conn.execute("PRAGMA journal_mode=WAL;")
+            self.conn.execute("PRAGMA busy_timeout=30000;")
+        except Exception:
+            pass
 
     # ---- auth ----
 
@@ -448,6 +580,7 @@ class SyncClient:
 
         note(f"[{cycle_id}] جارٍ تطبيق الأحداث الواردة...")
         apply_stats = self.apply_inbox(cfg, note)
+        _checkpoint_wal_if_large(self.conn)
 
         summary = {
             "pushed":     push_stats["pushed"],
@@ -536,10 +669,59 @@ class SyncClient:
         applied_events: List[Dict[str, Any]] = []
         skipped_events: List[Dict[str, Any]] = []
         error_events: List[Dict[str, Any]] = []
+        latest_snapshot_by_source: Dict[str, Tuple[int, str]] = {}
+        superseded_snapshots = set()
+
+        for r in rows:
+            event_uuid, event_type, server_seq, payload_json, _attempts, source_dev = \
+                r[0], r[1], int(r[2]), r[3], int(r[4] or 0), r[5]
+            if event_type != "POS_STOCK_SNAPSHOT":
+                continue
+            try:
+                payload = json.loads(payload_json or "{}")
+            except Exception:
+                payload = {}
+            source = _snapshot_source_from_payload(payload, source_dev)
+            if not source:
+                continue
+            previous = latest_snapshot_by_source.get(source)
+            if previous is not None:
+                superseded_snapshots.add(previous[1])
+            latest_snapshot_by_source[source] = (server_seq, event_uuid)
+
+        if superseded_snapshots:
+            with self.conn:
+                for r in rows:
+                    event_uuid, event_type, server_seq, _payload_json, attempts, source_dev = \
+                        r[0], r[1], int(r[2]), r[3], int(r[4] or 0), r[5]
+                    if event_uuid not in superseded_snapshots:
+                        continue
+                    self.conn.execute(
+                        """
+                        UPDATE sync_inbox
+                           SET apply_status = 'skipped',
+                               apply_at = ?,
+                               apply_error = 'superseded by newer stock snapshot',
+                               apply_attempts = ?
+                         WHERE event_uuid = ?
+                        """,
+                        (now, attempts + 1, event_uuid),
+                    )
+                    skipped += 1
+                    skipped_events.append({
+                        "event_uuid": str(event_uuid),
+                        "event_type": str(event_type),
+                        "server_seq": int(server_seq),
+                        "source_device": str(source_dev or "") or None,
+                        "reason": "superseded by newer stock snapshot",
+                        "summary": str(event_type),
+                    })
 
         for r in rows:
             event_uuid, event_type, server_seq, payload_json, attempts, source_dev = \
                 r[0], r[1], int(r[2]), r[3], int(r[4] or 0), r[5]
+            if event_uuid in superseded_snapshots:
+                continue
 
             applier = registry.get(event_type)
             if applier is None:
@@ -944,6 +1126,7 @@ class SyncClient:
                   FROM stocks
                  WHERE count > 0
                  GROUP BY item_type, school, color, size, unit_price
+                 ORDER BY item_type, school, color, size, unit_price
                 """
             ).fetchall()
         except sqlite3.OperationalError:
@@ -961,10 +1144,18 @@ class SyncClient:
             }
             for r in rows
         ]
+        snapshot_hash = hashlib.sha256(
+            json.dumps(snapshot_rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        meta_key = f"pos_stock_snapshot_hash:{device_name}"
+        if _sync_meta_get(self.conn, meta_key) == snapshot_hash:
+            return None
 
         payload = {
             "source_device_name": device_name,
             "snapshot_at":        snapshot_at,
+            "app_version":        APP_VERSION,
+            "snapshot_hash":      snapshot_hash,
             "rows":               snapshot_rows,
         }
 
@@ -1009,6 +1200,7 @@ class SyncClient:
         except sqlite3.OperationalError:
             return None
 
+        _sync_meta_set(self.conn, meta_key, snapshot_hash)
         return event_uuid
 
     def refresh_device_list(

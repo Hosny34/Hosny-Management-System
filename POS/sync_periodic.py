@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
 """Background periodic sync for warehouse/POS Tk apps.
 
-Runs ``SyncClient.run_cycle`` on a worker thread every ~10 minutes
-(with jitter + backoff on errors). Posts UI callbacks to the Tk main
-thread via ``root.after(0, ...)``.
+Runs ``SyncClient.run_cycle`` on a worker thread every 10 minutes.
+Automatic sync is intentionally quiet: if the internet/server is down,
+cashiers should not see errors; the next attempt is simply scheduled.
+Manual sync still reports errors through ``sync_ui``.
 """
 
 from __future__ import annotations
 
 import os
 import queue
-import random
 import sqlite3
 import threading
 import time
@@ -22,9 +22,6 @@ import sync_client
 
 # 10-minute base interval for all clients.
 DEFAULT_BASE_MS = 10 * 60 * 1000
-SUCCESS_JITTER_MAX_MS = 15 * 1000
-BACKOFF_MULT = 2
-BACKOFF_CAP_MS = 30 * 60 * 1000
 FIRST_DELAY_BASE_MS = 8_000
 OFFSET_STEP_MS = 12_000
 OFFSET_SLOT_COUNT = 20
@@ -51,10 +48,10 @@ class PeriodicSyncController:
         """Stagger first sync attempts to reduce overlap across apps/devices."""
         seed = self.db_path
         try:
-            conn = sqlite3.connect(self.db_path, isolation_level=None, check_same_thread=False)
+            conn = sqlite3.connect(self.db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
             conn.row_factory = sqlite3.Row
             try:
-                conn.execute("PRAGMA busy_timeout=8000;")
+                conn.execute("PRAGMA busy_timeout=30000;")
                 cfg = sync_client.load_sync_config(conn)
                 if (cfg or {}).get("device_name"):
                     seed = str(cfg.get("device_name"))
@@ -75,10 +72,7 @@ class PeriodicSyncController:
         self._after_id = self.root.after(delay_ms, self._tick)
 
     def _next_interval_ms(self) -> int:
-        if self._failures <= 0:
-            return DEFAULT_BASE_MS + random.randint(0, SUCCESS_JITTER_MAX_MS)
-        raw = int(DEFAULT_BASE_MS * (BACKOFF_MULT ** min(self._failures, 8)))
-        return min(BACKOFF_CAP_MS, raw) + random.randint(0, min(SUCCESS_JITTER_MAX_MS, 30_000))
+        return DEFAULT_BASE_MS
 
     def _pump_queue(self) -> None:
         try:
@@ -89,14 +83,7 @@ class PeriodicSyncController:
                     try:
                         import sync_ui
 
-                        sync_ui.present_sync_cycle_summary(self.root, msg[1])
-                    except Exception:
-                        pass
-                elif kind == "failure":
-                    try:
-                        import sync_ui
-
-                        sync_ui.present_sync_cycle_failure(self.root, str(msg[1]))
+                        sync_ui._notify_host_synced(self.root)
                     except Exception:
                         pass
         except queue.Empty:
@@ -113,10 +100,10 @@ class PeriodicSyncController:
             return
 
         try:
-            conn = sqlite3.connect(self.db_path, isolation_level=None, check_same_thread=False)
+            conn = sqlite3.connect(self.db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
             conn.row_factory = sqlite3.Row
             try:
-                conn.execute("PRAGMA busy_timeout=8000;")
+                conn.execute("PRAGMA busy_timeout=30000;")
                 cfg = sync_client.load_sync_config(conn)
             finally:
                 conn.close()
@@ -127,14 +114,19 @@ class PeriodicSyncController:
             self._schedule_after(self._next_interval_ms())
             return
 
+        try:
+            setattr(self.root, "_hosny_sync_active", True)
+        except Exception:
+            pass
+
         def worker() -> None:
             summary: Optional[Dict[str, Any]] = None
             err: Optional[str] = None
             try:
-                conn2 = sqlite3.connect(self.db_path, isolation_level=None, check_same_thread=False)
+                conn2 = sqlite3.connect(self.db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
                 conn2.row_factory = sqlite3.Row
                 try:
-                    conn2.execute("PRAGMA busy_timeout=8000;")
+                    conn2.execute("PRAGMA busy_timeout=30000;")
                     client = sync_client.SyncClient(conn2, verify_tls=self.verify_tls)
                     summary = client.run_cycle(progress=None)
                 finally:
@@ -145,9 +137,12 @@ class PeriodicSyncController:
                 err = f"unexpected: {e}"
 
             def post() -> None:
+                try:
+                    setattr(self.root, "_hosny_sync_active", False)
+                except Exception:
+                    pass
                 if err:
                     self._failures += 1
-                    self._q.put(("failure", err))
                 else:
                     self._failures = 0
                     self._q.put(("summary", summary or {}))
@@ -156,7 +151,10 @@ class PeriodicSyncController:
             try:
                 self.root.after(0, post)
             except Exception:
-                pass
+                try:
+                    setattr(self.root, "_hosny_sync_active", False)
+                except Exception:
+                    pass
 
         self._thr = threading.Thread(target=worker, daemon=True)
         self._thr.start()
@@ -168,10 +166,10 @@ class PeriodicSyncController:
         def waiter() -> None:
             while True:
                 try:
-                    conn = sqlite3.connect(self.db_path, isolation_level=None, check_same_thread=False)
+                    conn = sqlite3.connect(self.db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
                     conn.row_factory = sqlite3.Row
                     try:
-                        conn.execute("PRAGMA busy_timeout=8000;")
+                        conn.execute("PRAGMA busy_timeout=30000;")
                         cfg = sync_client.load_sync_config(conn)
                         if not (cfg or {}).get("server_url") or not (cfg or {}).get("device_name"):
                             time.sleep(10.0)

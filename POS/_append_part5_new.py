@@ -1,8 +1,9 @@
 
 import base64, os
 
-TARGET = r"c:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن\HosnyWarehouse.py"
-B64_FILE = r"c:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن\_part5_b64_actual.txt"
+WAREHOUSE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Warehouse"))
+TARGET = os.path.join(WAREHOUSE_DIR, "HosnyWarehouse.py")
+B64_FILE = os.path.join(WAREHOUSE_DIR, "_part5_b64_actual.txt")
 
 with open(B64_FILE, 'r', encoding='ascii') as f:
     encoded = f.read()

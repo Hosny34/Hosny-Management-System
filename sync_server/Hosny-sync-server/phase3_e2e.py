@@ -10,11 +10,13 @@ import os
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 
 td = tempfile.gettempdir()
-WH_DIR  = r'c:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن'
-POS_DIR = r'c:\Users\youssef.sherif\Downloads\ادارة المخازن\POS'
+REPO = Path(__file__).resolve().parents[2]
+WH_DIR  = str(REPO / 'Warehouse')
+POS_DIR = str(REPO / 'POS')
 WH_SRC  = os.path.join(WH_DIR, 'warehouse_data.sqlite3')
 POS_SRC = os.path.join(POS_DIR, 'warehouse_data.sqlite3')
 

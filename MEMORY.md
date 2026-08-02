@@ -1,4 +1,4 @@
-# MEMORY
+﻿# MEMORY
 
 ## Overview
 
@@ -13,7 +13,7 @@ The main goal of the system is:
 
 Current active app layout in this workspace:
 
-- `ادارة المخازن/ادارة المخازن/` = main warehouse desktop app (nested folder name)
+- `Warehouse/` = main warehouse desktop app (nested folder name)
 - `POS-ZAY/` = primary POS desktop app copy
 - `POS-OCT/` = second POS copy when present (same codebase pattern as Zay, own `dist` build)
 - `sync_server/` = FastAPI sync server project
@@ -481,7 +481,7 @@ Result:
 Work done repeatedly after edits:
 
 - rebuilt `POS-ZAY\dist\HosnyPOS.exe` (POS executable name)
-- rebuilt `ادارة المخازن\ادارة المخازن\dist\HosnyWarehouse.exe`
+- rebuilt `Warehouse\dist\HosnyWarehouse.exe`
 
 Result:
 
@@ -638,11 +638,11 @@ Postgres is not fully implemented in server DB layer yet.
 
 ### Warehouse App
 
-- `ادارة المخازن/HosnyWarehouse.py`
-- `ادارة المخازن/sync_client.py`
-- `ادارة المخازن/sync_ui.py`
-- `ادارة المخازن/sync_appliers.py`
-- `ادارة المخازن/sync_core.py`
+- `Warehouse/HosnyWarehouse.py`
+- `Warehouse/sync_client.py`
+- `Warehouse/sync_ui.py`
+- `Warehouse/sync_appliers.py`
+- `Warehouse/sync_core.py`
 
 ### POS App
 
@@ -675,7 +675,7 @@ Known branch device names:
 
 Expected Windows executables (after PyInstaller):
 
-- `ادارة المخازن/ادارة المخازن/dist/HosnyWarehouse.exe`
+- `Warehouse/dist/HosnyWarehouse.exe`
 - `POS-ZAY/dist/HosnyPOS.exe`
 - `POS-OCT/dist/HosnyPOS.exe` (when `POS-OCT` is maintained in the workspace)
 
@@ -1094,7 +1094,7 @@ After a later manual test round, several fixes were applied:
 
 ## Update (2026-04): Reservations mirror, financial device filter, merged size ranges
 
-Warehouse UI / SQL (`ادارة المخازن/HosnyWarehouse.py`):
+Warehouse UI / SQL (`Warehouse/HosnyWarehouse.py`):
 
 - **`resolve_pos_mirror_device_sql_filter`**: POS filter for mirror + financial ledger expands a chosen label to all matching `source_device` values from `known_devices` (name and UUID), so filters work when sync stored only a UUID.
 - **`list_pos_reservations_mirror_device_picklist`**: combobox values = known device names plus distinct `source_device` from `pos_reservations_mirror` and `pos_financial_ledger` (ledger-only devices still selectable for finance).
@@ -1150,7 +1150,7 @@ Runbook updates:
 
 ## Update (2026-04): Warehouse diagnostics tab + movement monitor semantics
 
-Warehouse app (`ادارة المخازن/HosnyWarehouse.py`) now includes:
+Warehouse app (`Warehouse/HosnyWarehouse.py`) now includes:
 
 - A dedicated main tab **تشخيص المزامنة** (shortcut `F11`) in addition to dashboard widgets.
 - Warehouse movements window switched from raw movement log rows to **aggregated per-product monitor** with columns:
@@ -1194,7 +1194,7 @@ Immediate receiver sync wake-up (server + clients):
 
 ## Update (2026-04): Unhandled branch queue warehouse/package UX
 
-Warehouse queue window (`منتجات الفروع غير المعالجة`) in `ادارة المخازن/HosnyWarehouse.py`:
+Warehouse queue window (`منتجات الفروع غير المعالجة`) in `Warehouse/HosnyWarehouse.py`:
 
 - `مخزن` input changed from free text to a readonly dropdown using shared warehouse-number labels (`WAREHOUSE_NUMBER_DISPLAY_VALUES`).
 - `عبوة` now auto-fills with the next available package number for the selected warehouse via `package_numbers_summary(...)`.
@@ -1202,7 +1202,7 @@ Warehouse queue window (`منتجات الفروع غير المعالجة`) in 
 
 ## Update (2026-04): POS visual parity rollout (Warehouse + Stock Monitor)
 
-Warehouse app (`ادارة المخازن/HosnyWarehouse.py`):
+Warehouse app (`Warehouse/HosnyWarehouse.py`):
 
 - Expanded from billing-only styling to app-wide parity with POS light theme.
 - `ttk` base styles now follow POS spacing and typography: button/input padding, notebook tabs, tree headers, focus borders, and selection colors.
@@ -1221,7 +1221,7 @@ Builds:
 
 ## Update (2026-04): UI polish follow-ups (sizing, split ratios, hover)
 
-Warehouse (`ادارة المخازن/HosnyWarehouse.py`):
+Warehouse (`Warehouse/HosnyWarehouse.py`):
 
 - Billing split-pane startup ratio tuned to match the operator-adjusted warehouse layout (wider selector area on open).
 - School/product tile hover behavior fixed so color returns to the correct base style after mouse leave (no sticky hover color state).
@@ -1248,10 +1248,10 @@ Goal:
 
 Applied in:
 
-- `ادارة المخازن/sync_ui.py`
+- `Warehouse/sync_ui.py`
 - `POS-ZAY/sync_ui.py`
 - `POS-OCT/sync_ui.py`
-- `ادارة المخازن/HosnyWarehouse.py`
+- `Warehouse/HosnyWarehouse.py`
 - `POS-ZAY/HosnyPOS.py`
 - `POS-OCT/HosnyPOS.py`
 - `POS-STOCK-MONITOR/StockMonitor.py`

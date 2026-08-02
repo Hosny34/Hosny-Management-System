@@ -1,4 +1,4 @@
-WAREHOUSE / POS SYSTEM - READ ME
+﻿WAREHOUSE / POS SYSTEM - READ ME
 
 ========================================
 1. WHAT THIS SYSTEM IS
@@ -483,17 +483,17 @@ Recommended (matches checked-in specs; one-file bundles):
 
 Warehouse (from inner app folder):
 
-Set-Location "…\ادارة المخازن\ادارة المخازن"
+Set-Location "…\Hosny-Management-System\Warehouse"
 python -m PyInstaller --noconfirm HosnyWarehouse.spec
 
 POS Zay:
 
-Set-Location "…\ادارة المخازن\POS-ZAY"
+Set-Location "…\Hosny-Management-System\POS"
 python -m PyInstaller --noconfirm HosnyPOS.spec
 
 POS OCT (when this folder is in your copy):
 
-Set-Location "…\ادارة المخازن\POS-OCT"
+Set-Location "…\Hosny-Management-System\POS"
 python -m PyInstaller --noconfirm HosnyPOS.spec
 
 Legacy one-liner (still valid if you do not use `.spec` files):
@@ -502,7 +502,7 @@ pyinstaller --onefile HosnyPOS.py --name HosnyPOS
 
 Current important executables:
 
-- ادارة المخازن\ادارة المخازن\dist\HosnyWarehouse.exe
+- Warehouse\dist\HosnyWarehouse.exe
 - POS-ZAY\dist\HosnyPOS.exe
 - POS-OCT\dist\HosnyPOS.exe (when POS-OCT is maintained)
 
@@ -601,14 +601,14 @@ Manual usage:
 
 Examples:
 
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-zay
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-oct
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-obo
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-gesr
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-bah
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-cen
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" warehouse
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" all
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" pos-zay
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" pos-oct
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" pos-obo
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" pos-gesr
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" pos-bah
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" pos-cen
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" warehouse
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" all
 
 Important:
 

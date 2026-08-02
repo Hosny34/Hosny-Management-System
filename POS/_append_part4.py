@@ -1,5 +1,7 @@
 
-TARGET = r"c:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن\HosnyWarehouse.py"
+import os
+
+TARGET = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Warehouse", "HosnyWarehouse.py"))
 
 PART4 = """
 
@@ -410,7 +412,6 @@ class POSFrame(ttk.Frame):
             "unit_price": price,
             "qty": qty,
             "allow_factory_fill": False,
-            "has_badge": 0,
         })
         self._sync_bill_table()
 
@@ -715,14 +716,12 @@ class FactoryItemDialog(tk.Toplevel):
 
         self.qv = tk.StringVar(value=preset.get("qty","1"))
         self.pv = tk.StringVar(value=preset.get("unit_price",""))
-        self.badge = tk.BooleanVar(value=bool(int(preset.get("has_badge","0") or 0)))
 
         grid2 = ttk.Frame(frm); grid2.grid(row=3, column=0, columnspan=2, sticky="ew", padx=6, pady=6)
         ttk.Label(grid2, text="الكمية:").grid(row=0, column=0, sticky="e", padx=4, pady=4)
         ttk.Entry(grid2, textvariable=self.qv, width=12).grid(row=0, column=1, sticky="w")
         ttk.Label(grid2, text="سعر الوحدة:").grid(row=0, column=2, sticky="e", padx=12, pady=4)
         ttk.Entry(grid2, textvariable=self.pv, width=12).grid(row=0, column=3, sticky="w")
-        ttk.Checkbutton(grid2, text="بادج", variable=self.badge).grid(row=0, column=4, sticky="w", padx=(12,0))
 
         btns = ttk.Frame(frm); btns.grid(row=4, column=0, columnspan=2, sticky="e", padx=6, pady=(10,0))
         ttk.Button(btns, text="إلغاء", command=self.destroy).pack(side=tk.RIGHT)
@@ -768,7 +767,6 @@ class FactoryItemDialog(tk.Toplevel):
             "warehouse_no": wh, "package_no": pkg,
             "unit_price": price, "qty": qty,
             "allow_factory_fill": True,
-            "has_badge": 1 if self.badge.get() else 0,
         }
         self.destroy()
 

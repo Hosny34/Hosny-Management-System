@@ -262,3 +262,102 @@ NameError: name 'add_context_menu' is not defined. Did you mean: '_add_context_m
 2026-07-25 19:12:37 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=10352, cwd=G:\TestManagementSystem\Hosny-Management-System)
 2026-07-25 19:12:37 ERROR hosny: reservation_stock_before=5 after=5
 2026-07-25 19:12:37 ERROR hosny: BUG_CONFIRMED reservation delivery did not deduct stock
+2026-07-25 20:02:54 INFO hosny: ============================================================
+2026-07-25 20:02:54 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=21660, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-25 20:02:55 INFO hosny: pos_targeted_tests passed
+2026-07-25 20:03:09 INFO hosny: ============================================================
+2026-07-25 20:03:09 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=22748, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-25 20:05:53 INFO hosny: ============================================================
+2026-07-25 20:05:53 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=17580, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-26 14:36:13 INFO hosny: ============================================================
+2026-07-26 14:36:13 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=29992, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-26 14:44:05 INFO hosny: ============================================================
+2026-07-26 14:44:05 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=31224, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-26 14:46:15 INFO hosny: ============================================================
+2026-07-26 14:46:15 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=25540, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-26 14:46:49 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "HosnyPOS.py", line 11714, in _confirm_close
+    self.destroy()
+    ~~~~~~~~~~~~^^
+  File "tkinter\__init__.py", line 2788, in destroy
+_tkinter.TclError: can't invoke "destroy" command: application has been destroyed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyPOS.py", line 11705, in <lambda>
+    ttk.Button(btns, text="إنهاء الوردية", command=lambda: self._confirm_close(summary)).pack(side=tk.RIGHT, padx=8)
+                                                           ~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "HosnyPOS.py", line 11717, in _confirm_close
+    messagebox.showerror("خطأ", str(ex), parent=self)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tkinter\messagebox.py", line 98, in showerror
+  File "tkinter\messagebox.py", line 76, in _show
+  File "tkinter\commondialog.py", line 45, in show
+_tkinter.TclError: can't invoke "tk_messageBox" command: application has been destroyed
+2026-07-26 14:49:24 INFO hosny: ============================================================
+2026-07-26 14:49:24 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=30724, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-26 22:51:25 INFO hosny: ============================================================
+2026-07-26 22:51:25 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=23224, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-26 22:51:25 INFO hosny: s1_open sales/cash/void 200.0 200.0 0.0
+2026-07-26 22:51:25 INFO hosny: s1_after sales/cash/void 200.0 200.0 0.0
+2026-07-26 22:51:25 INFO hosny: s2 sales/cash/void 0.0 -200.0 200.0
+2026-07-26 22:51:25 INFO hosny: overpay_guard OK:المبلغ المحصل يزيد عن المتبقي من الحجز
+2026-07-26 22:51:43 INFO hosny: ============================================================
+2026-07-26 22:51:43 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=23748, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-26 22:51:43 INFO hosny: s1_open 200.0 200.0 0.0
+2026-07-26 22:51:43 INFO hosny: s1_after 200.0 200.0 0.0
+2026-07-26 22:51:43 INFO hosny: s2 0.0 -200.0 200.0
+2026-07-26 22:51:43 INFO hosny: overpay_guard OK:المبلغ المحصل يزيد عن المتبقي من الحجز
+2026-07-27 13:44:52 INFO hosny: ============================================================
+2026-07-27 13:44:52 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=19996, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-27 13:44:53 INFO hosny: test_db C:\Users\LENOVO\AppData\Local\Temp\zayed_pos_repair_test_0e4e955c3395481bb16798b38c8ad780\warehouse_data.sqlite3
+2026-07-27 13:44:53 INFO hosny: shift columns in bills/movements/reservations: ['shift_id'] ['shift_id'] ['shift_id']
+2026-07-27 13:44:53 INFO hosny: shifts after repair
+2026-07-27 13:44:53 INFO hosny: {'id': 1, 'started_at': '2026-07-19T23:36:21', 'ended_at': '2026-07-20T00:51:01', 'status': 'CLOSED', 'note': None}
+2026-07-27 13:44:53 INFO hosny: {'id': 2, 'started_at': '2026-07-20T00:51:05', 'ended_at': '2026-07-20T05:30:25', 'status': 'CLOSED', 'note': None}
+2026-07-27 13:44:53 INFO hosny: {'id': 3, 'started_at': '2026-07-19T21:41:25', 'ended_at': '2026-07-20T05:30:25', 'status': 'CLOSED', 'note': 'Auto-closed empty overlapping shift after clock rollback detection.'}
+2026-07-27 13:44:53 INFO hosny: bill shift ids
+2026-07-27 13:44:53 INFO hosny: {'id': 1, 'created_at': '2026-07-20T00:39:14', 'bill_type': 'SALE', 'total': 7020.0, 'shift_id': 1}
+2026-07-27 13:44:53 INFO hosny: {'id': 2, 'created_at': '2026-07-20T01:06:55', 'bill_type': 'SALE', 'total': 780.0, 'shift_id': 2}
+2026-07-27 13:44:53 INFO hosny: {'id': 3, 'created_at': '2026-07-20T02:25:22', 'bill_type': 'EXCHANGE', 'total': -20.0, 'shift_id': 2}
+2026-07-27 13:44:53 INFO hosny: {'id': 4, 'created_at': '2026-07-20T03:30:59', 'bill_type': 'SALE', 'total': 910.0, 'shift_id': 2}
+2026-07-27 13:44:53 INFO hosny: {'id': 5, 'created_at': '2026-07-20T03:49:04', 'bill_type': 'SALE', 'total': 350.0, 'shift_id': 2}
+2026-07-27 13:44:53 INFO hosny: movement shift counts
+2026-07-27 13:44:53 INFO hosny: {'shift_id': 1, 'direction': 'IN', 'rows': 316, 'qty': 1855}
+2026-07-27 13:44:53 INFO hosny: {'shift_id': 1, 'direction': 'OUT', 'rows': 12, 'qty': 18}
+2026-07-27 13:44:53 INFO hosny: {'shift_id': 2, 'direction': 'OUT', 'rows': 7, 'qty': 7}
+2026-07-27 13:44:53 INFO hosny: {'shift_id': 2, 'direction': 'RETURN_IN', 'rows': 1, 'qty': 1}
+2026-07-27 13:44:53 INFO hosny: summaries
+2026-07-27 13:44:53 INFO hosny: 1 {'sales_count': 1, 'sales_total': 7020.0, 'cash_collected': 7020.0, 'visa_collected': 0.0, 'return_count': 0, 'exchange_count': 0, 'exchange_total': 0.0, 'inflow_count': 0, 'inflow_total_qty': 0}
+2026-07-27 13:44:53 INFO hosny: 2 {'sales_count': 3, 'sales_total': 2040.0, 'cash_collected': 1110.0, 'visa_collected': 910.0, 'return_count': 0, 'exchange_count': 1, 'exchange_total': -20.0, 'inflow_count': 0, 'inflow_total_qty': 0}
+2026-07-27 13:44:53 INFO hosny: 3 {'sales_count': 0, 'sales_total': 0.0, 'cash_collected': 0.0, 'visa_collected': 0.0, 'return_count': 0, 'exchange_count': 0, 'exchange_total': 0.0, 'inflow_count': 0, 'inflow_total_qty': 0}
+2026-07-27 13:45:17 INFO hosny: ============================================================
+2026-07-27 13:45:17 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=26940, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-27 13:46:29 INFO hosny: ============================================================
+2026-07-27 13:46:29 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=35472, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-27 13:51:14 INFO hosny: ============================================================
+2026-07-27 13:51:14 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=30964, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-27 13:51:14 INFO hosny: audit_expansion_ok 1017 missing_stock_rows 708
+2026-07-27 13:55:54 INFO hosny: ============================================================
+2026-07-27 13:55:54 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=20072, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-27 13:58:12 INFO hosny: ============================================================
+2026-07-27 13:58:12 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=17640, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-27 13:58:12 ERROR hosny: UNCAUGHT EXCEPTION
+Traceback (most recent call last):
+  File "<stdin>", line 7, in <module>
+FileNotFoundError: [Errno 2] No such file or directory: '%TEMP%\\pos_clock_check.txt'
+2026-07-27 13:59:18 INFO hosny: ============================================================
+2026-07-27 13:59:18 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=3056, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-27 14:13:11 INFO hosny: ============================================================
+2026-07-27 14:13:11 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=29112, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-27 14:14:42 INFO hosny: ============================================================
+2026-07-27 14:14:42 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=39012, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-27 14:18:53 INFO hosny: ============================================================
+2026-07-27 14:18:53 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=25152, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-27 14:19:40 INFO hosny: ============================================================
+2026-07-27 14:19:40 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=41624, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-27 19:10:20 INFO hosny: ============================================================
+2026-07-27 19:10:20 INFO hosny: HosnyPOS-ZAY starting up (frozen=False, pid=45128, cwd=G:\TestManagementSystem\Hosny-Management-System)

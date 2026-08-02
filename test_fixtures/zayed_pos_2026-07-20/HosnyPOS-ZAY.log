@@ -1,0 +1,365 @@
+2026-04-21 16:07:03 INFO hosny: ============================================================
+2026-04-21 16:07:03 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=39836, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-ZAY)
+2026-04-23 11:00:10 INFO hosny: ============================================================
+2026-04-23 11:00:10 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=19076, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-ZAY)
+2026-04-23 11:39:25 INFO hosny: ============================================================
+2026-04-23 11:39:25 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=3520, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-ZAY)
+2026-04-23 11:55:04 INFO hosny: ============================================================
+2026-04-23 11:55:04 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=2304, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-ZAY)
+2026-04-23 12:03:17 INFO hosny: ============================================================
+2026-04-23 12:03:17 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=23264, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-ZAY)
+2026-04-27 14:06:55 INFO hosny: ============================================================
+2026-04-27 14:06:55 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=34148, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-ZAY)
+2026-04-27 14:16:20 INFO hosny: ============================================================
+2026-04-27 14:16:20 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=17720, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-ZAY)
+2026-04-27 14:30:46 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "HosnyPOS.py", line 9116, in _confirm_close
+    exchange_count = summary.get("exchange_count", 0)
+            ^^^^^^^^^^^^^^
+  File "tkinter\__init__.py", line 2669, in destroy
+_tkinter.TclError: can't invoke "destroy" command: application has been destroyed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 1968, in __call__
+  File "HosnyPOS.py", line 9107, in <lambda>
+  File "HosnyPOS.py", line 9119, in _confirm_close
+    exc = ttk.LabelFrame(main, text="الاستبدالات")
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tkinter\messagebox.py", line 98, in showerror
+  File "tkinter\messagebox.py", line 76, in _show
+  File "tkinter\commondialog.py", line 45, in show
+_tkinter.TclError: can't invoke "tk_messageBox" command: application has been destroyed
+2026-04-27 14:34:48 INFO hosny: ============================================================
+2026-04-27 14:34:48 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=13860, cwd=C:\Users\youssef.sherif\Downloads\ادارة المخازن\POS-ZAY)
+2026-05-13 01:06:14 INFO hosny: ============================================================
+2026-05-13 01:06:14 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=52452, cwd=G:\TestManagementSystem\Hosny-Management-System\POS-ZAY)
+2026-05-13 01:08:12 INFO hosny: ============================================================
+2026-05-13 01:08:12 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=22000, cwd=G:\TestManagementSystem\Hosny-Management-System\POS-ZAY)
+2026-05-13 01:11:52 INFO hosny: ============================================================
+2026-05-13 01:11:52 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=48152, cwd=G:\TestManagementSystem\Hosny-Management-System\POS-ZAY)
+2026-05-13 01:20:05 INFO hosny: ============================================================
+2026-05-13 01:20:05 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=31804, cwd=G:\TestManagementSystem\Hosny-Management-System\POS-ZAY)
+2026-05-13 02:21:48 INFO hosny: ============================================================
+2026-05-13 02:21:48 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=57208, cwd=G:\TestManagementSystem\Hosny-Management-System\POS-ZAY)
+2026-05-13 02:25:23 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 1968, in __call__
+  File "tkinter\__init__.py", line 862, in callit
+  File "HosnyPOS.py", line 4308, in _show
+    txt = self.text_func() if self.text_func else self.text
+          ^^^^^^^^^^^^^^^^
+TypeError: 'str' object is not callable
+2026-05-25 10:21:23 INFO hosny: ============================================================
+2026-05-25 10:21:23 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=48900, cwd=G:\TestManagementSystem\Hosny-Management-System\POS-ZAY)
+2026-06-02 00:39:22 INFO hosny: ============================================================
+2026-06-02 00:39:22 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=5768, cwd=G:\TestManagementSystem\Hosny-Management-System\POS-ZAY)
+2026-06-04 10:17:26 INFO hosny: ============================================================
+2026-06-04 10:17:26 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=16656, cwd=G:\TestManagementSystem\Hosny-Management-System\POS-ZAY)
+2026-06-09 16:05:15 INFO hosny: ============================================================
+2026-06-09 16:05:15 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=11172, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-09 17:28:58 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "HosnyPOS.py", line 9456, in _confirm_close
+    if not (item_type and school and color and size):
+            ^^^^^^^^^^^^^^
+  File "tkinter\__init__.py", line 2788, in destroy
+_tkinter.TclError: can't invoke "destroy" command: application has been destroyed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyPOS.py", line 9447, in <lambda>
+  File "HosnyPOS.py", line 9459, in _confirm_close
+    try:
+    
+  File "tkinter\messagebox.py", line 98, in showerror
+  File "tkinter\messagebox.py", line 76, in _show
+  File "tkinter\commondialog.py", line 45, in show
+_tkinter.TclError: can't invoke "tk_messageBox" command: application has been destroyed
+2026-06-14 15:52:25 INFO hosny: ============================================================
+2026-06-14 15:52:25 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=176, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-14 15:52:26 ERROR hosny: UNCAUGHT EXCEPTION
+Traceback (most recent call last):
+  File "HosnyPOS.py", line 10580, in <module>
+    main()
+    ~~~~^^
+  File "HosnyPOS.py", line 10449, in main
+    _app = WarehouseApp(root, db)
+  File "HosnyPOS.py", line 9892, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 10003, in _build
+    self._school_accounts_frame = SchoolAccountsFrame(school_accounts_tab, self.db)
+                                  ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyPOS.py", line 7103, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 7113, in _build
+    ttk.Label(self, text="حسابات المدارس", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 12))
+                                                ^^^^^^
+NameError: name '_FONTS' is not defined
+2026-06-14 15:52:46 INFO hosny: ============================================================
+2026-06-14 15:52:46 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=10416, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-14 15:52:47 ERROR hosny: UNCAUGHT EXCEPTION
+Traceback (most recent call last):
+  File "HosnyPOS.py", line 10580, in <module>
+    main()
+    ~~~~^^
+  File "HosnyPOS.py", line 10449, in main
+    _app = WarehouseApp(root, db)
+  File "HosnyPOS.py", line 9892, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 10003, in _build
+    self._school_accounts_frame = SchoolAccountsFrame(school_accounts_tab, self.db)
+                                  ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyPOS.py", line 7103, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 7113, in _build
+    ttk.Label(self, text="حسابات المدارس", font=_FONTS["h1"]).pack(anchor="w", pady=(0, 12))
+                                                ^^^^^^
+NameError: name '_FONTS' is not defined
+2026-06-14 15:56:39 INFO hosny: ============================================================
+2026-06-14 15:56:39 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=20416, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-14 15:56:40 ERROR hosny: UNCAUGHT EXCEPTION
+Traceback (most recent call last):
+  File "HosnyPOS.py", line 10580, in <module>
+    main()
+    ~~~~^^
+  File "HosnyPOS.py", line 10449, in main
+    _app = WarehouseApp(root, db)
+  File "HosnyPOS.py", line 9892, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 10003, in _build
+    self._school_accounts_frame = SchoolAccountsFrame(school_accounts_tab, self.db)
+                                  ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyPOS.py", line 7103, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 7127, in _build
+    ttk.Label(self, textvariable=self._schools_var, foreground=_UI["TEXT_DIM"]).pack(anchor="w", pady=(0, 8))
+                                                               ^^^
+NameError: name '_UI' is not defined
+2026-06-14 15:59:48 INFO hosny: ============================================================
+2026-06-14 15:59:48 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=15032, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-14 15:59:49 ERROR hosny: UNCAUGHT EXCEPTION
+Traceback (most recent call last):
+  File "HosnyPOS.py", line 10580, in <module>
+    main()
+    ~~~~^^
+  File "HosnyPOS.py", line 10449, in main
+    _app = WarehouseApp(root, db)
+  File "HosnyPOS.py", line 9892, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 10003, in _build
+    self._school_accounts_frame = SchoolAccountsFrame(school_accounts_tab, self.db)
+                                  ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyPOS.py", line 7103, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 7127, in _build
+    ttk.Label(self, textvariable=self._schools_var, foreground="#64748b").pack(anchor="w", pady=(0, 8))
+                                                               ^^^
+NameError: name '_UI' is not defined
+2026-06-14 16:00:52 INFO hosny: ============================================================
+2026-06-14 16:00:52 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=7172, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-14 16:00:53 ERROR hosny: UNCAUGHT EXCEPTION
+Traceback (most recent call last):
+  File "HosnyPOS.py", line 10580, in <module>
+    main()
+    ~~~~^^
+  File "HosnyPOS.py", line 10449, in main
+    _app = WarehouseApp(root, db)
+  File "HosnyPOS.py", line 9892, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 10003, in _build
+    self._school_accounts_frame = SchoolAccountsFrame(school_accounts_tab, self.db)
+                                  ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "HosnyPOS.py", line 7103, in __init__
+    self._build()
+    ~~~~~~~~~~~^^
+  File "HosnyPOS.py", line 7162, in _build
+    add_context_menu(self._tree)
+    ^^^^^^^^^^^^^^^^
+NameError: name 'add_context_menu' is not defined. Did you mean: '_add_context_menu'?
+2026-06-14 16:02:29 INFO hosny: ============================================================
+2026-06-14 16:02:29 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=14540, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-14 19:02:03 INFO hosny: ============================================================
+2026-06-14 19:02:03 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=26072, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-29 21:40:30 INFO hosny: ============================================================
+2026-06-29 21:40:30 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=42996, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-29 22:17:37 INFO hosny: ============================================================
+2026-06-29 22:17:37 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=37488, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-29 22:24:36 INFO hosny: ============================================================
+2026-06-29 22:24:36 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=36600, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-29 23:00:09 INFO hosny: ============================================================
+2026-06-29 23:00:09 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=34396, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-29 23:07:57 INFO hosny: ============================================================
+2026-06-29 23:07:57 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=42920, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-06-29 23:09:49 INFO hosny: ============================================================
+2026-06-29 23:09:49 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=39628, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-19 18:55:12 INFO hosny: ============================================================
+2026-07-19 18:55:12 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=4508, cwd=D:\POS)
+2026-07-19 19:24:37 INFO hosny: ============================================================
+2026-07-19 19:24:37 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=11120, cwd=D:\POS)
+2026-07-19 19:27:49 INFO hosny: ============================================================
+2026-07-19 19:27:49 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=11460, cwd=D:\POS)
+2026-07-19 20:01:22 INFO hosny: ============================================================
+2026-07-19 20:01:22 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=11172, cwd=D:\POS)
+2026-07-19 20:15:33 INFO hosny: ============================================================
+2026-07-19 20:15:33 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=4684, cwd=D:\POS)
+2026-07-19 20:26:09 INFO hosny: ============================================================
+2026-07-19 20:26:09 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=1188, cwd=D:\POS)
+2026-07-19 21:33:54 INFO hosny: ============================================================
+2026-07-19 21:33:54 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=8532, cwd=D:\POS)
+2026-07-19 21:35:25 INFO hosny: ============================================================
+2026-07-19 21:35:25 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=10156, cwd=D:\POS)
+2026-07-21 17:58:32 INFO hosny: ============================================================
+2026-07-21 17:58:32 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=308, cwd=D:\POS)
+2026-07-21 18:13:09 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "tkinter\__init__.py", line 862, in callit
+  File "HosnyPOS.py", line 5350, in _show
+    txt = self.text_func() if self.text_func else self.text
+          ~~~~~~~~~~~~~~^^
+TypeError: 'str' object is not callable
+2026-07-21 18:13:12 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "tkinter\__init__.py", line 862, in callit
+  File "HosnyPOS.py", line 5350, in _show
+    txt = self.text_func() if self.text_func else self.text
+          ~~~~~~~~~~~~~~^^
+TypeError: 'str' object is not callable
+2026-07-21 18:13:13 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "tkinter\__init__.py", line 862, in callit
+  File "HosnyPOS.py", line 5350, in _show
+    txt = self.text_func() if self.text_func else self.text
+          ~~~~~~~~~~~~~~^^
+TypeError: 'str' object is not callable
+2026-07-21 18:13:17 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "tkinter\__init__.py", line 862, in callit
+  File "HosnyPOS.py", line 5350, in _show
+    txt = self.text_func() if self.text_func else self.text
+          ~~~~~~~~~~~~~~^^
+TypeError: 'str' object is not callable
+2026-07-21 18:13:35 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "tkinter\__init__.py", line 862, in callit
+  File "HosnyPOS.py", line 5350, in _show
+    txt = self.text_func() if self.text_func else self.text
+          ~~~~~~~~~~~~~~^^
+TypeError: 'str' object is not callable
+2026-07-21 18:15:28 INFO hosny: ============================================================
+2026-07-21 18:15:28 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=8808, cwd=D:\POS)
+2026-07-21 20:08:10 INFO hosny: ============================================================
+2026-07-21 20:08:10 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=10820, cwd=D:\POS)
+2026-07-21 21:23:58 INFO hosny: ============================================================
+2026-07-21 21:23:58 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=9720, cwd=D:\POS)
+2026-07-21 21:44:20 INFO hosny: ============================================================
+2026-07-21 21:44:20 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=10844, cwd=D:\POS)
+2026-07-20 04:13:47 INFO hosny: ============================================================
+2026-07-20 04:13:47 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=7692, cwd=D:\POS)
+2026-07-20 04:14:04 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "tkinter\__init__.py", line 862, in callit
+  File "HosnyPOS.py", line 5350, in _show
+    txt = self.text_func() if self.text_func else self.text
+          ~~~~~~~~~~~~~~^^
+TypeError: 'str' object is not callable
+2026-07-20 04:14:30 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "tkinter\__init__.py", line 862, in callit
+  File "HosnyPOS.py", line 5350, in _show
+    txt = self.text_func() if self.text_func else self.text
+          ~~~~~~~~~~~~~~^^
+TypeError: 'str' object is not callable
+2026-07-20 04:07:39 INFO hosny: ============================================================
+2026-07-20 04:07:39 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=7840, cwd=D:\POS)
+2026-07-19 23:24:28 INFO hosny: ============================================================
+2026-07-19 23:24:28 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=9152, cwd=D:\POS)
+2026-07-19 23:25:25 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "HosnyPOS.py", line 11405, in _confirm_close
+    self.destroy()
+    ~~~~~~~~~~~~^^
+  File "tkinter\__init__.py", line 2788, in destroy
+_tkinter.TclError: can't invoke "destroy" command: application has been destroyed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2074, in __call__
+  File "HosnyPOS.py", line 11396, in <lambda>
+    ttk.Button(btns, text="إنهاء الوردية", command=lambda: self._confirm_close(summary)).pack(side=tk.RIGHT, padx=8)
+                                                           ~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "HosnyPOS.py", line 11408, in _confirm_close
+    messagebox.showerror("خطأ", str(ex), parent=self)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tkinter\messagebox.py", line 98, in showerror
+  File "tkinter\messagebox.py", line 76, in _show
+  File "tkinter\commondialog.py", line 45, in show
+_tkinter.TclError: can't invoke "tk_messageBox" command: application has been destroyed
+2026-07-19 23:26:17 INFO hosny: ============================================================
+2026-07-19 23:26:17 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=1112, cwd=D:\POS)
+2026-07-19 23:26:34 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "HosnyPOS.py", line 11405, in _confirm_close
+    self.destroy()
+  File "tkinter\__init__.py", line 2580, in destroy
+_tkinter.TclError: can't invoke "destroy" command: application has been destroyed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 1892, in __call__
+  File "HosnyPOS.py", line 11396, in <lambda>
+    ttk.Button(btns, text="إنهاء الوردية", command=lambda: self._confirm_close(summary)).pack(side=tk.RIGHT, padx=8)
+  File "HosnyPOS.py", line 11408, in _confirm_close
+    messagebox.showerror("خطأ", str(ex), parent=self)
+  File "tkinter\messagebox.py", line 94, in showerror
+  File "tkinter\messagebox.py", line 72, in _show
+  File "tkinter\commondialog.py", line 40, in show
+  File "tkinter\__init__.py", line 3124, in __init__
+  File "tkinter\__init__.py", line 2572, in __init__
+_tkinter.TclError: can't invoke "frame" command: application has been destroyed
+2026-07-19 23:36:21 INFO hosny: ============================================================
+2026-07-19 23:36:21 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=3596, cwd=D:\POS)
+2026-07-20 00:40:18 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 1892, in __call__
+  File "HosnyPOS.py", line 8610, in _on_shift_selected
+    shift_id = int(vals[0])
+ValueError: invalid literal for int() with base 10: '\u200e1\u200e'
+2026-07-20 00:40:21 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 1892, in __call__
+  File "HosnyPOS.py", line 8610, in _on_shift_selected
+    shift_id = int(vals[0])
+ValueError: invalid literal for int() with base 10: '\u200e1\u200e'
+2026-07-20 00:40:22 ERROR hosny: TK CALLBACK EXCEPTION
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 1892, in __call__
+  File "HosnyPOS.py", line 8610, in _on_shift_selected
+    shift_id = int(vals[0])
+ValueError: invalid literal for int() with base 10: '\u200e1\u200e'
+2026-07-20 00:49:45 INFO hosny: ============================================================
+2026-07-20 00:49:45 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=3444, cwd=D:\POS)
+2026-07-19 21:39:56 INFO hosny: ============================================================
+2026-07-19 21:39:56 INFO hosny: HosnyPOS-ZAY starting up (frozen=True, pid=9240, cwd=D:\POS)

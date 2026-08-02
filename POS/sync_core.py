@@ -127,6 +127,12 @@ def apply_sync_migration(conn: sqlite3.Connection) -> None:
             last_error      TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS sync_meta (
+            key        TEXT PRIMARY KEY,
+            value      TEXT,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS sync_dead_letter (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
             event_uuid     TEXT NOT NULL,
@@ -223,8 +229,41 @@ def apply_sync_migration(conn: sqlite3.Connection) -> None:
             source_device TEXT PRIMARY KEY,
             snapshot_at   TEXT NOT NULL,
             row_count     INTEGER NOT NULL DEFAULT 0,
-            total_value   REAL NOT NULL DEFAULT 0
+            total_value   REAL NOT NULL DEFAULT 0,
+            app_version   TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS pos_stock_audit_reports_mirror (
+            audit_uuid    TEXT PRIMARY KEY,
+            source_device TEXT NOT NULL,
+            local_report_id INTEGER,
+            reason        TEXT,
+            created_at    TEXT NOT NULL,
+            total_diff    INTEGER NOT NULL DEFAULT 0,
+            total_value   REAL NOT NULL DEFAULT 0,
+            event_uuid    TEXT NOT NULL,
+            received_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS ix_pos_stock_audit_reports_device
+            ON pos_stock_audit_reports_mirror(source_device, created_at);
+
+        CREATE TABLE IF NOT EXISTS pos_stock_audit_items_mirror (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            audit_uuid    TEXT NOT NULL,
+            source_device TEXT NOT NULL,
+            item_type     TEXT NOT NULL,
+            school        TEXT NOT NULL,
+            color         TEXT NOT NULL,
+            size          TEXT NOT NULL,
+            expected_qty  INTEGER NOT NULL,
+            actual_qty    INTEGER NOT NULL,
+            diff_qty      INTEGER NOT NULL,
+            unit_price    REAL NOT NULL,
+            diff_value    REAL NOT NULL,
+            FOREIGN KEY(audit_uuid) REFERENCES pos_stock_audit_reports_mirror(audit_uuid)
+        );
+        CREATE INDEX IF NOT EXISTS ix_pos_stock_audit_items_specs
+            ON pos_stock_audit_items_mirror(source_device, item_type, school, color, size);
 
         -- Mirror of POS reservation lines (warehouse reporting only).
         CREATE TABLE IF NOT EXISTS pos_reservations_mirror (
@@ -268,6 +307,12 @@ def apply_sync_migration(conn: sqlite3.Connection) -> None:
             ON pos_financial_ledger(source_device, day DESC);
         """
     )
+
+    if _table_exists(conn, "pos_stocks_snapshot_meta") and not _column_exists(conn, "pos_stocks_snapshot_meta", "app_version"):
+        try:
+            conn.execute("ALTER TABLE pos_stocks_snapshot_meta ADD COLUMN app_version TEXT")
+        except sqlite3.OperationalError:
+            pass
 
     # ---- Add uuid column + backfill on every syncable domain table ----
     for table in SYNCABLE_TABLES:

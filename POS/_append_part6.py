@@ -1,8 +1,9 @@
 
 import os
 
-TARGET = r"c:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن\HosnyWarehouse.py"
-CONTENT_FILE = r"c:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن\_part6_content.py"
+WAREHOUSE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Warehouse"))
+TARGET = os.path.join(WAREHOUSE_DIR, "HosnyWarehouse.py")
+CONTENT_FILE = os.path.join(WAREHOUSE_DIR, "_part6_content.py")
 
 with open(CONTENT_FILE, 'r', encoding='utf-8') as f:
     content = f.read()

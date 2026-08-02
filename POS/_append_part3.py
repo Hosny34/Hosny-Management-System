@@ -1,5 +1,7 @@
 
-TARGET = r"c:\Users\youssef.sherif\Downloads\ادارة المخازن\ادارة المخازن\HosnyWarehouse.py"
+import os
+
+TARGET = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Warehouse", "HosnyWarehouse.py"))
 
 PART3 = """
 
@@ -135,11 +137,6 @@ class IncomeFrame(ttk.Frame):
 
         sizes_canvas.bind("<Enter>", _bind_wheel)
         sizes_canvas.bind("<Leave>", _unbind_wheel)
-
-        self.has_badge = tk.BooleanVar(value=False)
-        badge_row = ttk.Frame(grid)
-        badge_row.grid(row=3, column=0, columnspan=2, sticky="w", padx=6, pady=(6, 6))
-        ttk.Checkbutton(badge_row, text="بادج", variable=self.has_badge).pack(side=tk.LEFT)
 
         self.item_type.grid(row=0, column=0, padx=6, pady=6, sticky="ew")
         self.school.grid(   row=0, column=1, padx=6, pady=6, sticky="ew")
@@ -328,8 +325,6 @@ class IncomeFrame(ttk.Frame):
 
         self._sizes_inner.update_idletasks()
 
-        self.has_badge.set(False)
-
         self._refresh_pkg_status()
 
     def _on_add(self):
@@ -386,7 +381,6 @@ class IncomeFrame(ttk.Frame):
                     package_no=p,
                     unit_price=float(price),
                     count=qty,
-                    has_badge=1 if self.has_badge.get() else 0,
                 )
 
                 self.db.ensure_default_price(item_type, price)
@@ -420,8 +414,6 @@ class IncomeFrame(ttk.Frame):
                 except Exception:
                     pass
                 self.sizes_grid = None
-
-            self.has_badge.set(False)
 
             self._refresh_pkg_hints()
             self._refresh_pkg_status()

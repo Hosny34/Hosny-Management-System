@@ -1,0 +1,81 @@
+2026-07-28 20:27:44 INFO hosny: ============================================================
+2026-07-28 20:27:44 INFO hosny: HosnyPOS-BAH starting up (frozen=False, pid=40792, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-28 20:27:44 INFO hosny: before 2
+2026-07-28 20:27:44 INFO hosny: repair1 {'negative_fixed': 0, 'duplicates_merged': 0, 'reservation_deductions_restored': 1}
+2026-07-28 20:27:44 INFO hosny: after1 3
+2026-07-28 20:27:44 INFO hosny: repair2 {'negative_fixed': 0, 'duplicates_merged': 0, 'reservation_deductions_restored': 0}
+2026-07-28 20:27:44 INFO hosny: after2 3
+2026-07-28 20:27:57 INFO hosny: ============================================================
+2026-07-28 20:27:57 INFO hosny: HosnyPOS-BAH starting up (frozen=False, pid=42156, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-28 20:27:57 INFO hosny: loaded
+2026-07-28 20:27:57 INFO hosny: before 2
+2026-07-28 20:27:57 INFO hosny: repair1 {'negative_fixed': 0, 'duplicates_merged': 0, 'reservation_deductions_restored': 1}
+2026-07-28 20:27:57 INFO hosny: after1 3
+2026-07-28 20:27:57 INFO hosny: repair2 {'negative_fixed': 0, 'duplicates_merged': 0, 'reservation_deductions_restored': 0}
+2026-07-28 20:27:57 INFO hosny: after2 3
+2026-07-28 20:27:57 INFO hosny: done
+2026-07-28 20:53:16 INFO hosny: ============================================================
+2026-07-28 20:53:16 INFO hosny: HosnyPOS-BAH starting up (frozen=True, pid=22224, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-28 22:39:52 INFO hosny: ============================================================
+2026-07-28 22:39:52 INFO hosny: HosnyPOS-BAH starting up (frozen=True, pid=39484, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-28 23:12:54 INFO hosny: ============================================================
+2026-07-28 23:12:54 INFO hosny: HosnyPOS-BAH starting up (frozen=True, pid=57304, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-28 23:39:47 INFO hosny: ============================================================
+2026-07-28 23:39:47 INFO hosny: HosnyPOS-BAH starting up (frozen=True, pid=55536, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-28 23:41:28 INFO hosny: ============================================================
+2026-07-28 23:41:28 INFO hosny: HosnyPOS-BAH starting up (frozen=True, pid=68984, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-28 23:49:49 INFO hosny: ============================================================
+2026-07-28 23:49:49 INFO hosny: HosnyPOS-BAH starting up (frozen=True, pid=69084, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-28 23:50:52 INFO hosny: ============================================================
+2026-07-28 23:50:52 INFO hosny: HosnyPOS-BAH starting up (frozen=True, pid=62052, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-28 23:52:10 INFO hosny: ============================================================
+2026-07-28 23:52:10 INFO hosny: HosnyPOS-BAH starting up (frozen=True, pid=31396, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-28 23:52:10 INFO hosny: HosnyPOS smoke import ok
+2026-07-29 00:03:30 INFO hosny: ============================================================
+2026-07-29 00:03:30 INFO hosny: HosnyPOS-BAH starting up (frozen=True, pid=62984, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-29 00:05:25 INFO hosny: ============================================================
+2026-07-29 00:05:25 INFO hosny: HosnyPOS-BAH starting up (frozen=True, pid=49592, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-29 00:39:27 INFO hosny: ============================================================
+2026-07-29 00:39:27 INFO hosny: HosnyPOS-BAH starting up (frozen=True, pid=73272, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-29 01:11:11 INFO hosny: ============================================================
+2026-07-29 01:11:11 INFO hosny: HosnyPOS-BAH starting up (frozen=True, pid=75064, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-29 01:13:19 INFO hosny: ============================================================
+2026-07-29 01:13:19 INFO hosny: HosnyPOS-BAH starting up (frozen=True, pid=76612, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-29 01:26:14 INFO hosny: ============================================================
+2026-07-29 01:26:14 INFO hosny: HosnyPOS-BAH starting up (frozen=True, pid=69984, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-29 01:28:13 INFO hosny: ============================================================
+2026-07-29 01:28:13 INFO hosny: HosnyPOS-BAH starting up (frozen=False, pid=75300, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-29 01:31:14 INFO hosny: ============================================================
+2026-07-29 01:31:14 INFO hosny: HosnyPOS-BAH starting up (frozen=True, pid=57780, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-29 01:34:09 INFO hosny: ============================================================
+2026-07-29 01:34:09 INFO hosny: HosnyPOS-BAH starting up (frozen=True, pid=52160, cwd=G:\TestManagementSystem\Hosny-Management-System\POS)
+2026-07-30 00:23:21 INFO hosny: ============================================================
+2026-07-30 00:23:21 INFO hosny: HosnyPOS-BAH starting up (frozen=False, pid=91088, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-30 00:23:21 INFO hosny: history_rows 3 bills 3 reservations 0
+2026-07-30 00:23:21 INFO hosny: first_reservation_items 0
+2026-07-30 00:23:42 INFO hosny: ============================================================
+2026-07-30 00:23:42 INFO hosny: HosnyPOS-BAH starting up (frozen=False, pid=71828, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-30 00:23:42 INFO hosny: history_rows 3 bills 3 reservations 0
+2026-07-30 16:57:23 INFO hosny: ============================================================
+2026-07-30 16:57:23 INFO hosny: HosnyPOS-BAH starting up (frozen=False, pid=84428, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-30 16:57:23 INFO hosny: HosnyPOS smoke import ok
+2026-07-30 17:10:48 INFO hosny: ============================================================
+2026-07-30 17:10:48 INFO hosny: HosnyPOS-BAH starting up (frozen=False, pid=54004, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-30 17:10:48 INFO hosny: HosnyPOS smoke import ok
+2026-07-30 17:17:01 INFO hosny: ============================================================
+2026-07-30 17:17:01 INFO hosny: HosnyPOS-BAH starting up (frozen=False, pid=86908, cwd=G:\TestManagementSystem\Hosny-Management-System)
+2026-07-30 17:17:01 INFO hosny: quick_check ok
+2026-07-30 17:17:01 INFO hosny: device_identity 1
+2026-07-30 17:17:01 INFO hosny: stocks 7
+2026-07-30 17:17:01 INFO hosny: bills 14
+2026-07-30 17:17:01 INFO hosny: bill_items 24
+2026-07-30 17:17:01 INFO hosny: movements 32
+2026-07-30 17:17:01 INFO hosny: shifts 3
+2026-07-30 17:17:01 INFO hosny: reservations 1
+2026-07-30 17:17:01 INFO hosny: sync_inbox 0
+2026-07-30 17:17:01 INFO hosny: stock_audit_reports 0
+2026-07-30 17:17:01 INFO hosny: stock_audit_report_lines 0
+2026-07-30 17:17:01 INFO hosny: identity {'id': 1, 'device_uuid': '3b7cb842-264a-4b3a-9920-636b2d0febce', 'device_name': 'POS-ZAY', 'device_role': 'pos', 'api_token': '', 'server_url': 'https://web-production-e022.up.railway.app', 'created_at': '2026-07-19T19:35:26.131920Z', 'updated_at': '2026-07-19T19:37:22.024851Z'}
+2026-07-30 17:17:01 INFO hosny: tested_copy C:\Users\LENOVO\AppData\Local\Temp\hosny_zayed_appopen_khsw12hf\warehouse_data.sqlite3
+2026-07-30 17:18:34 INFO hosny: ============================================================
+2026-07-30 17:18:34 INFO hosny: HosnyPOS-BAH starting up (frozen=False, pid=70908, cwd=G:\TestManagementSystem\Hosny-Management-System)

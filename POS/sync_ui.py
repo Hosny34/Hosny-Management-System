@@ -24,13 +24,19 @@ from __future__ import annotations
 import queue
 import sqlite3
 import threading
+import os
 import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox, ttk
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import sync_client
 import sync_core
+
+try:
+    import update_client
+except Exception:
+    update_client = None
 
 
 # ------------------------------- helpers -------------------------------- #
@@ -55,22 +61,40 @@ def _fmt(value: Optional[str], empty: str = "—") -> str:
 
 
 def _notify_host_synced(master: tk.Misc) -> None:
-    host = getattr(master, "_app_controller", None) or master
-    for name in ("_refresh_current_tab", "_shortcut_refresh", "_on_tab_changed"):
+    host = getattr(master, "_app_controller", None) or None
+    cur = master
+    for _ in range(20):
+        if cur is None:
+            break
+        if hasattr(cur, "_on_sync_completed") or hasattr(cur, "_refresh_current_tab"):
+            host = cur
+            break
+        cur = getattr(cur, "master", None)
+    if host is None:
+        try:
+            host = master.winfo_toplevel()
+        except Exception:
+            host = master
+
+    for name in ("_on_sync_completed", "_refresh_current_tab", "_shortcut_refresh", "_on_tab_changed"):
         fn = getattr(host, name, None)
         if not callable(fn):
             continue
         try:
             fn()
-            return
+            break
         except TypeError:
             try:
                 fn(None)
-                return
+                break
             except Exception:
                 pass
         except Exception:
             pass
+    try:
+        host.event_generate("<<HosnySyncCompleted>>", when="tail")
+    except Exception:
+        pass
 
 
 def open_sync_received_details(master: tk.Misc, summary: Dict[str, Any]) -> None:
@@ -305,12 +329,16 @@ class SyncSetupDialog(tk.Toplevel):
         d = self._collect()
         if not d:
             return
-        sync_client.save_setup(
-            self.db_conn,
-            server_url=d["url"],
-            device_name=d["name"],
-            api_token=d["key"],
-        )
+        try:
+            sync_client.save_setup(
+                self.db_conn,
+                server_url=d["url"],
+                device_name=d["name"],
+                api_token=d["key"],
+            )
+        except sync_client.SyncError as e:
+            messagebox.showerror("Sync setup", str(e), parent=self)
+            return
         self._status_var.set("تم الحفظ.")
         messagebox.showinfo("إعدادات المزامنة", "تم حفظ إعدادات المزامنة.", parent=self)
         self.destroy()
@@ -320,12 +348,16 @@ class SyncSetupDialog(tk.Toplevel):
         if not d:
             return
         # Save first so SyncClient reads the fresh values.
-        sync_client.save_setup(
-            self.db_conn,
-            server_url=d["url"],
-            device_name=d["name"],
-            api_token=d["key"],
-        )
+        try:
+            sync_client.save_setup(
+                self.db_conn,
+                server_url=d["url"],
+                device_name=d["name"],
+                api_token=d["key"],
+            )
+        except sync_client.SyncError as e:
+            messagebox.showerror("Sync setup", str(e), parent=self)
+            return
         self._status_var.set("جاري الاختبار...")
         self.update_idletasks()
         client = sync_client.SyncClient(self.db_conn)
@@ -424,6 +456,8 @@ class SyncDialog(tk.Toplevel):
         self._btn_setup.pack(side=tk.LEFT)
         self._btn_test = ttk.Button(btns, text="اختبار الاتصال", command=self._test_connection)
         self._btn_test.pack(side=tk.LEFT, padx=6)
+        self._btn_update = ttk.Button(btns, text="تحديث البرنامج", command=self._check_pos_update)
+        self._btn_update.pack(side=tk.LEFT, padx=6)
         self._btn_sync = ttk.Button(btns, text="مزامنة الآن", command=self._start_sync)
         self._btn_sync.pack(side=tk.RIGHT)
 
@@ -500,6 +534,7 @@ class SyncDialog(tk.Toplevel):
         self._btn_sync.configure(state="disabled")
         self._btn_setup.configure(state="disabled")
         self._btn_test.configure(state="disabled")
+        self._btn_update.configure(state="disabled")
         self._append_log("── بدء دورة مزامنة ──", "info")
 
         db_path = self.db_conn.execute("PRAGMA database_list").fetchone()[2]
@@ -507,8 +542,9 @@ class SyncDialog(tk.Toplevel):
         def worker() -> None:
             # Background thread MUST open its own connection — sqlite3
             # connections are not thread-safe when isolation is auto.
-            conn = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)
+            conn = sqlite3.connect(db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
             conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=30000;")
             try:
                 client = sync_client.SyncClient(conn)
                 summary = client.run_cycle(progress=lambda m: self._q.put(("log", m, "info")))
@@ -517,6 +553,72 @@ class SyncDialog(tk.Toplevel):
                 self._q.put(("error", str(e)))
             except Exception as e:
                 self._q.put(("error", f"unexpected: {e}"))
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        self._worker = threading.Thread(target=worker, daemon=True)
+        self._worker.start()
+
+    def _check_pos_update(self) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            return
+        if update_client is None:
+            self._append_log("تحديث البرنامج: ملفات التحديث غير متاحة في هذا الإصدار.", "err")
+            return
+
+        self._btn_sync.configure(state="disabled")
+        self._btn_setup.configure(state="disabled")
+        self._btn_test.configure(state="disabled")
+        self._btn_update.configure(state="disabled")
+        self._append_log("── فحص تحديث البرنامج ──", "info")
+
+        db_path = self.db_conn.execute("PRAGMA database_list").fetchone()[2]
+
+        def worker() -> None:
+            conn = sqlite3.connect(db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=30000;")
+            try:
+                info = update_client.check_for_update(conn)
+                self._q.put(("update_checked", info))
+            except Exception as e:
+                self._q.put(("update_error", str(e)))
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        self._worker = threading.Thread(target=worker, daemon=True)
+        self._worker.start()
+
+    def _download_pos_update(self, manifest: Dict[str, Any]) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            return
+        if update_client is None:
+            self._append_log("تحديث البرنامج: ملفات التحديث غير متاحة في هذا الإصدار.", "err")
+            return
+
+        self._btn_sync.configure(state="disabled")
+        self._btn_setup.configure(state="disabled")
+        self._btn_test.configure(state="disabled")
+        self._btn_update.configure(state="disabled")
+        self._append_log("جاري تحميل حزمة التحديث...", "info")
+
+        db_path = self.db_conn.execute("PRAGMA database_list").fetchone()[2]
+
+        def worker() -> None:
+            conn = sqlite3.connect(db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=30000;")
+            try:
+                result = update_client.download_update_package(conn, manifest)
+                self._q.put(("update_downloaded", result))
+            except Exception as e:
+                self._q.put(("update_error", str(e)))
             finally:
                 try:
                     conn.close()
@@ -558,6 +660,65 @@ class SyncDialog(tk.Toplevel):
                         present_sync_cycle_failure(self.master, str(msg[1]))
                     except Exception:
                         pass
+                elif kind == "update_checked":
+                    info = msg[1]
+                    manifest = info.get("manifest") or {}
+                    if not info.get("available"):
+                        self._append_log(
+                            "لا يوجد تحديث جديد. الإصدار الحالي: %s" % info.get("local_version"),
+                            "ok",
+                        )
+                        self._enable_buttons()
+                        self._refresh_state()
+                    else:
+                        version = manifest.get("version")
+                        notes = str(manifest.get("notes") or "").strip()
+                        prompt = "يوجد تحديث جديد للإصدار %s. هل تريد تحميله الآن؟" % version
+                        if notes:
+                            prompt += "\n\n" + notes
+                        if messagebox.askyesno("تحديث البرنامج", prompt, parent=self):
+                            self._download_pos_update(manifest)
+                        else:
+                            self._enable_buttons()
+                            self._refresh_state()
+                elif kind == "update_downloaded":
+                    result = msg[1]
+                    self._append_log(
+                        "تم تحميل التحديث %s إلى: %s"
+                        % (result.get("version"), result.get("staging_dir")),
+                        "ok",
+                    )
+                    if messagebox.askyesno(
+                        "تثبيت التحديث",
+                        "سيتم إغلاق نقطة البيع الآن، ثم بناء الإصدار الجديد وتشغيله مرة أخرى. هل تريد البدء؟",
+                        parent=self,
+                    ):
+                        try:
+                            launch = update_client.launch_updater(result, restart=True)
+                            self._append_log(
+                                "بدأ مثبت التحديث للإصدار %s. سيتم إغلاق البرنامج الآن."
+                                % launch.get("version"),
+                                "warn",
+                            )
+                            host = self.master.winfo_toplevel() if self.master is not None else self.winfo_toplevel()
+                            host.after(1200, lambda: os._exit(0))
+                            host.after(600, host.destroy)
+                            try:
+                                host.after(700, host.quit)
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            self._append_log("فشل تشغيل مثبت التحديث: %s" % e, "err")
+                            self._enable_buttons()
+                            self._refresh_state()
+                        continue
+                    self._append_log("الخطوة التالية: تشغيل مثبت التحديث بعد تأكيد المستخدم.", "warn")
+                    self._enable_buttons()
+                    self._refresh_state()
+                elif kind == "update_error":
+                    self._append_log("فشل تحديث البرنامج: %s" % msg[1], "err")
+                    self._enable_buttons()
+                    self._refresh_state()
         except queue.Empty:
             pass
         self.after(self.POLL_MS, self._pump_queue)
@@ -566,6 +727,7 @@ class SyncDialog(tk.Toplevel):
         self._btn_sync.configure(state="normal")
         self._btn_setup.configure(state="normal")
         self._btn_test.configure(state="normal")
+        self._btn_update.configure(state="normal")
 
 
 # --------------------- module-level open helpers ---------------------- #
@@ -578,6 +740,214 @@ def open_sync_dialog(master: tk.Misc, db_conn: sqlite3.Connection) -> None:
 def open_sync_setup(master: tk.Misc, db_conn: sqlite3.Connection) -> None:
     """Open the setup dialog directly."""
     SyncSetupDialog(master, db_conn)
+
+
+def check_pos_update_before_shift(
+    master: tk.Misc,
+    db_conn: sqlite3.Connection,
+    *,
+    on_continue: Callable[[], None],
+) -> None:
+    """Check for a POS program update before opening a new shift.
+
+    If the user accepts an available update, the updater is launched and the
+    current POS process exits. Otherwise `on_continue` is called so the shift
+    can open normally.
+    """
+    host = master.winfo_toplevel()
+    if update_client is None:
+        host.after(0, on_continue)
+        return
+
+    try:
+        db_path = db_conn.execute("PRAGMA database_list").fetchone()[2]
+    except Exception:
+        host.after(0, on_continue)
+        return
+
+    dlg = tk.Toplevel(host)
+    dlg.title("تحديث البرنامج")
+    dlg.transient(host)
+    dlg.resizable(False, False)
+    try:
+        dlg.grab_set()
+    except Exception:
+        pass
+
+    frm = ttk.Frame(dlg, padding=14)
+    frm.pack(fill=tk.BOTH, expand=True)
+    status_var = tk.StringVar(value="جاري فحص تحديث البرنامج قبل بدء الوردية...")
+    ttk.Label(frm, text="فحص تحديث نقطة البيع", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 8))
+    ttk.Label(frm, textvariable=status_var, wraplength=420).pack(fill=tk.X)
+    bar = ttk.Progressbar(frm, mode="indeterminate", length=360)
+    bar.pack(fill=tk.X, pady=(10, 0))
+    try:
+        bar.start(12)
+    except Exception:
+        pass
+    dlg.protocol("WM_DELETE_WINDOW", lambda: None)
+    try:
+        dlg.update_idletasks()
+        x = host.winfo_rootx() + max(0, (host.winfo_width() - dlg.winfo_width()) // 2)
+        y = host.winfo_rooty() + max(0, (host.winfo_height() - dlg.winfo_height()) // 2)
+        dlg.geometry("+%d+%d" % (x, y))
+    except Exception:
+        pass
+
+    q: "queue.Queue[tuple]" = queue.Queue()
+
+    def _close_dialog() -> None:
+        try:
+            bar.stop()
+        except Exception:
+            pass
+        try:
+            dlg.grab_release()
+        except Exception:
+            pass
+        try:
+            dlg.destroy()
+        except Exception:
+            pass
+
+    def _hide_dialog() -> None:
+        try:
+            bar.stop()
+        except Exception:
+            pass
+        try:
+            dlg.grab_release()
+        except Exception:
+            pass
+        try:
+            dlg.withdraw()
+        except Exception:
+            pass
+
+    def _continue() -> None:
+        _close_dialog()
+        try:
+            on_continue()
+        except Exception as ex:
+            messagebox.showerror("بدء الوردية", str(ex), parent=host)
+
+    def _open_conn() -> sqlite3.Connection:
+        conn = sqlite3.connect(db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000;")
+        return conn
+
+    def _check_worker() -> None:
+        conn = _open_conn()
+        try:
+            q.put(("checked", update_client.check_for_update(conn)))
+        except Exception as ex:
+            q.put(("check_error", str(ex)))
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _download_worker(manifest: Dict[str, Any]) -> None:
+        conn = _open_conn()
+        try:
+            q.put(("downloaded", update_client.download_update_package(conn, manifest)))
+        except Exception as ex:
+            q.put(("download_error", str(ex)))
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _pump() -> None:
+        try:
+            kind, payload = q.get_nowait()
+        except queue.Empty:
+            try:
+                dlg.after(120, _pump)
+            except Exception:
+                host.after(120, _pump)
+            return
+
+        if kind == "checked":
+            info = payload or {}
+            manifest = info.get("manifest") or {}
+            if not info.get("available"):
+                _continue()
+                return
+            version = str(manifest.get("version") or "").strip()
+            notes = str(manifest.get("notes") or "").strip()
+            _hide_dialog()
+            prompt = "يوجد تحديث جديد لنقطة البيع"
+            if version:
+                prompt += " للإصدار %s" % version
+            prompt += ".\n\nهل تريد بدء التحديث الآن؟"
+            if notes:
+                prompt += "\n\n" + notes
+            if messagebox.askyesno("تحديث البرنامج", prompt, parent=host):
+                status_var.set("جاري تحميل تحديث البرنامج...")
+                try:
+                    dlg.deiconify()
+                    dlg.transient(host)
+                    dlg.grab_set()
+                    status_var.set("جاري تحميل تحديث البرنامج...")
+                    bar.start(12)
+                except Exception:
+                    pass
+                threading.Thread(target=lambda: _download_worker(manifest), daemon=True).start()
+                try:
+                    dlg.after(120, _pump)
+                except Exception:
+                    host.after(120, _pump)
+            else:
+                _close_dialog()
+                on_continue()
+            return
+
+        if kind == "check_error":
+            _close_dialog()
+            messagebox.showwarning(
+                "تحديث البرنامج",
+                "تعذر فحص تحديث البرنامج الآن.\nسيتم بدء الوردية بشكل طبيعي.\n\n%s" % payload,
+                parent=host,
+            )
+            on_continue()
+            return
+
+        if kind == "downloaded":
+            try:
+                launch = update_client.launch_updater(payload, restart=True)
+                status_var.set("تم بدء التحديث. سيتم إغلاق نقطة البيع الآن.")
+                try:
+                    dlg.deiconify()
+                except Exception:
+                    pass
+                host.after(1200, lambda: os._exit(0))
+                host.after(600, host.destroy)
+                try:
+                    host.after(700, host.quit)
+                except Exception:
+                    pass
+            except Exception as ex:
+                _close_dialog()
+                messagebox.showerror("تحديث البرنامج", "فشل تشغيل مثبت التحديث:\n%s" % ex, parent=host)
+                on_continue()
+            return
+
+        if kind == "download_error":
+            _close_dialog()
+            messagebox.showerror(
+                "تحديث البرنامج",
+                "فشل تحميل التحديث.\nسيتم بدء الوردية بشكل طبيعي.\n\n%s" % payload,
+                parent=host,
+            )
+            on_continue()
+            return
+
+    threading.Thread(target=_check_worker, daemon=True).start()
+    dlg.after(120, _pump)
 
 
 def run_sync_now(master: tk.Misc, db_conn: sqlite3.Connection, *, reason: str = "") -> None:
@@ -596,8 +966,9 @@ def run_sync_now(master: tk.Misc, db_conn: sqlite3.Connection, *, reason: str = 
     q: "queue.Queue[tuple]" = queue.Queue()
 
     def worker() -> None:
-        conn = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)
+        conn = sqlite3.connect(db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000;")
         try:
             client = sync_client.SyncClient(conn)
             summary = client.run_cycle(progress=None)

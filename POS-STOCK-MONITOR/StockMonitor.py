@@ -182,7 +182,7 @@ BRANCH_UI_NAME_BY_DEVICE = {
     "POS-OBO": "فرع العبور",
     "POS-GESR": "فرع جسر السويس",
 }
-WAREHOUSE_DIR = os.path.abspath(os.path.join(SOURCE_DIR, "..", "ادارة المخازن"))
+WAREHOUSE_DIR = os.path.abspath(os.path.join(SOURCE_DIR, "..", "Warehouse"))
 if not getattr(sys, "frozen", False) and WAREHOUSE_DIR not in sys.path:
     sys.path.insert(0, WAREHOUSE_DIR)
 

@@ -1,4 +1,4 @@
-# Reset Scripts Guide
+﻿# Reset Scripts Guide
 
 This folder contains utilities for resetting sync-server state and, for POS
 devices, wiping the local POS database too.
@@ -110,7 +110,7 @@ This removes:
 Command:
 
 ```bash
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-zay
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" pos-zay
 ```
 
 ### 2. Reset POS-OCT only
@@ -118,7 +118,7 @@ bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_s
 Command:
 
 ```bash
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-oct
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" pos-oct
 ```
 
 ### 3. Reset POS-OBO only
@@ -126,7 +126,7 @@ bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_s
 Command:
 
 ```bash
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-obo
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" pos-obo
 ```
 
 ### 4. Reset POS-GESR only
@@ -134,7 +134,7 @@ bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_s
 Command:
 
 ```bash
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-gesr
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" pos-gesr
 ```
 
 ### 5. Reset POS-BAH only
@@ -142,7 +142,7 @@ bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_s
 Command:
 
 ```bash
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-bah
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" pos-bah
 ```
 
 ### 6. Reset POS-CEN only
@@ -150,7 +150,7 @@ bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_s
 Command:
 
 ```bash
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-cen
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" pos-cen
 ```
 
 ### 7. Reset warehouse only
@@ -165,7 +165,7 @@ This removes:
 Command:
 
 ```bash
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" warehouse
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" warehouse
 ```
 
 ### 8. Reset all devices completely
@@ -179,7 +179,7 @@ This removes:
 Command:
 
 ```bash
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" all
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" all
 ```
 
 ## Help Command
@@ -187,13 +187,13 @@ bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_s
 You can print usage/help with:
 
 ```bash
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" --help
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" --help
 ```
 
 or
 
 ```bash
-bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" help
+bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" help
 ```
 
 ## Optional DB Path Override
@@ -201,7 +201,7 @@ bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_s
 If you ever need to point the script at another server DB file, use:
 
 ```bash
-SERVER_DB="/full/path/to/sync_server.sqlite3" bash "/c/Users/youssef.sherif/Downloads/ادارة المخازن/Resets/reset_sync_server.sh" pos-zay
+SERVER_DB="/full/path/to/sync_server.sqlite3" bash "/c/Users/youssef.sherif/Downloads/Hosny-Management-System/Resets/reset_sync_server.sh" pos-zay
 ```
 
 ## Typical Real Usage
