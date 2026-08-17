@@ -39,6 +39,16 @@ except Exception:
     update_client = None
 
 
+def _open_worker_conn(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, timeout=8.0, isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=8000;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    conn.execute("PRAGMA cache_size=-12000;")
+    return conn
+
+
 # ------------------------------- helpers -------------------------------- #
 
 def _fmt(value: Optional[str], empty: str = "—") -> str:
@@ -60,7 +70,7 @@ def _fmt(value: Optional[str], empty: str = "—") -> str:
     return raw.replace("T", " ")
 
 
-def _notify_host_synced(master: tk.Misc) -> None:
+def _notify_host_synced(master: tk.Misc, *, background: bool = False, summary: Optional[Dict[str, Any]] = None) -> None:
     host = getattr(master, "_app_controller", None) or None
     cur = master
     for _ in range(20):
@@ -75,6 +85,24 @@ def _notify_host_synced(master: tk.Misc) -> None:
             host = master.winfo_toplevel()
         except Exception:
             host = master
+
+    if background:
+        fn = getattr(host, "_on_background_sync_completed", None)
+        if callable(fn):
+            try:
+                fn(summary or {})
+            except TypeError:
+                try:
+                    fn()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        try:
+            host.event_generate("<<HosnyBackgroundSyncCompleted>>", when="tail")
+        except Exception:
+            pass
+        return
 
     for name in ("_on_sync_completed", "_refresh_current_tab", "_shortcut_refresh", "_on_tab_changed"):
         fn = getattr(host, name, None)
@@ -542,9 +570,7 @@ class SyncDialog(tk.Toplevel):
         def worker() -> None:
             # Background thread MUST open its own connection — sqlite3
             # connections are not thread-safe when isolation is auto.
-            conn = sqlite3.connect(db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA busy_timeout=30000;")
+            conn = _open_worker_conn(db_path)
             try:
                 client = sync_client.SyncClient(conn)
                 summary = client.run_cycle(progress=lambda m: self._q.put(("log", m, "info")))
@@ -578,9 +604,7 @@ class SyncDialog(tk.Toplevel):
         db_path = self.db_conn.execute("PRAGMA database_list").fetchone()[2]
 
         def worker() -> None:
-            conn = sqlite3.connect(db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA busy_timeout=30000;")
+            conn = _open_worker_conn(db_path)
             try:
                 info = update_client.check_for_update(conn)
                 self._q.put(("update_checked", info))
@@ -611,9 +635,7 @@ class SyncDialog(tk.Toplevel):
         db_path = self.db_conn.execute("PRAGMA database_list").fetchone()[2]
 
         def worker() -> None:
-            conn = sqlite3.connect(db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA busy_timeout=30000;")
+            conn = _open_worker_conn(db_path)
             try:
                 result = update_client.download_update_package(conn, manifest)
                 self._q.put(("update_downloaded", result))
@@ -832,9 +854,7 @@ def check_pos_update_before_shift(
             messagebox.showerror("بدء الوردية", str(ex), parent=host)
 
     def _open_conn() -> sqlite3.Connection:
-        conn = sqlite3.connect(db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=30000;")
+        conn = _open_worker_conn(db_path)
         return conn
 
     def _check_worker() -> None:
@@ -966,9 +986,7 @@ def run_sync_now(master: tk.Misc, db_conn: sqlite3.Connection, *, reason: str = 
     q: "queue.Queue[tuple]" = queue.Queue()
 
     def worker() -> None:
-        conn = sqlite3.connect(db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=30000;")
+        conn = _open_worker_conn(db_path)
         try:
             client = sync_client.SyncClient(conn)
             summary = client.run_cycle(progress=None)

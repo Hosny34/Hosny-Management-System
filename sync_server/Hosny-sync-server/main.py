@@ -62,6 +62,18 @@ class EventIn(BaseModel):
     created_at: Optional[str] = None
 
 
+POS_MUTATING_WAREHOUSE_EVENTS = {
+    "STOCK_TRANSFER_OUT",
+    "STOCK_TRANSFER_CANCELLED",
+    "BRANCH_STOCK_RECLASSIFIED",
+    "BRANCH_CATALOG_DELETED",
+    "SPEC_RENAMED",
+    "PRICE_UPDATE",
+    "CATALOG_UPSERT",
+    "POS_OWNERSHIP_SNAPSHOT",
+}
+
+
 class PushRequest(BaseModel):
     events: List[EventIn]
 
@@ -227,7 +239,17 @@ def sync_push(
     for ev in body.events:
         # Server-enforced: source_device is ALWAYS the caller. Clients
         # cannot forge events as other devices.
-        scope = _normalize_target_scope(ev.target_scope or "", device)
+        requested_scope = str(ev.target_scope or ev.payload.get("__target_scope__") or "").strip()
+        if (
+            str(device.get("role") or "") == "warehouse"
+            and str(ev.event_type or "").strip().upper() in POS_MUTATING_WAREHOUSE_EVENTS
+            and not requested_scope
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{ev.event_type} requires explicit target_scope",
+            )
+        scope = _normalize_target_scope(requested_scope, device)
         rows.append(
             (
                 ev.event_uuid,

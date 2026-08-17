@@ -123,6 +123,11 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--notes", default="POS update")
     parser.add_argument("--version", default="")
+    parser.add_argument(
+        "--include-prebuilt",
+        action="store_true",
+        help="Package dist/HosnyPOS.exe as prebuilt. Use only when built for all target branch PCs.",
+    )
     args = parser.parse_args(argv)
 
     repo = _repo_dir()
@@ -132,7 +137,10 @@ def main(argv=None) -> int:
     _build_pos(repo)
 
     tool = _load_package_tool(repo)
-    return int(tool.main(["--version", version, "--notes", args.notes]) or 0)
+    package_args = ["--version", version, "--notes", args.notes]
+    if args.include_prebuilt:
+        package_args.append("--include-prebuilt")
+    return int(tool.main(package_args) or 0)
 
 
 if __name__ == "__main__":

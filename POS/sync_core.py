@@ -114,7 +114,8 @@ def apply_sync_migration(conn: sqlite3.Connection) -> None:
             server_seq    INTEGER NOT NULL,
             source_device TEXT,
             payload_json  TEXT NOT NULL,
-            applied_at    TEXT NOT NULL  -- legacy: now means "received_at"
+            applied_at    TEXT NOT NULL, -- legacy: now means "received_at"
+            server_created_at TEXT
         );
         CREATE INDEX IF NOT EXISTS ix_sync_inbox_seq
             ON sync_inbox(server_seq);
@@ -158,6 +159,7 @@ def apply_sync_migration(conn: sqlite3.Connection) -> None:
     # NULL apply_status == not yet applied. Pure SQL additions are safe
     # on an existing Phase-1/2 inbox with rows in it.
     for col, ddl in (
+        ("server_created_at", "ALTER TABLE sync_inbox ADD COLUMN server_created_at TEXT"),
         ("apply_status",   "ALTER TABLE sync_inbox ADD COLUMN apply_status TEXT"),
         ("apply_error",    "ALTER TABLE sync_inbox ADD COLUMN apply_error TEXT"),
         ("apply_attempts", "ALTER TABLE sync_inbox ADD COLUMN apply_attempts INTEGER NOT NULL DEFAULT 0"),

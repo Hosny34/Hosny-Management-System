@@ -33,6 +33,16 @@ import sync_client
 import sync_core
 
 
+def _open_worker_conn(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, timeout=8.0, isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=8000;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    conn.execute("PRAGMA cache_size=-12000;")
+    return conn
+
+
 # ------------------------------- helpers -------------------------------- #
 
 def _fmt(value: Optional[str], empty: str = "—") -> str:
@@ -54,7 +64,7 @@ def _fmt(value: Optional[str], empty: str = "—") -> str:
     return raw.replace("T", " ")
 
 
-def _notify_host_synced(master: tk.Misc) -> None:
+def _notify_host_synced(master: tk.Misc, *, background: bool = False, summary: Optional[Dict[str, Any]] = None) -> None:
     host = getattr(master, "_app_controller", None) or None
     cur = master
     for _ in range(20):
@@ -69,6 +79,24 @@ def _notify_host_synced(master: tk.Misc) -> None:
             host = master.winfo_toplevel()
         except Exception:
             host = master
+
+    if background:
+        fn = getattr(host, "_on_background_sync_completed", None)
+        if callable(fn):
+            try:
+                fn(summary or {})
+            except TypeError:
+                try:
+                    fn()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        try:
+            host.event_generate("<<HosnyBackgroundSyncCompleted>>", when="tail")
+        except Exception:
+            pass
+        return
 
     for name in ("_on_sync_completed", "_refresh_current_tab", "_shortcut_refresh", "_on_tab_changed"):
         fn = getattr(host, name, None)
@@ -348,6 +376,8 @@ class SyncDialog(tk.Toplevel):
     """
 
     POLL_MS = 100
+    MAX_LOG_LINES = 500
+    MAX_QUEUE_DRAIN = 40
 
     def __init__(self, master: tk.Misc, db_conn: sqlite3.Connection) -> None:
         super().__init__(master)
@@ -362,7 +392,7 @@ class SyncDialog(tk.Toplevel):
         self._worker: Optional[threading.Thread] = None
 
         self._build()
-        self._refresh_state()
+        self.after_idle(self._refresh_state)
         self.after(self.POLL_MS, self._pump_queue)
 
     # ---- layout ----
@@ -458,6 +488,12 @@ class SyncDialog(tk.Toplevel):
         self._log.configure(state="normal")
         self._log.insert("end", msg + "\n", kind)
         self._log.tag_configure(kind, foreground=color)
+        try:
+            line_count = int(float(self._log.index("end-1c")))
+        except Exception:
+            line_count = 0
+        if line_count > self.MAX_LOG_LINES:
+            self._log.delete("1.0", f"{line_count - self.MAX_LOG_LINES + 1}.0")
         self._log.see("end")
         self._log.configure(state="disabled")
 
@@ -468,15 +504,31 @@ class SyncDialog(tk.Toplevel):
         self._refresh_state()
 
     def _test_connection(self) -> None:
-        client = sync_client.SyncClient(self.db_conn)
-        try:
-            result = client.test_connection()
-        except sync_client.SyncError as e:
-            self._append_log(f"اختبار الاتصال: فشل ({e})", "err")
+        if self._worker is not None and self._worker.is_alive():
             return
-        self._append_log(
-            f"اختبار الاتصال: ناجح ({result.get('token_prefix', '—')})", "ok"
-        )
+        self._btn_sync.configure(state="disabled")
+        self._btn_setup.configure(state="disabled")
+        self._btn_test.configure(state="disabled")
+        db_path = self.db_conn.execute("PRAGMA database_list").fetchone()[2]
+
+        def worker() -> None:
+            conn = _open_worker_conn(db_path)
+            try:
+                client = sync_client.SyncClient(conn)
+                result = client.test_connection()
+                self._q.put(("test_done", result))
+            except sync_client.SyncError as e:
+                self._q.put(("test_error", str(e)))
+            except Exception as e:
+                self._q.put(("test_error", f"unexpected: {e}"))
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        self._worker = threading.Thread(target=worker, daemon=True)
+        self._worker.start()
 
     def _start_sync(self) -> None:
         if self._worker is not None and self._worker.is_alive():
@@ -491,9 +543,7 @@ class SyncDialog(tk.Toplevel):
         def worker() -> None:
             # Background thread MUST open its own connection — sqlite3
             # connections are not thread-safe when isolation is auto.
-            conn = sqlite3.connect(db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA busy_timeout=30000;")
+            conn = _open_worker_conn(db_path)
             try:
                 client = sync_client.SyncClient(conn)
                 summary = client.run_cycle(progress=lambda m: self._q.put(("log", m, "info")))
@@ -513,8 +563,10 @@ class SyncDialog(tk.Toplevel):
 
     def _pump_queue(self) -> None:
         try:
-            while True:
+            drained = 0
+            while drained < self.MAX_QUEUE_DRAIN:
                 msg = self._q.get_nowait()
+                drained += 1
                 kind = msg[0]
                 if kind == "log":
                     self._append_log(msg[1], msg[2])
@@ -543,6 +595,17 @@ class SyncDialog(tk.Toplevel):
                         present_sync_cycle_failure(self.master, str(msg[1]))
                     except Exception:
                         pass
+                elif kind == "test_done":
+                    result = msg[1]
+                    self._append_log(
+                        f"اختبار الاتصال: ناجح ({result.get('token_prefix', '—')})", "ok"
+                    )
+                    self._enable_buttons()
+                    self._refresh_state()
+                elif kind == "test_error":
+                    self._append_log(f"اختبار الاتصال: فشل ({msg[1]})", "err")
+                    self._enable_buttons()
+                    self._refresh_state()
         except queue.Empty:
             pass
         self.after(self.POLL_MS, self._pump_queue)
@@ -581,9 +644,7 @@ def run_sync_now(master: tk.Misc, db_conn: sqlite3.Connection, *, reason: str = 
     q: "queue.Queue[tuple]" = queue.Queue()
 
     def worker() -> None:
-        conn = sqlite3.connect(db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=30000;")
+        conn = _open_worker_conn(db_path)
         try:
             client = sync_client.SyncClient(conn)
             summary = client.run_cycle(progress=None)

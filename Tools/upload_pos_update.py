@@ -8,6 +8,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -21,6 +22,25 @@ def _repo_dir() -> Path:
 def _run(args, cwd=None) -> None:
     print("+ " + " ".join(str(arg) for arg in args), flush=True)
     subprocess.check_call([str(arg) for arg in args], cwd=str(cwd) if cwd else None)
+
+
+def _run_with_retries(args, cwd=None, attempts: int = 3, delay_seconds: float = 3.0) -> None:
+    last_error = None
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        try:
+            _run(args, cwd=cwd)
+            return
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            if attempt >= attempts:
+                break
+            print(
+                "Command failed with exit code %s; retrying %s/%s..."
+                % (exc.returncode, attempt + 1, attempts),
+                flush=True,
+            )
+            time.sleep(delay_seconds)
+    raise last_error
 
 
 def _load_manifest(repo: Path) -> dict:
@@ -53,7 +73,7 @@ def main(argv=None) -> int:
     info = _load_manifest(repo)
     tmp_root = Path(tempfile.mkdtemp(prefix="hosny-sync-deploy-"))
     try:
-        _run(["git", "clone", args.repo_url, tmp_root])
+        _run_with_retries(["git", "clone", "--depth", "1", "--single-branch", args.repo_url, tmp_root])
         dest = tmp_root / "updates" / "pos"
         dest.mkdir(parents=True, exist_ok=True)
         shutil.copy2(str(info["manifest_path"]), str(dest / "latest.json"))

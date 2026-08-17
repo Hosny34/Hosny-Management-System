@@ -22,10 +22,18 @@ def main(argv=None) -> int:
     path = Path(args[0])
     expected_name = args[1]
     expected = MACHINES[expected_name]
-    data = path.read_bytes()
-    marker = b"PE" + bytes([0, 0])
-    pe_offset = data.index(marker)
-    machine = int.from_bytes(data[pe_offset + 4 : pe_offset + 6], "little")
+    with path.open("rb") as f:
+        header = f.read(64)
+        if len(header) < 64 or header[:2] != b"MZ":
+            print("not a Windows executable")
+            return 1
+        pe_offset = int.from_bytes(header[0x3C:0x40], "little")
+        f.seek(pe_offset)
+        pe_header = f.read(6)
+    if len(pe_header) < 6 or pe_header[:4] != b"PE\0\0":
+        print("invalid PE header")
+        return 1
+    machine = int.from_bytes(pe_header[4:6], "little")
     print("PE machine: 0x%04x" % machine)
     if machine != expected:
         print("Expected %s machine: 0x%04x" % (expected_name, expected))

@@ -22,6 +22,7 @@ import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 
 LIVE_EXE = "HosnyPOS.exe"
@@ -169,44 +170,23 @@ def _run_build(pos_dir: Path, log_path: Path, version: str = "") -> None:
         )
 
 
-def _run_smoke_test(exe_path: Path, cwd: Path, log_path: Path) -> None:
-    _log(log_path, "verifying prebuilt executable: %s" % exe_path)
-    result = subprocess.call(
-        [str(exe_path), "--smoke-import"],
-        cwd=str(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        shell=False,
-    )
-    if result != 0:
-        raise RuntimeError("prebuilt HosnyPOS.exe smoke test failed with exit code %s" % result)
-
-
-def _prepare_prebuilt_dist(source_dir: Path, pos_dir: Path, log_path: Path) -> bool:
-    marker = source_dir / "prebuilt_update.json"
-    source_exe = source_dir / "prebuilt" / LIVE_EXE
-    if not source_exe.is_file():
-        source_exe = source_dir / LIVE_EXE
-    if not marker.is_file() or not source_exe.is_file():
-        return False
+def _close_remaining_live_processes(log_path: Path) -> None:
+    _log(log_path, "closing remaining HosnyPOS.exe processes")
     try:
-        _run_smoke_test(source_exe, source_dir, log_path)
-    except Exception as ex:
-        _log(log_path, "prebuilt executable cannot run on this PC; falling back to local build: %s" % ex)
-        return False
-    dist_dir = pos_dir / "dist"
-    dist_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(str(source_exe), str(dist_dir / LIVE_EXE))
-    source_cert = source_dir / LIVE_CERT
-    if source_cert.is_file():
-        shutil.copy2(str(source_cert), str(dist_dir / LIVE_CERT))
-    _log(log_path, "prebuilt package prepared in dist")
-    return True
+        result = subprocess.call(
+            ["taskkill.exe", "/IM", LIVE_EXE, "/T", "/F"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+        )
+        _log(log_path, "taskkill HosnyPOS.exe exit code: %s" % result)
+    except Exception as kill_ex:
+        _log(log_path, "taskkill by image name failed: %s" % kill_ex)
 
 
-def _wait_for_file_release(path: Path, log_path: Path, timeout_s: int = 60) -> None:
+def _wait_for_file_release(path: Path, log_path: Path, timeout_s: int = 20) -> bool:
     if not path.exists():
-        return
+        return True
     deadline = time.time() + max(1, timeout_s)
     last_error = None
     forced = False
@@ -215,38 +195,62 @@ def _wait_for_file_release(path: Path, log_path: Path, timeout_s: int = 60) -> N
             probe = path.with_name(path.name + ".locktest")
             path.rename(probe)
             probe.rename(path)
-            return
+            return True
         except OSError as ex:
             last_error = ex
             if not forced and time.time() > deadline - max(1, timeout_s) + 5:
                 forced = True
-                _log(log_path, "live executable is still locked; closing remaining HosnyPOS.exe processes")
-                try:
-                    subprocess.call(
-                        ["taskkill.exe", "/IM", LIVE_EXE, "/T", "/F"],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        shell=False,
-                    )
-                except Exception as kill_ex:
-                    _log(log_path, "taskkill by image name failed: %s" % kill_ex)
+                _log(log_path, "live executable is still locked before promotion")
+                _close_remaining_live_processes(log_path)
             time.sleep(0.5)
-    raise RuntimeError("file is still locked after waiting: %s (%s)" % (path, last_error))
+    _log(log_path, "file is still locked after waiting: %s (%s)" % (path, last_error))
+    return False
 
 
-def _promote_dist(pos_dir: Path, log_path: Path) -> None:
+def _copy_exe_with_retries(src: Path, dst: Path, log_path: Path, attempts: int = 8) -> bool:
+    last_error = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            shutil.copy2(str(src), str(dst))
+            _log(log_path, "executable promoted to %s" % dst)
+            return True
+        except OSError as ex:
+            last_error = ex
+            if attempt == 2:
+                _close_remaining_live_processes(log_path)
+            _log(log_path, "copy executable attempt %s failed: %s" % (attempt, ex))
+            time.sleep(1.0)
+    _log(log_path, "copy executable failed after retries: %s" % last_error)
+    return False
+
+
+def _promote_dist(pos_dir: Path, log_path: Path, version: str = "") -> Path:
     dist_exe = pos_dir / "dist" / LIVE_EXE
     dist_cert = pos_dir / "dist" / LIVE_CERT
     if not dist_exe.is_file():
         raise RuntimeError("dist/HosnyPOS.exe was not created")
-    _wait_for_file_release(pos_dir / LIVE_EXE, log_path)
-    shutil.copy2(str(dist_exe), str(pos_dir / LIVE_EXE))
+    live_exe = pos_dir / LIVE_EXE
+    promoted_exe = live_exe
+    _wait_for_file_release(live_exe, log_path)
+    if not _copy_exe_with_retries(dist_exe, live_exe, log_path):
+        safe_version = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(version or "updated"))
+        fallback_exe = pos_dir / ("HosnyPOS-%s.exe" % safe_version)
+        if fallback_exe.exists():
+            fallback_exe = pos_dir / ("HosnyPOS-%s-%s.exe" % (safe_version, datetime.now().strftime("%Y%m%d_%H%M%S")))
+        shutil.copy2(str(dist_exe), str(fallback_exe))
+        promoted_exe = fallback_exe
+        _log(
+            log_path,
+            "live executable stayed locked; using fallback executable for this update: %s" % fallback_exe,
+        )
     if dist_cert.is_file():
         shutil.copy2(str(dist_cert), str(pos_dir / LIVE_CERT))
     _log(log_path, "dist output promoted")
+    return promoted_exe
 
 
-def _create_shortcut(pos_dir: Path, log_path: Path) -> None:
+def _create_shortcut(pos_dir: Path, log_path: Path, exe_path: Optional[Path] = None) -> None:
+    target_exe = exe_path or (pos_dir / LIVE_EXE)
     try:
         import win32com.client  # type: ignore
 
@@ -269,9 +273,9 @@ def _create_shortcut(pos_dir: Path, log_path: Path) -> None:
         try:
             target_path.parent.mkdir(parents=True, exist_ok=True)
             shortcut = shell.CreateShortcut(str(target_path))
-            shortcut.TargetPath = str(pos_dir / LIVE_EXE)
+            shortcut.TargetPath = str(target_exe)
             shortcut.WorkingDirectory = str(pos_dir)
-            shortcut.IconLocation = str(pos_dir / LIVE_EXE)
+            shortcut.IconLocation = str(target_exe)
             shortcut.Save()
             _log(log_path, "shortcut updated: %s" % target_path)
         except Exception as item_ex:
@@ -286,8 +290,8 @@ def _create_shortcut(pos_dir: Path, log_path: Path) -> None:
         _log(log_path, "shortcut update failed: %s" % ex)
 
 
-def _restart_pos(pos_dir: Path, log_path: Path) -> None:
-    exe_path = pos_dir / LIVE_EXE
+def _restart_pos(pos_dir: Path, log_path: Path, exe_path: Optional[Path] = None) -> None:
+    exe_path = exe_path or (pos_dir / LIVE_EXE)
     if not exe_path.is_file():
         raise RuntimeError("cannot restart POS because HosnyPOS.exe was not found")
     try:
@@ -336,15 +340,14 @@ def _run_update(args) -> int:
         source_dir = _extract_package(package_path, work_dir)
         backup_dir = _backup_files(pos_dir, source_dir, args.version or "unknown", log_path)
         _copy_tree_contents(source_dir, pos_dir, log_path)
-        if not _prepare_prebuilt_dist(source_dir, pos_dir, log_path):
-            _run_build(pos_dir, log_path, args.version or "unknown")
-        _promote_dist(pos_dir, log_path)
-        _create_shortcut(pos_dir, log_path)
+        _run_build(pos_dir, log_path, args.version or "unknown")
+        promoted_exe = _promote_dist(pos_dir, log_path, args.version or "unknown")
+        _create_shortcut(pos_dir, log_path, promoted_exe)
         if args.version:
             with (pos_dir / "current_version.json").open("w", encoding="utf-8") as f:
                 json.dump({"version": args.version, "updated_at": datetime.now().isoformat()}, f)
         if args.restart:
-            _restart_pos(pos_dir, log_path)
+            _restart_pos(pos_dir, log_path, promoted_exe)
         _log(log_path, "update completed")
         return 0
     except Exception as ex:

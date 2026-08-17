@@ -39,6 +39,11 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+try:
+    import logging_setup
+except Exception:
+    logging_setup = None  # type: ignore
+
 
 DEFAULT_TIMEOUT = 15.0  # seconds per HTTP request
 PUSH_BATCH_SIZE = 200   # events per /sync/push call
@@ -126,6 +131,14 @@ def _table_row_count(conn: sqlite3.Connection, table: str) -> int:
     return int(conn.execute("SELECT COUNT(*) FROM %s" % table).fetchone()[0] or 0)
 
 
+def _local_max_inbox_seq(conn: sqlite3.Connection) -> int:
+    try:
+        row = conn.execute("SELECT COALESCE(MAX(server_seq), 0) FROM sync_inbox").fetchone()
+        return int((row[0] if row else 0) or 0)
+    except sqlite3.Error:
+        return 0
+
+
 def _has_business_activity(conn: sqlite3.Connection) -> bool:
     for table in (
         "stocks",
@@ -171,6 +184,9 @@ def load_sync_config(conn: sqlite3.Connection) -> Dict[str, Any]:
         last_push = state[1]
         last_pull = state[2]
         last_err = state[3]
+    local_max_seq = _local_max_inbox_seq(conn)
+    if local_max_seq > last_seq:
+        last_seq = local_max_seq
     return {
         "device_uuid": row[0],
         "device_name": row[1],
@@ -549,22 +565,61 @@ class SyncClient:
         cycle_id = "c" + _utc_now_iso().replace("-", "").replace(":", "").replace(".", "")
         if not cfg.get("server_url") or not cfg.get("device_name"):
             raise SyncError("sync is not configured yet — open Setup first")
+        started = time.time()
+        try:
+            if logging_setup is not None:  # type: ignore[name-defined]
+                logging_setup.log_event(  # type: ignore[union-attr]
+                    "sync.cycle.start",
+                    cycle_id=cycle_id,
+                    device_name=cfg.get("device_name"),
+                    device_role=cfg.get("device_role"),
+                    last_pulled_seq=cfg.get("last_pulled_seq"),
+                    server_url=cfg.get("server_url"),
+                )
+        except Exception:
+            pass
 
         note(f"[{cycle_id}] تسجيل الدخول...")
         token = self._fetch_jwt(cfg)
 
         # Phase 3: POS emits a full stock snapshot before pushing, so
         # the warehouse always has a fresh mirror after the round-trip.
+        required_stock_snapshot_uuid: Optional[str] = None
         if (cfg.get("device_role") or "").lower() == "pos":
             try:
                 note(f"[{cycle_id}] تحديث لقطة المخزون...")
-                self.emit_stock_snapshot_event(cfg)
-                self.emit_stock_audit_snapshot_event(cfg)
+                required_stock_snapshot_uuid = self.emit_stock_snapshot_event(cfg)
             except Exception as e:
                 note(f"تعذّر إنشاء لقطة المخزون: {e}")
+                _set_sync_state(self.conn, last_error=f"stock snapshot: {e}")
+                raise SyncError(f"stock snapshot failed: {e}")
+            if not required_stock_snapshot_uuid:
+                _set_sync_state(self.conn, last_error="stock snapshot: no event created")
+                raise SyncError("stock snapshot failed: no event created")
+            try:
+                note(f"[{cycle_id}] تحديث ملخص جرد نقطة البيع...")
+                self.emit_stock_audit_snapshot_event(cfg)
+            except Exception as e:
+                note(f"تعذّر إنشاء ملخص جرد نقطة البيع: {e}")
+            try:
+                note(f"[{cycle_id}] تحديث ملخص مالي اليوم...")
+                self.emit_financial_snapshot_event(cfg)
+            except Exception as e:
+                note(f"تعذّر إنشاء ملخص مالي اليوم: {e}")
 
         note(f"[{cycle_id}] جارٍ رفع الأحداث...")
         push_stats = self._push_loop(cfg, token, note)
+        if required_stock_snapshot_uuid:
+            row = self.conn.execute(
+                "SELECT status, COALESCE(last_error, '') FROM sync_outbox WHERE event_uuid = ?",
+                (required_stock_snapshot_uuid,),
+            ).fetchone()
+            status = str(row[0] if row else "").strip().lower()
+            if status != "acked":
+                err = str(row[1] if row else "").strip()
+                detail = f" ({err})" if err else ""
+                _set_sync_state(self.conn, last_error=f"stock snapshot not pushed{detail}")
+                raise SyncError(f"stock snapshot was not pushed{detail}")
 
         note(f"[{cycle_id}] جارٍ تنزيل الأحداث...")
         pull_stats = self._pull_loop(cfg, token, note)
@@ -581,11 +636,37 @@ class SyncClient:
 
         note(f"[{cycle_id}] جارٍ تطبيق الأحداث الواردة...")
         apply_stats = self.apply_inbox(cfg, note)
+
+        post_apply_push_stats = {"pushed": 0, "duplicates": 0}
+        if (cfg.get("device_role") or "").lower() == "pos":
+            changed_event_types = {
+                str(e.get("event_type") or "")
+                for e in (apply_stats.get("applied_events") or [])
+                if isinstance(e, dict)
+            }
+            inventory_changing_events = {
+                "PRICE_UPDATE",
+                "STOCK_TRANSFER_OUT",
+                "STOCK_TRANSFER_CANCELLED",
+                "BRANCH_STOCK_RECLASSIFIED",
+                "BRANCH_CATALOG_DELETED",
+                "CATALOG_UPSERT",
+                "SPEC_RENAMED",
+                "POS_OWNERSHIP_SNAPSHOT",
+            }
+            if changed_event_types & inventory_changing_events:
+                try:
+                    note(f"[{cycle_id}] تحديث لقطة المخزون بعد تطبيق التغييرات...")
+                    self.emit_stock_snapshot_event(cfg)
+                    self.emit_stock_audit_snapshot_event(cfg)
+                    post_apply_push_stats = self._push_loop(cfg, token, note)
+                except Exception as e:
+                    note(f"تعذّر رفع لقطة المخزون بعد التطبيق: {e}")
         _checkpoint_wal_if_large(self.conn)
 
         summary = {
-            "pushed":     push_stats["pushed"],
-            "duplicates": push_stats["duplicates"],
+            "pushed":     push_stats["pushed"] + post_apply_push_stats["pushed"],
+            "duplicates": push_stats["duplicates"] + post_apply_push_stats["duplicates"],
             "pulled":     pull_stats["pulled"],
             "next_seq":   pull_stats["next_seq"],
             "applied":    apply_stats["applied"],
@@ -603,6 +684,11 @@ class SyncClient:
             + (f" • فشل {summary['apply_errors']}" if summary["apply_errors"] else "")
             + (f" • DLQ {summary['dead_lettered']}" if summary["dead_lettered"] else "")
         )
+        try:
+            if logging_setup is not None:  # type: ignore[name-defined]
+                logging_setup.log_event("sync.cycle.done", elapsed_ms=int((time.time() - started) * 1000), **summary)  # type: ignore[union-attr]
+        except Exception:
+            pass
         return summary
 
     # ---- apply (Phase 3) ----
@@ -621,9 +707,9 @@ class SyncClient:
               because appliers are idempotent).
             - Successful applies mark the row with apply_status='ok' and
               apply_at = now.
-            - Unknown event types get apply_status='skipped'. They stay in
-              the inbox; Phase 4 will register appliers for them and
-              re-drain in the next cycle.
+            - Unknown event types get apply_status='deferred'. They stay
+              recoverable; when a later version registers an applier, the
+              same row is picked up again without a cleanup script.
             - An applier that raises ApplyError gets apply_status='error'
               + apply_error filled in; the transaction is rolled back so
               no partial domain mutation lands.
@@ -651,7 +737,7 @@ class SyncClient:
                    COALESCE(apply_attempts, 0), source_device
               FROM sync_inbox
              WHERE apply_status IS NULL
-                OR apply_status = 'error'
+                OR apply_status IN ('error', 'deferred')
              ORDER BY server_seq ASC
             """
         ).fetchall()
@@ -726,15 +812,18 @@ class SyncClient:
 
             applier = registry.get(event_type)
             if applier is None:
-                # Leave the event in the inbox but record that we looked
-                # at it. When a later phase adds a handler, bump the
-                # migration to reset `apply_status` to NULL for these
-                # rows so they get picked up again.
+                # Leave the event recoverable for future app versions.
                 with self.conn:
                     self.conn.execute(
-                        "UPDATE sync_inbox SET apply_status = 'skipped' "
-                        "WHERE event_uuid = ?",
-                        (event_uuid,),
+                        """
+                        UPDATE sync_inbox
+                           SET apply_status = 'deferred',
+                               apply_at = ?,
+                               apply_error = 'no applier for this device role',
+                               apply_attempts = ?
+                         WHERE event_uuid = ?
+                        """,
+                        (now, attempts + 1, event_uuid),
                     )
                 skipped += 1
                 skipped_events.append({
@@ -751,6 +840,34 @@ class SyncClient:
                 payload = json.loads(payload_json or "{}")
             except Exception:
                 payload = {}
+            target_scope = str(payload.get("__target_scope__") or "").strip()
+            device_name = str(cfg.get("device_name") or "").strip()
+            if target_scope.lower().startswith("pos:"):
+                target_device = target_scope[4:].strip()
+                if device_name and target_device.casefold() != device_name.casefold():
+                    reason = f"targeted to {target_device}, current device is {device_name}"
+                    with self.conn:
+                        self.conn.execute(
+                            """
+                            UPDATE sync_inbox
+                               SET apply_status = 'skipped',
+                                   apply_at = ?,
+                                   apply_error = ?,
+                                   apply_attempts = ?
+                             WHERE event_uuid = ?
+                            """,
+                            (now, reason, attempts + 1, event_uuid),
+                        )
+                    skipped += 1
+                    skipped_events.append({
+                        "event_uuid": str(event_uuid),
+                        "event_type": str(event_type),
+                        "server_seq": int(server_seq),
+                        "source_device": str(source_dev or "") or None,
+                        "reason": reason,
+                        "summary": format_inbound_event_brief(str(event_type), payload),
+                    })
+                    continue
 
             note(f"تطبيق {event_type} (seq={server_seq})...")
             try:
@@ -1009,6 +1126,15 @@ class SyncClient:
     ) -> Dict[str, int]:
         pulled_total = 0
         cursor = int(cfg.get("last_pulled_seq") or 0)
+        local_max_seq = _local_max_inbox_seq(self.conn)
+        if local_max_seq > cursor:
+            cursor = local_max_seq
+            _set_sync_state(
+                self.conn,
+                last_pulled_seq=cursor,
+                last_error=None,
+            )
+            note(f"استعادة مؤشر المزامنة إلى seq={cursor} من الأحداث المحفوظة محلياً...")
         pull_url_base = cfg["server_url"].rstrip("/") + "/v1/sync/pull"
         recovery_attempted = False
 
@@ -1056,12 +1182,15 @@ class SyncClient:
                         sd = ev.get("source_device")
                         if sd:
                             payload_obj["__source_device__"] = sd
+                        target_scope = ev.get("target_scope")
+                        if target_scope:
+                            payload_obj["__target_scope__"] = target_scope
                         self.conn.execute(
                             """
-                            INSERT INTO sync_inbox
+                            INSERT OR IGNORE INTO sync_inbox
                                 (event_uuid, event_type, server_seq,
-                                 source_device, payload_json, applied_at)
-                            VALUES (?, ?, ?, ?, ?, ?)
+                                 source_device, payload_json, applied_at, server_created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 ev["event_uuid"],
@@ -1070,6 +1199,7 @@ class SyncClient:
                                 ev.get("source_device"),
                                 json.dumps(payload_obj, ensure_ascii=False, default=str),
                                 now,
+                                ev.get("created_at"),
                             ),
                         )
                     except sqlite3.IntegrityError:
@@ -1110,9 +1240,9 @@ class SyncClient:
         Phase-5 optimisation; for now a snapshot is emitted every time
         even if stocks haven't changed.
 
-        Returns the event_uuid, or None on soft failure (e.g. no
-        stocks table). Never raises on domain issues — the cycle
-        should continue even if the snapshot can't be emitted.
+        Returns the event_uuid. For POS sync this is required: if the
+        stocks table cannot be read or the outbox event cannot be queued,
+        raise SyncError so money cannot sync while stock stays stale.
         """
         if cfg is None:
             cfg = load_sync_config(self.conn)
@@ -1125,13 +1255,12 @@ class SyncClient:
                 """
                 SELECT item_type, school, color, size, unit_price, SUM(count) AS total
                   FROM stocks
-                 WHERE count > 0
                  GROUP BY item_type, school, color, size, unit_price
                  ORDER BY item_type, school, color, size, unit_price
                 """
             ).fetchall()
-        except sqlite3.OperationalError:
-            return None
+        except sqlite3.OperationalError as e:
+            raise SyncError(f"cannot read stocks for stock snapshot: {e}")
 
         snapshot_at = _utc_now_iso()
         snapshot_rows = [
@@ -1153,6 +1282,7 @@ class SyncClient:
             "source_device_name": device_name,
             "snapshot_at":        snapshot_at,
             "app_version":        APP_VERSION,
+            "includes_zero_rows":  True,
             "snapshot_hash":      snapshot_hash,
             "rows":               snapshot_rows,
         }
@@ -1165,8 +1295,9 @@ class SyncClient:
 
         has_target = self._has_target_scope_column()
         try:
-            if has_target:
-                self.conn.execute(
+            with self.conn:
+                if has_target:
+                    self.conn.execute(
                     """
                     INSERT INTO sync_outbox
                         (event_uuid, event_type, payload_json,
@@ -1178,11 +1309,11 @@ class SyncClient:
                         json.dumps(payload, ensure_ascii=False, default=str),
                         now,
                     ),
-                )
-            else:
-                # Legacy schema — stash the scope inside the payload.
-                payload["__target_scope__"] = "warehouse"
-                self.conn.execute(
+                    )
+                else:
+                    # Legacy schema — stash the scope inside the payload.
+                    payload["__target_scope__"] = "warehouse"
+                    self.conn.execute(
                     """
                     INSERT INTO sync_outbox
                         (event_uuid, event_type, payload_json,
@@ -1194,17 +1325,32 @@ class SyncClient:
                         json.dumps(payload, ensure_ascii=False, default=str),
                         now,
                     ),
-                )
-        except sqlite3.OperationalError:
-            return None
+                    )
+        except sqlite3.OperationalError as e:
+            raise SyncError(f"cannot queue stock snapshot: {e}")
 
         _sync_meta_set(self.conn, meta_key, snapshot_hash)
+        try:
+            if logging_setup is not None:  # type: ignore[name-defined]
+                logging_setup.log_event(  # type: ignore[union-attr]
+                    "sync.stock_snapshot.queued",
+                    device_name=device_name,
+                    event_uuid=event_uuid,
+                    rows=len(snapshot_rows),
+                    total_qty=sum(int(r.get("count") or 0) for r in snapshot_rows),
+                    total_value=sum(float(r.get("unit_price") or 0) * int(r.get("count") or 0) for r in snapshot_rows),
+                    snapshot_hash=snapshot_hash,
+                    snapshot_at=snapshot_at,
+                    app_version=APP_VERSION,
+                )
+        except Exception:
+            pass
         return event_uuid
 
     def emit_stock_audit_snapshot_event(
         self, cfg: Optional[Dict[str, Any]] = None
     ) -> Optional[str]:
-        """POS-side: snapshot stock-audit report history for warehouse."""
+        """POS-side: mirror stock-audit reports to warehouse for reporting only."""
         if cfg is None:
             cfg = load_sync_config(self.conn)
         if (cfg.get("device_role") or "").lower() != "pos":
@@ -1236,6 +1382,7 @@ class SyncClient:
                 (report_id,),
             ).fetchall()
             report_rows.append({
+                "audit_uuid": f"{device_name}:{report_id}:{str(report[1] or '').strip()}",
                 "report_id": report_id,
                 "created_at": report[1],
                 "reason": report[2],
@@ -1258,10 +1405,18 @@ class SyncClient:
                 ],
             })
 
+        snapshot_hash = hashlib.sha256(
+            json.dumps(report_rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        meta_key = f"pos_stock_audit_snapshot_hash:{device_name}"
+        if _sync_meta_get(self.conn, meta_key) == snapshot_hash:
+            return None
+
         payload = {
             "source_device_name": device_name,
             "snapshot_at": _utc_now_iso(),
             "app_version": APP_VERSION,
+            "snapshot_hash": snapshot_hash,
             "reports": report_rows,
         }
 
@@ -1293,7 +1448,133 @@ class SyncClient:
                 )
         except sqlite3.OperationalError:
             return None
+        _sync_meta_set(self.conn, meta_key, snapshot_hash)
         return event_uuid
+
+    def _insert_warehouse_targeted_event(
+        self,
+        event_type: str,
+        payload: Dict[str, Any],
+    ) -> Optional[str]:
+        import uuid as _uuid
+
+        event_uuid = str(_uuid.uuid4())
+        now = _utc_now_iso()
+        try:
+            if self._has_target_scope_column():
+                self.conn.execute(
+                    """
+                    INSERT INTO sync_outbox
+                        (event_uuid, event_type, payload_json,
+                         created_at, status, attempts, target_scope)
+                    VALUES (?, ?, ?, ?, 'pending', 0, 'warehouse')
+                    """,
+                    (event_uuid, event_type, json.dumps(payload, ensure_ascii=False, default=str), now),
+                )
+            else:
+                scoped_payload = dict(payload)
+                scoped_payload["__target_scope__"] = "warehouse"
+                self.conn.execute(
+                    """
+                    INSERT INTO sync_outbox
+                        (event_uuid, event_type, payload_json,
+                         created_at, status, attempts)
+                    VALUES (?, ?, ?, ?, 'pending', 0)
+                    """,
+                    (event_uuid, event_type, json.dumps(scoped_payload, ensure_ascii=False, default=str), now),
+                )
+        except sqlite3.OperationalError:
+            return None
+        return event_uuid
+
+    def emit_financial_snapshot_event(
+        self, cfg: Optional[Dict[str, Any]] = None
+    ) -> Optional[str]:
+        """POS-side daily cash/Visa snapshot for the Warehouse monitor."""
+        if cfg is None:
+            cfg = load_sync_config(self.conn)
+        if (cfg.get("device_role") or "").lower() != "pos":
+            return None
+        device_name = cfg.get("device_name") or "POS-UNCONFIGURED"
+        day = datetime.now().strftime("%Y-%m-%d")
+
+        cash_total = 0.0
+        visa_total = 0.0
+
+        def add_amount(amount: Any, payment_method: Any) -> None:
+            nonlocal cash_total, visa_total
+            try:
+                value = float(amount or 0.0)
+            except (TypeError, ValueError):
+                value = 0.0
+            method = str(payment_method or "CASH").strip().upper()
+            if method == "VISA":
+                visa_total += value
+            else:
+                cash_total += value
+
+        try:
+            bill_rows = self.conn.execute(
+                """
+                SELECT COALESCE(bill_type, 'SALE') AS bill_type,
+                       COALESCE(status, 'CONFIRMED') AS status,
+                       COALESCE(payment_method, 'CASH') AS payment_method,
+                       COALESCE(total, 0) AS total
+                  FROM bills
+                 WHERE substr(COALESCE(created_at, ''), 1, 10) = ?
+                """,
+                (day,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            bill_rows = []
+        for row in bill_rows:
+            bill_type = str(row[0] or "SALE").upper()
+            status = str(row[1] or "CONFIRMED").upper()
+            if status == "VOID":
+                continue
+            amount = float(row[3] or 0.0)
+            if bill_type == "RETURN":
+                amount = -abs(amount)
+            elif bill_type == "EXCHANGE":
+                amount = amount
+            else:
+                amount = abs(amount)
+            add_amount(amount, row[2])
+
+        try:
+            movement_rows = self.conn.execute(
+                """
+                SELECT m.direction,
+                       COALESCE(m.unit_price, 0) AS amount,
+                       COALESCE(m.payment_method, b.payment_method, 'CASH') AS payment_method
+                  FROM movements m
+             LEFT JOIN bills b ON b.id = m.bill_id
+                 WHERE substr(COALESCE(m.ts, ''), 1, 10) = ?
+                   AND m.direction IN ('RESERVE_PAY', 'DELIVER_PAY', 'RESERVE_REFUND', 'VOID_PAY')
+                """,
+                (day,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            movement_rows = []
+        for row in movement_rows:
+            direction = str(row[0] or "").upper()
+            amount = float(row[1] or 0.0)
+            if direction in ("RESERVE_REFUND", "VOID_PAY"):
+                amount = -abs(amount)
+            else:
+                amount = abs(amount)
+            add_amount(amount, row[2])
+
+        payload = {
+            "source_device_name": device_name,
+            "snapshot_at": _utc_now_iso(),
+            "app_version": APP_VERSION,
+            "day": day,
+            "cash_total": round(float(cash_total), 2),
+            "visa_total": round(float(visa_total), 2),
+            "total_collected": round(float(cash_total + visa_total), 2),
+        }
+        return self._insert_warehouse_targeted_event("POS_FINANCIAL_SNAPSHOT", payload)
 
     def refresh_device_list(
         self,

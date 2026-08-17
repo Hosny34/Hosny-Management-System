@@ -12,6 +12,7 @@ import webbrowser
 import re
 import uuid
 import unicodedata
+import threading
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta   # +date for calendar
@@ -83,7 +84,7 @@ try:
     import logging_setup
     logging_setup.install_crash_logging(_initial_log_name())
 except Exception:
-    pass
+    logging_setup = None  # type: ignore
 
 
 APP_TITLE = "إدارة المخازن والمبيعات"
@@ -111,6 +112,22 @@ _NUMBER_RUN_RE = re.compile(r"(?<!\u200e)([0-9](?:[0-9.,:/\\\- ]*[0-9])?)(?!\u20
 
 def _strip_digit_marks(value: Any) -> str:
     return western_digits(value).replace(_LTR_MARK, "").replace(_RTL_MARK, "")
+
+
+def _summarize_sync_payload_for_ui(event_type: str, payload: Dict[str, Any]) -> str:
+    try:
+        parts = []
+        for key in ("bill_id", "reservation_id", "shipment_uuid", "target_device", "source_device", "customer", "total", "payment_method"):
+            value = (payload or {}).get(key)
+            if value not in (None, ""):
+                parts.append(f"{key}={value}")
+        for list_key in ("items", "lines", "reservations", "return_lines", "take_lines"):
+            value = (payload or {}).get(list_key)
+            if isinstance(value, list):
+                parts.append(f"{list_key}={len(value)}")
+        return ", ".join(parts) or str(event_type or "")
+    except Exception:
+        return str(event_type or "")
 
 
 def parse_int_text(value: Any, default: int = 0) -> int:
@@ -273,6 +290,13 @@ _install_western_digit_tk_patch()
 APP_BASE_DIR = _runtime_base_dir()
 DB_PATH = os.path.join(APP_BASE_DIR, "warehouse_data.sqlite3")
 LEGACY_JSON_PATH = os.path.join(APP_BASE_DIR, "warehouse_data.json")
+
+try:
+    if logging_setup is not None:  # type: ignore[name-defined]
+        logging_setup.configure_context(app="POS", version=APP_VERSION, db_path=DB_PATH)  # type: ignore[union-attr]
+except Exception:
+    pass
+
 ADMIN_PASSWORD_PLAIN = "112233"
 ADMIN_PASSWORD_HASH_PREFIX = "sha256$"
 WAREHOUSE_DEVICE_NAME = "WAREHOUSE"
@@ -305,6 +329,7 @@ DEFAULT_BRANCH_POS_NAMES = [
     "POS-GESR",
     "POS-BAH",
     "POS-CEN",
+    "POS-TEST",
 ]
 BRANCH_UI_NAME_BY_DEVICE = {
     "POS-ZAY": "فرع زايد",
@@ -313,8 +338,16 @@ BRANCH_UI_NAME_BY_DEVICE = {
     "POS-CEN": "فرع السنتر",
     "POS-OBO": "فرع العبور",
     "POS-GESR": "فرع جسر السويس",
+    "POS-TEST": "فرع الاختبار",
 }
 BRANCH_DEVICE_BY_UI_NAME = {v: k for k, v in BRANCH_UI_NAME_BY_DEVICE.items()}
+BRANCH_GENERAL_SCHOOL_TARGET_BY_DEVICE = {
+    "POS-ZAY": "عام اكتوبر",
+    "POS-OCT": "عام اكتوبر",
+    "POS-BAH": "عام شبرا",
+    "POS-CEN": "عام شبرا",
+}
+GENERAL_SHARED_SCHOOL_NAME = "عام"
 RECEIPT_SUPPORT_CALL_SETTING = "receipt_support_call"
 RECEIPT_SUPPORT_WHATSAPP_SETTING = "receipt_support_whatsapp"
 RECEIPT_FONT_FILE = os.path.join("Fonts", "V100009_.TTF")
@@ -328,7 +361,7 @@ ALLOWED_NUMERIC_RANGES = {
     (14, 28): [str(i) for i in range(14, 30, 2)],
     (18, 30): [str(i) for i in range(18, 32, 2)],
     (0, 9):  [str(i) for i in range(0, 10, 1)],
-    (32, 62): [str(i) for i in range(32, 63,2)],
+    (30, 62): [str(i) for i in range(30, 63, 2)],
 
 }
 NUMERIC_RANGE_LABELS = [
@@ -446,25 +479,40 @@ def _allocate_reservation_down_payments(
     total_due = sum(clean_totals)
     if paid - total_due > 1e-6:
         raise ValueError("العربون لا يمكن أن يزيد عن إجمالي الحجز.")
+    if abs(paid - total_due) <= 0.01:
+        return [round(t, 2) for t in clean_totals]
 
-    allocations: List[float] = []
+    allocations: List[float] = [0.0 for _ in clean_totals]
     remaining = paid
-    for idx, line_total in enumerate(clean_totals):
-        if remaining <= 1e-9:
-            allocations.append(0.0)
-            continue
-        if idx == len(clean_totals) - 1:
-            alloc = remaining
-        else:
-            remaining_count = len(clean_totals) - idx
-            alloc = _round_up_to_step(remaining / remaining_count, round_step)
-            alloc = min(alloc, line_total, remaining)
-        allocations.append(round(float(alloc), 2))
-        remaining = round(remaining - float(alloc), 2)
+    open_indexes = {idx for idx, total in enumerate(clean_totals) if total > 1e-9}
+    while remaining > 0.01 and open_indexes:
+        share = _round_up_to_step(remaining / len(open_indexes), round_step)
+        progressed = False
+        for idx in list(sorted(open_indexes)):
+            capacity = max(0.0, clean_totals[idx] - allocations[idx])
+            if capacity <= 0.01:
+                open_indexes.discard(idx)
+                continue
+            alloc = min(share, capacity, remaining)
+            allocations[idx] = round(allocations[idx] + alloc, 2)
+            remaining = round(remaining - alloc, 2)
+            progressed = True
+            if clean_totals[idx] - allocations[idx] <= 0.01:
+                open_indexes.discard(idx)
+            if remaining <= 0.01:
+                break
+        if not progressed:
+            break
 
-    if allocations:
-        allocations[-1] = round(allocations[-1] + remaining, 2)
-    return allocations
+    if remaining > 0.01:
+        for idx in sorted(open_indexes):
+            capacity = max(0.0, clean_totals[idx] - allocations[idx])
+            alloc = min(capacity, remaining)
+            allocations[idx] = round(allocations[idx] + alloc, 2)
+            remaining = round(remaining - alloc, 2)
+            if remaining <= 0.01:
+                break
+    return [min(round(a, 2), round(clean_totals[idx], 2)) for idx, a in enumerate(allocations)]
 
 
 def _reservation_bill_id_from_rows(rows: Sequence[Dict[str, Any]]) -> str:
@@ -477,6 +525,23 @@ def _reservation_bill_id_from_rows(rows: Sequence[Dict[str, Any]]) -> str:
         if rid > 0:
             ids.append(rid)
     return str(min(ids)) if ids else ""
+
+
+RESERVATION_STATUS_PENDING = "معلق"
+RESERVATION_STATUS_DELIVERED = "تم التسليم"
+RESERVATION_STATUS_CANCELLED = "ملغي"
+
+
+def _is_reservation_delivered(status: Any) -> bool:
+    return str(status or "").strip() == RESERVATION_STATUS_DELIVERED
+
+
+def _is_reservation_cancelled(status: Any) -> bool:
+    return str(status or "").strip() == RESERVATION_STATUS_CANCELLED
+
+
+def _is_reservation_active(status: Any) -> bool:
+    return not (_is_reservation_delivered(status) or _is_reservation_cancelled(status))
 
 
 def _normalize_customer_phone(value: Any) -> str:
@@ -833,11 +898,13 @@ def save_bill_as_rtf(
     pos_name: str = "",
     support_call: str = "",
     support_whatsapp: str = "",
+    extra_summary_rows: Optional[Sequence[Tuple[str, Any]]] = None,
 ) -> None:
     customer = western_digits(bill.get("customer") or "").strip()
     customer_phone = western_digits(bill.get("customer_phone") or "").strip()
     pos_name = _receipt_pos_name(pos_name)
     created_at = western_digits(bill.get("created_at") or "")
+    extra_rows = list(extra_summary_rows or [])
 
     rows = []
     widths = [2650, 500, 650, 650]
@@ -875,10 +942,23 @@ def save_bill_as_rtf(
     if support_whatsapp:
         support_lines.append(r"\pard\rtlpar\qc\fs22 " + _rtf_escape("واتساب: %s" % support_whatsapp) + r"\par")
 
+    # WordPad prints RTF as paged media. A fixed large height makes thermal
+    # printers feed a near-A4 blank tail after every receipt, so size the page
+    # to the receipt content instead.
+    paper_height = 3300
+    paper_height += max(1, len(items)) * 520
+    paper_height += len(extra_rows) * 330
+    if customer:
+        paper_height += 260
+    if customer_phone:
+        paper_height += 260
+    paper_height += len(support_lines) * 260
+    paper_height = max(4200, min(32000, int(paper_height)))
+
     content = [
         r"{\rtf1\ansi\deff0\uc1",
         r"{\fonttbl{\f0 Tahoma;}}",
-        r"\paperw4535\paperh20000\margl120\margr120\margt120\margb120",
+        r"\paperw4535\paperh%d\margl120\margr120\margt80\margb80" % paper_height,
         r"\pard\rtlpar\qc\b\fs30 " + _rtf_escape(pos_name) + r"\par",
         r"\pard\rtlpar\qc\b\fs28 " + _rtf_escape("فاتورة #%s" % bill["id"]) + r"\par",
         r"\pard\rtlpar\qc\fs22 " + _rtf_escape(created_at) + r"\par",
@@ -893,9 +973,15 @@ def save_bill_as_rtf(
             "\n".join(rows),
             r"\pard\rtlpar\qr\fs16 ------------------------------------------------\par",
             r"\pard\rtlpar\qc\b\fs28 " + _rtf_escape("الإجمالي: %s" % format_money(float(bill["total"]))) + r"\par",
-            r"\pard\rtlpar\qc\fs22 " + _rtf_escape("شكرا لتعاملكم معنا") + r"\par",
         ]
     )
+    for label, value in extra_rows:
+        content.append(
+            r"\pard\rtlpar\qc\b\fs24 "
+            + _rtf_escape("%s: %s" % (label, format_money(float(value or 0.0))))
+            + r"\par"
+        )
+    content.append(r"\pard\rtlpar\qc\fs22 " + _rtf_escape("شكرا لتعاملكم معنا") + r"\par")
     content.extend(support_lines)
     content.append("}")
     with open(path, "w", encoding="ascii", errors="ignore") as f:
@@ -1115,15 +1201,60 @@ def _print_html_auto(path: str, copies: int = 1, parent: Optional[tk.Widget] = N
         auto_path = _make_autoprint_html(path)
         for _ in range(copies):
             opened = _open_receipt_preview(auto_path)
-            if not opened and _print_html_with_shell(path, 1):
-                opened = True
             if not opened:
                 raise RuntimeError("Could not open the auto-print receipt file.")
     except Exception as ex:
-        if _print_html_with_ie_silent(path, copies) or _print_html_with_shell(path, copies):
-            return
         if parent is not None:
             messagebox.showerror("Print failed", f"{ex}", parent=parent)
+
+
+def _print_receipt_direct_or_fallback(
+    html_path: str,
+    bill: Dict[str, Any],
+    items: List[Dict[str, Any]],
+    *,
+    copies: int = 1,
+    parent: Optional[tk.Widget] = None,
+    pos_name: str = "",
+    support_call: str = "",
+    support_whatsapp: str = "",
+    extra_summary_rows: Optional[Sequence[Tuple[str, Any]]] = None,
+) -> None:
+    copies = max(1, int(copies))
+    receipt_id = (bill or {}).get("id")
+    try:
+        if logging_setup is not None:  # type: ignore[name-defined]
+            logging_setup.log_event(  # type: ignore[union-attr]
+                "print.receipt.direct.start",
+                receipt_id=receipt_id,
+                bill_type=(bill or {}).get("bill_type"),
+                copies=copies,
+                html_path=html_path,
+                mode="html",
+            )
+    except Exception:
+        pass
+
+    try:
+        _print_html_auto(html_path, copies=copies, parent=None)
+        try:
+            if logging_setup is not None:  # type: ignore[name-defined]
+                logging_setup.log_event(  # type: ignore[union-attr]
+                    "print.receipt.direct.done",
+                    receipt_id=receipt_id,
+                    copies=copies,
+                    html_path=html_path,
+                    mode="browser_autoprint",
+                )
+        except Exception:
+            pass
+        return
+    except Exception:
+        try:
+            logging_setup.log_exception("print.receipt.direct.failed", receipt_id=receipt_id, copies=copies)  # type: ignore[union-attr]
+        except Exception:
+            pass
+        pass
 
 def save_bill_as_html(
     path: str,
@@ -1215,12 +1346,18 @@ def save_bill_as_html(
     print-color-adjust: exact;
   }}
   .receipt {{
-    display: flex;
-    flex-direction: column;
-    min-height: 150mm;
+    display: block;
+    min-height: auto;
+    height: auto;
+    max-height: none;
+    overflow: visible;
     padding: 1.5mm;
     position: relative;
     width: 78mm;
+  }}
+  table, tbody, tr {{
+    break-inside: avoid;
+    page-break-inside: avoid;
   }}
   @media screen {{
     body {{
@@ -1519,19 +1656,348 @@ def apply_focus_highlight(widget, color="#19E72A"):
     widget.bind("<FocusIn>", on_focus_in)
     widget.bind("<FocusOut>", on_focus_out)
 
+
+class PosAuditLogger:
+    """Append-only, hash-chained daily audit log for POS business operations."""
+
+    SCHEMA_VERSION = 1
+    MAX_DETAIL_TEXT = 500
+    MAX_LIST_ITEMS = 80
+    SENSITIVE_KEYS = {"password", "plain", "secret", "token", "hash"}
+
+    def __init__(self, db_path: str, device_supplier=None) -> None:
+        self.disabled = str(os.environ.get("HOSNY_POS_AUDIT_DISABLED", "")).strip().lower() in ("1", "true", "yes")
+        self.device_supplier = device_supplier
+        self.session_id = uuid.uuid4().hex
+        self._seq = 0
+        self._last_hash = ""
+        self.log_dir = self._resolve_log_dir(db_path)
+        self.state_path = os.path.join(self.log_dir, "pos-audit-state.json")
+        if not self.disabled:
+            os.makedirs(self.log_dir, exist_ok=True)
+            self._load_state()
+
+    def _resolve_log_dir(self, db_path: str) -> str:
+        db_dir = os.path.dirname(os.path.abspath(db_path or DB_PATH))
+        runtime_dir = os.path.abspath(_runtime_base_dir())
+        try:
+            common = os.path.commonpath([db_dir, runtime_dir])
+        except Exception:
+            common = ""
+        if common == runtime_dir:
+            return os.path.join(runtime_dir, "audit_logs")
+        db_stem = _safe_log_component(os.path.splitext(os.path.basename(db_path or DB_PATH))[0]) or "pos-db"
+        return os.path.join(db_dir, f"audit_logs-{db_stem}")
+
+    def _load_state(self) -> None:
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            self._seq = int(state.get("seq") or 0)
+            self._last_hash = str(state.get("last_hash") or "")
+        except Exception:
+            self._seq = 0
+            self._last_hash = ""
+
+    def _write_state(self, entry_date: str, entry_hash: str, seq: int) -> None:
+        state = {
+            "schema_version": self.SCHEMA_VERSION,
+            "date": entry_date,
+            "seq": int(seq),
+            "last_hash": str(entry_hash or ""),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        tmp_path = f"{self.state_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            f.write("\n")
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        os.replace(tmp_path, self.state_path)
+
+    def _device_name(self) -> str:
+        try:
+            value = self.device_supplier() if self.device_supplier else None
+        except Exception:
+            value = None
+        return str(value or os.environ.get("HOSNY_DEVICE_NAME") or os.environ.get("COMPUTERNAME") or "pos").strip()
+
+    def _sanitize(self, value: Any, depth: int = 0) -> Any:
+        if depth > 4:
+            return "<max-depth>"
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, sqlite3.Row):
+            return self._sanitize(dict(value), depth + 1)
+        if isinstance(value, dict):
+            out: Dict[str, Any] = {}
+            for key, item in value.items():
+                key_text = str(key)
+                if key_text.lower() in self.SENSITIVE_KEYS:
+                    out[key_text] = "<redacted>"
+                else:
+                    out[key_text] = self._sanitize(item, depth + 1)
+            return out
+        if isinstance(value, (list, tuple, set)):
+            seq = list(value)
+            items = [self._sanitize(item, depth + 1) for item in seq[: self.MAX_LIST_ITEMS]]
+            if len(seq) > self.MAX_LIST_ITEMS:
+                items.append({"truncated_count": len(seq) - self.MAX_LIST_ITEMS})
+            return items
+        text = str(value)
+        if len(text) > self.MAX_DETAIL_TEXT:
+            return text[: self.MAX_DETAIL_TEXT] + "...<truncated>"
+        return text
+
+    def write(self, event: str, details: Optional[Dict[str, Any]] = None, *, actor: str = "system", shift_id: Optional[int] = None) -> None:
+        if self.disabled:
+            return
+        ts = datetime.now().isoformat(timespec="seconds")
+        entry_date = ts[:10]
+        self._seq += 1
+        base = {
+            "schema_version": self.SCHEMA_VERSION,
+            "ts": ts,
+            "date": entry_date,
+            "device": self._device_name(),
+            "app_version": APP_VERSION,
+            "session_id": self.session_id,
+            "seq": self._seq,
+            "event": str(event or "unknown"),
+            "shift_id": shift_id,
+            "actor": str(actor or "system"),
+            "details": self._sanitize(details or {}),
+            "prev_hash": self._last_hash,
+        }
+        canonical = json.dumps(base, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        entry_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        entry = dict(base)
+        entry["entry_hash"] = entry_hash
+        line = json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        path = os.path.join(self.log_dir, f"pos-audit-{entry_date}.jsonl")
+        flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
+        fd = os.open(path, flags, 0o600)
+        try:
+            os.write(fd, line.encode("utf-8"))
+            try:
+                os.fsync(fd)
+            except Exception:
+                pass
+        finally:
+            os.close(fd)
+        self._last_hash = entry_hash
+        self._write_state(entry_date, entry_hash, self._seq)
+
+
 class SqliteDatabase:
     """SQLite persistence layer."""
 
     def __init__(self, path: str = DB_PATH, legacy_json: str = LEGACY_JSON_PATH) -> None:
         self.path = path
+        try:
+            logging_setup.log_event(  # type: ignore[union-attr]
+                "db.open.start",
+                db_path=os.path.abspath(self.path),
+                exists=os.path.exists(self.path),
+                size_bytes=(os.path.getsize(self.path) if os.path.exists(self.path) else 0),
+            )
+        except Exception:
+            pass
         self.conn = sqlite3.connect(self.path, timeout=30.0, isolation_level=None, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.active_shift_id: Optional[int] = None
+        self.audit = PosAuditLogger(self.path, device_supplier=self._current_device_name)
 
+        started = time.time()
         self._apply_pragmas()
         self._init_schema()
         self._migrate_from_json_if_empty(legacy_json)
+        normalized_ranges = self._normalize_legacy_size_profile_ranges()
+        self._log_db_open_step("repair_stock_integrity.start")
         self.repair_stock_integrity()
+        self._log_db_open_step("repair_stock_integrity.done")
+        self._log_db_open_step("branch_catalog_visibility.start")
+        visibility_repair = self.ensure_branch_catalog_stock_rows_lightweight()
+        self._log_db_open_step("branch_catalog_visibility.done", result=visibility_repair)
+        rename_repair = self._maybe_run_heavy_startup_repair(
+            "repair_unsafe_spec_value_rename_damage",
+            self.repair_unsafe_spec_value_rename_damage,
+        )
+        self._log_db_open_step("repair_missing_branch_reclassification_counts.start")
+        try:
+            reclass_repair = self.repair_missing_branch_reclassification_counts()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            reclass_repair = {"skipped": True, "error": "exception", "repair_name": "repair_missing_branch_reclassification_counts"}
+        self._log_db_open_step("repair_missing_branch_reclassification_counts.done", result=reclass_repair)
+        allow_snapshot_count_repairs = str(
+            os.environ.get("HOSNY_POS_ENABLE_SNAPSHOT_COUNT_REPAIRS") or ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if allow_snapshot_count_repairs:
+            self._log_db_open_step("repair_branch_group_general_school_counts.start")
+            try:
+                branch_group_repair = self.repair_branch_group_general_school_counts_from_snapshots()
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                branch_group_repair = {"skipped": True, "error": "exception", "repair_name": "repair_branch_group_general_school_counts_from_snapshots"}
+            self._log_db_open_step("repair_branch_group_general_school_counts.done", result=branch_group_repair)
+            self._log_db_open_step("repair_stock_counts_from_snapshots.start")
+            try:
+                snapshot_count_repair = self.repair_stock_counts_from_snapshots()
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                snapshot_count_repair = {"skipped": True, "error": "exception", "repair_name": "repair_stock_counts_from_snapshots"}
+            self._log_db_open_step("repair_stock_counts_from_snapshots.done", result=snapshot_count_repair)
+        else:
+            branch_group_repair = {
+                "skipped": True,
+                "reason": "snapshot_count_repairs_disabled",
+                "repair_name": "repair_branch_group_general_school_counts_from_snapshots",
+            }
+            snapshot_count_repair = {
+                "skipped": True,
+                "reason": "snapshot_count_repairs_disabled",
+                "repair_name": "repair_stock_counts_from_snapshots",
+            }
+            self._log_db_open_step("repair_branch_group_general_school_counts.skipped", result=branch_group_repair)
+            self._log_db_open_step("repair_stock_counts_from_snapshots.skipped", result=snapshot_count_repair)
+        cleanup = self._maybe_run_heavy_startup_repair(
+            "cleanup_unowned_branch_catalog_rows",
+            self.cleanup_unowned_branch_catalog_rows,
+        )
+        self._log_db_open_step("source_truth_reset.start")
+        source_truth_reset = self.reset_source_truth_sync_events_for_current_version()
+        self._log_db_open_step("source_truth_reset.done")
+
+        self._audit("app_started", {
+            "db_path": os.path.abspath(self.path),
+        })
+        try:
+            logging_setup.configure_context(device_name=self._current_device_name())  # type: ignore[union-attr]
+            logging_setup.log_event(  # type: ignore[union-attr]
+                "db.open.done",
+                elapsed_ms=int((time.time() - started) * 1000),
+                normalized_size_ranges=normalized_ranges,
+                spec_rename_repair=rename_repair,
+                branch_reclassification_repair=reclass_repair,
+                branch_group_school_repair=branch_group_repair,
+                stock_snapshot_count_repair=snapshot_count_repair,
+                branch_catalog_cleanup=cleanup,
+                branch_catalog_visibility=visibility_repair,
+                source_truth_reset=source_truth_reset,
+            )
+        except Exception:
+            pass
+
+    def _log_db_open_step(self, step_name: str, **details: Any) -> None:
+        try:
+            logging_setup.log_event(  # type: ignore[union-attr]
+                "db.open.step",
+                step=step_name,
+                **details,
+            )
+        except Exception:
+            pass
+
+    def _maybe_run_heavy_startup_repair(self, name: str, func) -> Dict[str, Any]:
+        """Avoid blocking POS launch with historical whole-database repairs.
+
+        The repair/cleanup functions remain available from the relevant UI
+        actions and tests, but startup must open the cashier window quickly.
+        New sync events are still gated strictly by the sync appliers.
+        """
+        enabled = str(os.environ.get("HOSNY_POS_HEAVY_STARTUP_REPAIR") or "").strip().lower()
+        if enabled not in {"1", "true", "yes", "on"}:
+            result: Dict[str, Any] = {"skipped": True, "reason": "deferred_after_startup", "repair_name": name}
+            self._log_db_open_step(name + ".skipped", **result)
+            return result
+        self._log_db_open_step(name + ".start")
+        try:
+            result = func()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            result = {"skipped": True, "error": "exception", "repair_name": name}
+        self._log_db_open_step(name + ".done", result=result)
+        return result
+
+    def _normalize_legacy_size_profile_ranges(self) -> int:
+        try:
+            with self.conn:
+                c1 = self.conn.execute(
+                    """
+                    UPDATE size_profiles
+                       SET num_start_1 = 30,
+                           updated_at = datetime('now')
+                     WHERE num_start_1 = 32
+                       AND num_end_1 = 62
+                    """
+                ).rowcount
+                c2 = self.conn.execute(
+                    """
+                    UPDATE size_profiles
+                       SET num_start_2 = 30,
+                           updated_at = datetime('now')
+                     WHERE num_start_2 = 32
+                       AND num_end_2 = 62
+                    """
+                ).rowcount
+            return int(c1 or 0) + int(c2 or 0)
+        except Exception:
+            return 0
+
+    def reset_source_truth_sync_events_for_current_version(self) -> Dict[str, int]:
+        """Let an updated POS apply source-of-truth events skipped by older builds."""
+        key = "pos_source_truth_reset_version"
+        try:
+            row = self.conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+            if row is not None and str(row["value"] or "") == APP_VERSION:
+                return {"reset": 0, "already_current": 1}
+        except sqlite3.OperationalError:
+            return {"reset": 0, "already_current": 0}
+        try:
+            with self.conn:
+                legacy_spec_renames = self.conn.execute(
+                    """
+                    UPDATE sync_inbox
+                       SET apply_status = 'skipped',
+                           apply_error = 'legacy SPEC_RENAMED replay suppressed; use branch reclassification/source truth',
+                           apply_at = COALESCE(apply_at, ?)
+                     WHERE event_type = 'SPEC_RENAMED'
+                       AND apply_status IS NULL
+                       AND COALESCE(apply_attempts, 0) > 0
+                    """,
+                    (now_iso(),),
+                )
+                cur = self.conn.execute(
+                    """
+                    UPDATE sync_inbox
+                       SET apply_status = NULL,
+                           apply_error = NULL
+                     WHERE event_type IN ('POS_OWNERSHIP_SNAPSHOT', 'PRICE_UPDATE', 'BRANCH_STOCK_RECLASSIFIED')
+                       AND apply_status = 'skipped'
+                    """
+                )
+                reset = int(cur.rowcount or 0)
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO app_settings(key, value) VALUES(?, ?)",
+                    (key, APP_VERSION),
+                )
+            return {
+                "reset": reset,
+                "already_current": 0,
+                "legacy_spec_renames_suppressed": int(legacy_spec_renames.rowcount or 0),
+            }
+        except sqlite3.OperationalError:
+            return {"reset": 0, "already_current": 0}
 
 
     def repair_stock_integrity(self) -> Dict[str, int]:
@@ -1716,6 +2182,325 @@ class SqliteDatabase:
             (item_type, school, color, size, float(unit_price), qty),
         )
         return int(cur.lastrowid)
+
+    def ensure_branch_catalog_stock_rows_lightweight(self) -> Dict[str, int]:
+        """Create missing zero-count stock rows from branch ownership anchors.
+
+        This is intentionally cheap enough for Inventory/Stock Audit refreshes.
+        The heavier source-truth cleanup remains manual/deferred and must not
+        run while the cashier is opening interactive windows.
+        """
+        created = 0
+        price_updates = 0
+        inbox_specs = 0
+        seen: Set[Tuple[str, str, str, str]] = set()
+
+        def _clean_local(value: Any) -> str:
+            return _strip_digit_marks(value).strip()
+
+        def _complete_spec_from(raw: Dict[str, Any]) -> Optional[Dict[str, str]]:
+            spec = {
+                "item_type": _clean_local(raw.get("item_type")),
+                "school": _clean_local(raw.get("school")),
+                "color": _clean_local(raw.get("color")),
+                "size": _clean_local(raw.get("size")),
+            }
+            return spec if all(spec.values()) else None
+
+        def _load_rename_history() -> List[Tuple[Dict[str, str], Dict[str, str]]]:
+            try:
+                rows = self.conn.execute(
+                    """
+                    SELECT payload_json
+                      FROM sync_inbox
+                     WHERE event_type = 'SPEC_RENAMED'
+                     ORDER BY server_seq ASC
+                    """
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+            history: List[Tuple[Dict[str, str], Dict[str, str]]] = []
+            for row in rows:
+                try:
+                    payload = json.loads(row["payload_json"] or "{}")
+                except Exception:
+                    continue
+                old_spec = _complete_spec_from(payload.get("old_spec") or {})
+                new_spec_raw = payload.get("new_spec") or {}
+                if old_spec is None or not isinstance(new_spec_raw, dict):
+                    continue
+                new_spec = {
+                    k: _clean_local(new_spec_raw.get(k) or old_spec.get(k) or "")
+                    for k in ("item_type", "school", "color", "size")
+                }
+                if all(new_spec.values()) and old_spec != new_spec:
+                    history.append((old_spec, new_spec))
+            return history
+
+        rename_history = _load_rename_history()
+
+        def _apply_local_renames(spec: Dict[str, str]) -> Dict[str, str]:
+            current = {k: _clean_local(spec.get(k)) for k in ("item_type", "school", "color", "size")}
+            for old_spec, new_spec in rename_history:
+                if all(
+                    current.get(k, "").casefold() == old_spec.get(k, "").casefold()
+                    for k in ("item_type", "school", "color", "size")
+                ):
+                    current = dict(new_spec)
+            return current
+
+        def _load_delete_filters() -> List[Dict[str, str]]:
+            try:
+                self.conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS branch_catalog_delete_tombstones(
+                        item_type TEXT,
+                        school TEXT,
+                        color TEXT,
+                        size TEXT,
+                        delete_server_seq INTEGER,
+                        source_event_uuid TEXT,
+                        note TEXT,
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                try:
+                    cols = {
+                        str(row["name"])
+                        for row in self.conn.execute("PRAGMA table_info(branch_catalog_delete_tombstones)").fetchall()
+                    }
+                    if "delete_server_seq" not in cols:
+                        self.conn.execute("ALTER TABLE branch_catalog_delete_tombstones ADD COLUMN delete_server_seq INTEGER")
+                except sqlite3.OperationalError:
+                    pass
+                rows = self.conn.execute(
+                    "SELECT item_type, school, color, size, delete_server_seq FROM branch_catalog_delete_tombstones"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+            out = []
+            for row in rows:
+                filt = {field: _clean_local(row[field]) for field in ("item_type", "school", "color", "size")}
+                try:
+                    filt["delete_server_seq"] = int(row["delete_server_seq"]) if row["delete_server_seq"] is not None else None  # type: ignore[assignment]
+                except (TypeError, ValueError):
+                    filt["delete_server_seq"] = None  # type: ignore[assignment]
+                out.append(filt)
+            return out
+
+        delete_filters = _load_delete_filters()
+
+        def _deleted_by_filter(spec: Dict[str, str], event_seq: Optional[int] = None) -> bool:
+            for filt in delete_filters:
+                delete_seq = filt.get("delete_server_seq")
+                if isinstance(delete_seq, int) and event_seq is not None and event_seq > delete_seq:
+                    continue
+                if isinstance(delete_seq, int) and event_seq is None:
+                    continue
+                matched = True
+                for field in ("item_type", "school", "color", "size"):
+                    value = filt.get(field) or ""
+                    if value and value.casefold() != _clean_local(spec.get(field)).casefold():
+                        matched = False
+                        break
+                if matched:
+                    return True
+            return False
+
+        def _remember(
+            specs: Dict[str, Any],
+            unit_price: Any,
+            *,
+            from_inbox: bool = False,
+            event_seq: Optional[int] = None,
+        ) -> None:
+            nonlocal created, price_updates, inbox_specs
+            spec = _complete_spec_from(specs)
+            if spec is None:
+                return
+            spec = _apply_local_renames(spec)
+            if _deleted_by_filter(spec, event_seq):
+                return
+            item_type = spec["item_type"]
+            school = spec["school"]
+            color = spec["color"]
+            size = spec["size"]
+            key = (item_type.casefold(), school.casefold(), color.casefold(), size.casefold())
+            if key in seen:
+                return
+            seen.add(key)
+            if from_inbox:
+                inbox_specs += 1
+            try:
+                price = float(unit_price or 0)
+            except (TypeError, ValueError):
+                price = 0.0
+            existing = self.conn.execute(
+                """
+                SELECT id, unit_price
+                  FROM stocks
+                 WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+                 ORDER BY id ASC
+                 LIMIT 1
+                """,
+                (item_type, school, color, size),
+            ).fetchone()
+            if existing is None:
+                self.conn.execute(
+                    """
+                    INSERT INTO stocks(item_type, school, color, size, unit_price, count)
+                    VALUES (?, ?, ?, ?, ?, 0)
+                    """,
+                    (item_type, school, color, size, price),
+                )
+                created += 1
+                self._upsert_history(
+                    {"item_type": item_type, "school": school, "color": color, "size": size}
+                )
+            elif price > 0 and abs(float(existing["unit_price"] or 0) - price) >= 0.001:
+                cur = self.conn.execute(
+                    "UPDATE stocks SET unit_price = ? WHERE id = ? AND COALESCE(count, 0) = 0",
+                    (price, int(existing["id"])),
+                )
+                price_updates += int(cur.rowcount or 0)
+
+        try:
+            with self.conn:
+                try:
+                    rows = self.conn.execute(
+                        """
+                        SELECT item_type, school, color, size, unit_price
+                          FROM incoming_shipment_items_pending
+                         WHERE (
+                                COALESCE(expected_qty, 0) > 0
+                                OR COALESCE(received_qty, 0) > 0
+                           )
+                           AND UPPER(COALESCE(status, '')) <> 'CANCELLED'
+                        """
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+                for row in rows:
+                    _remember(dict(row), row["unit_price"])
+
+                try:
+                    rows = self.conn.execute(
+                        """
+                        SELECT item_type, school, color, size, unit_price, source_event_uuid
+                          FROM branch_catalog_definitions
+                        """
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+                for row in rows:
+                    source_uuid = _clean_local(row["source_event_uuid"])
+                    seq_row = self.conn.execute(
+                        "SELECT server_seq FROM sync_inbox WHERE event_uuid = ? LIMIT 1",
+                        (source_uuid,),
+                    ).fetchone() if source_uuid else None
+                    try:
+                        event_seq = int(seq_row["server_seq"]) if seq_row else None
+                    except (TypeError, ValueError):
+                        event_seq = None
+                    _remember(dict(row), row["unit_price"], event_seq=event_seq)
+
+                cancelled_shipments: Set[str] = set()
+                try:
+                    rows = self.conn.execute(
+                        """
+                        SELECT payload_json
+                          FROM sync_inbox
+                         WHERE event_type = 'STOCK_TRANSFER_CANCELLED'
+                        """
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+                for row in rows:
+                    try:
+                        payload = json.loads(row["payload_json"] or "{}")
+                    except Exception:
+                        continue
+                    shipment_uuid = _clean_local(payload.get("shipment_uuid") or payload.get("bill_uuid"))
+                    if shipment_uuid:
+                        cancelled_shipments.add(shipment_uuid.casefold())
+
+                try:
+                    rows = self.conn.execute(
+                        """
+                        SELECT payload_json, server_seq
+                          FROM sync_inbox
+                         WHERE event_type = 'STOCK_TRANSFER_OUT'
+                        """
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+                for row in rows:
+                    try:
+                        payload = json.loads(row["payload_json"] or "{}")
+                    except Exception:
+                        continue
+                    shipment_uuid = _clean_local(payload.get("shipment_uuid"))
+                    if shipment_uuid and shipment_uuid.casefold() in cancelled_shipments:
+                        continue
+                    note_text = _clean_local(payload.get("note")).casefold()
+                    is_reservation_definition = "reservation" in note_text or "حجز" in note_text
+                    for item in payload.get("items") or []:
+                        if not isinstance(item, dict):
+                            continue
+                        try:
+                            qty = int(float(item.get("qty") or 0))
+                        except (TypeError, ValueError):
+                            qty = 0
+                        catalog_only = bool(item.get("catalog_only"))
+                        if qty <= 0 and not (catalog_only and is_reservation_definition):
+                            continue
+                        try:
+                            event_seq = int(row["server_seq"])
+                        except (TypeError, ValueError):
+                            event_seq = None
+                        _remember(item, item.get("unit_price"), from_inbox=True, event_seq=event_seq)
+
+                try:
+                    rows = self.conn.execute(
+                        """
+                        SELECT payload_json, server_seq
+                          FROM sync_inbox
+                         WHERE event_type = 'BRANCH_STOCK_RECLASSIFIED'
+                        """
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+                for row in rows:
+                    try:
+                        payload = json.loads(row["payload_json"] or "{}")
+                    except Exception:
+                        continue
+                    to_spec = payload.get("to_spec") or {}
+                    if not isinstance(to_spec, dict):
+                        continue
+                    try:
+                        event_seq = int(row["server_seq"])
+                    except (TypeError, ValueError):
+                        event_seq = None
+                    _remember(to_spec, to_spec.get("unit_price"), from_inbox=True, event_seq=event_seq)
+
+                stale_renamed_zero_rows = 0
+            return {
+                "created": created,
+                "price_updates": price_updates,
+                "owned_specs": len(seen),
+                "inbox_specs": inbox_specs,
+                "stale_renamed_zero_rows": stale_renamed_zero_rows,
+                "stale_renamed_zero_cleanup": "manual_delete_definition_only",
+            }
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            return {"created": 0, "price_updates": 0, "owned_specs": 0, "inbox_specs": 0, "error": 1}
 
 
     def deduct_stock_for_specs(
@@ -1975,6 +2760,9 @@ class SqliteDatabase:
         row["started_at"] = shift.get("started_at") or stored.get("started_at") or ""
         row["ended_at"] = shift.get("ended_at") or stored.get("ended_at") or ""
         row["status"] = shift.get("status") or "CLOSED"
+        row.setdefault("expense_count", 0)
+        row.setdefault("expense_total", 0.0)
+        row.setdefault("expenses", [])
         return row
 
     def _missing_reservation_payment_totals(self, shift: Dict[str, Any]) -> Dict[str, float]:
@@ -2034,6 +2822,8 @@ class SqliteDatabase:
         cur.execute("PRAGMA synchronous=NORMAL;")
         cur.execute("PRAGMA foreign_keys=ON;")
         cur.execute("PRAGMA busy_timeout=30000;")
+        cur.execute("PRAGMA temp_store=MEMORY;")
+        cur.execute("PRAGMA cache_size=-20000;")
         cur.close()
 
     def _record_sync_event(self, event_type: str, payload: Dict[str, Any]) -> Optional[str]:
@@ -2052,10 +2842,50 @@ class SqliteDatabase:
             return None
 
     def _record_sync_event_or_raise(self, event_type: str, payload: Dict[str, Any]) -> str:
+        if event_type in {
+            "SALE_CREATED",
+            "SALE_RETURNED",
+            "SALE_EXCHANGED",
+            "SALE_VOIDED",
+            "SALE_BILL_TYPE_CORRECTED",
+            "RESERVATION_CREATED",
+            "RESERVATION_PAYMENT_UPDATED",
+            "RESERVATION_DELIVERED",
+            "SHIFT_OPENED",
+            "SHIFT_CLOSED",
+        }:
+            local_ts = str(payload.get("created_at") or payload.get("ended_at") or payload.get("started_at") or now_iso())
+            payload.setdefault("created_at", local_ts)
+            payload.setdefault("business_day", local_ts[:10])
         event_uuid = self._record_sync_event(event_type, payload)
         if not event_uuid:
             raise RuntimeError(f"Failed to record required sync event: {event_type}")
+        try:
+            logging_setup.log_event(  # type: ignore[union-attr]
+                "sync.outbox.recorded",
+                event_type=event_type,
+                event_uuid=event_uuid,
+                payload_summary=_summarize_sync_payload_for_ui(event_type, payload),
+            )
+        except Exception:
+            pass
         return str(event_uuid)
+
+    def _audit(self, event: str, details: Optional[Dict[str, Any]] = None, *, actor: str = "system") -> None:
+        try:
+            logging_setup.log_event(  # type: ignore[union-attr]
+                f"business.{event}",
+                actor=actor,
+                shift_id=self.active_shift_id,
+                details=details or {},
+            )
+        except Exception:
+            pass
+        try:
+            self.audit.write(event, details or {}, actor=actor, shift_id=self.active_shift_id)
+        except Exception:
+            import traceback
+            traceback.print_exc()
 
     def _record_warehouse_return_event(
         self,
@@ -2293,6 +3123,18 @@ class SqliteDatabase:
                 PRIMARY KEY(field, value)
             );
 
+            CREATE TABLE IF NOT EXISTS branch_catalog_definitions(
+                item_type TEXT NOT NULL,
+                school TEXT NOT NULL,
+                color TEXT NOT NULL,
+                size TEXT NOT NULL,
+                unit_price REAL NOT NULL DEFAULT 0,
+                source_event_uuid TEXT,
+                note TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(item_type, school, color, size)
+            );
+
             CREATE TABLE IF NOT EXISTS hidden_definitions(
                 field TEXT NOT NULL,
                 value TEXT NOT NULL,
@@ -2380,6 +3222,16 @@ class SqliteDatabase:
             CREATE INDEX IF NOT EXISTS idx_shifts_status ON shifts(status);
             CREATE INDEX IF NOT EXISTS idx_shifts_started ON shifts(started_at DESC);
 
+            CREATE TABLE IF NOT EXISTS expenses(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                amount REAL NOT NULL,
+                note TEXT,
+                shift_id INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_expenses_shift_id ON expenses(shift_id);
+            CREATE INDEX IF NOT EXISTS idx_expenses_created ON expenses(created_at DESC);
+
             CREATE TABLE IF NOT EXISTS income_bills(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at TEXT NOT NULL,
@@ -2419,8 +3271,7 @@ class SqliteDatabase:
             stored = str(row["value"]) if row else ""
             if not stored or stored in ("1234", old_admin):
                 self.conn.execute(
-                    "INSERT INTO app_settings(key, value) VALUES('admin_password', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    "INSERT OR REPLACE INTO app_settings(key, value) VALUES('admin_password', ?)",
                     (new_admin,),
                 )
         except Exception:
@@ -2747,12 +3598,24 @@ class SqliteDatabase:
             self.conn.executescript("""
                 CREATE INDEX IF NOT EXISTS idx_stocks_specs_norm
                     ON stocks(LOWER(TRIM(item_type)), LOWER(TRIM(school)), LOWER(TRIM(color)), LOWER(TRIM(size)));
+                CREATE INDEX IF NOT EXISTS idx_stocks_specs_price_count
+                    ON stocks(item_type, school, color, size, unit_price, count);
+                CREATE INDEX IF NOT EXISTS idx_stocks_low_count_specs
+                    ON stocks(count, item_type, school, color, size);
                 CREATE INDEX IF NOT EXISTS idx_bills_customer_norm
                     ON bills(LOWER(TRIM(customer)));
+                CREATE INDEX IF NOT EXISTS idx_bills_status_created
+                    ON bills(status, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_bills_type_created
+                    ON bills(bill_type, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_movements_bill_id
                     ON movements(bill_id);
+                CREATE INDEX IF NOT EXISTS idx_movements_dir_ts_specs
+                    ON movements(direction, ts, school, item_type, color);
                 CREATE INDEX IF NOT EXISTS idx_bill_items_specs
                     ON bill_items(item_type, school, color, size);
+                CREATE INDEX IF NOT EXISTS idx_reservations_status_created
+                    ON reservations(status, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_reservations_specs_norm
                     ON reservations(LOWER(TRIM(item_type)), LOWER(TRIM(school)), LOWER(TRIM(color)), LOWER(TRIM(size)), status);
                 CREATE INDEX IF NOT EXISTS idx_sync_outbox_status_seq
@@ -2787,7 +3650,11 @@ class SqliteDatabase:
             HAVING COUNT(*) > 1
                AND SUM(CASE WHEN status='تم التسليم' THEN 1 ELSE 0 END) = 0
                AND SUM(COALESCE(paid_amount, 0)) > 0
-               AND SUM(CASE WHEN COALESCE(paid_amount, 0) <= 0.000001 THEN 1 ELSE 0 END) > 0
+               AND (
+                    SUM(CASE WHEN COALESCE(paid_amount, 0) <= 0.000001 THEN 1 ELSE 0 END) > 0
+                    OR SUM(CASE WHEN COALESCE(paid_amount, 0) - COALESCE(total_amount, 0) > 0.001 THEN 1 ELSE 0 END) > 0
+                    OR ABS(SUM(COALESCE(paid_amount, 0)) - SUM(COALESCE(total_amount, 0))) <= 0.01
+               )
             """
         ).fetchall()
 
@@ -2818,9 +3685,14 @@ class SqliteDatabase:
                 if all(abs(current[idx] - allocations[idx]) <= 0.001 for idx in range(len(rows))):
                     continue
 
-                # Legacy shape: one row carries nearly everything and at
-                # least one sibling has zero. Avoid rewriting hand-edited groups.
-                if max(current) < total_paid - 0.001:
+                has_zero_sibling = any(v <= 0.001 for v in current)
+                has_overpaid_row = any(
+                    current[idx] - float(totals[idx] or 0.0) > 0.001
+                    for idx in range(len(rows))
+                )
+                is_fully_paid = abs(total_paid - sum(totals)) <= 0.01
+                legacy_single_carrier = max(current) >= total_paid - 0.001
+                if not (has_overpaid_row or is_fully_paid or (has_zero_sibling and legacy_single_carrier)):
                     continue
 
                 repaired_groups += 1
@@ -3196,10 +4068,11 @@ class SqliteDatabase:
 
         cur = self.conn.cursor()
         try:
-            # Retail sales: count money when the sale was created, even if it is
-            # later voided; the void itself is a separate cash-out event below.
+            # Retail sales: canceled sales are not counted as normal sales.
+            # The void itself is a separate cash-out event below.
             sale_where = [
                 "(COALESCE(b.bill_type,'SALE')='SALE' OR b.bill_type IS NULL)",
+                "UPPER(COALESCE(b.status,'CONFIRMED')) != 'VOID'",
                 f"LOWER(TRIM(bi.school)) IN ({placeholders})",
             ]
             sale_args: List[Any] = list(schools_lower)
@@ -3234,10 +4107,10 @@ class SqliteDatabase:
                     qty_delta=int(r["total_qty"] or 0),
                 )
 
-            # Reservation deposits, edits, and delivery collections are direct
-            # POS cash movements. Negative RESERVE_PAY means money went out.
+            # Reservation deposits, edits, delivery collections, and cancelled
+            # reservation refunds are direct POS cash movements.
             mov_where = [
-                "m.direction IN ('RESERVE_PAY','DELIVER_PAY')",
+                "m.direction IN ('RESERVE_PAY','DELIVER_PAY','RESERVE_REFUND')",
                 f"LOWER(TRIM(m.school)) IN ({placeholders})",
             ]
             mov_args: List[Any] = list(schools_lower)
@@ -3263,8 +4136,17 @@ class SqliteDatabase:
             for r in cur.fetchall():
                 row = bucket(r["school"], r["item_type"], r["color"], r["size"])
                 amount = float(r["total_amount"] or 0.0)
-                category = "reservation_delivered" if str(r["direction"]).upper() == "DELIVER_PAY" else "reservation_paid"
-                add_money(row, amount, method=r["payment_method"], category=category)
+                direction = str(r["direction"]).upper()
+                if direction == "DELIVER_PAY":
+                    category = "reservation_delivered"
+                    signed_amount = amount
+                elif direction == "RESERVE_REFUND":
+                    category = "reservation_paid"
+                    signed_amount = -abs(amount)
+                else:
+                    category = "reservation_paid"
+                    signed_amount = amount
+                add_money(row, signed_amount, method=r["payment_method"], category=category)
 
             # Return bills are money out on the return date.
             ret_where = [
@@ -3419,6 +4301,259 @@ class SqliteDatabase:
         finally:
             cur.close()
 
+    def get_school_accounts_day_report(
+        self,
+        schools: Sequence[str],
+        *,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Bill-level daily money report for selected schools.
+
+        Rows are money events, not item/spec lines. Summing row cash and visa
+        exactly equals the returned day totals.
+        """
+        cleaned = [str(s or "").strip() for s in schools if str(s or "").strip()]
+        if not cleaned:
+            return {"rows": [], "total_day": 0.0, "total_cash": 0.0, "total_visa": 0.0}
+        schools_lower = [s.lower() for s in cleaned]
+        placeholders = ",".join("?" for _ in schools_lower)
+        rows: List[Dict[str, Any]] = []
+
+        def date_parts(alias: str, column: str) -> Tuple[List[str], List[Any]]:
+            col = f"{alias}.{column}" if alias else column
+            parts: List[str] = []
+            args: List[Any] = []
+            if date_from:
+                parts.append(f"date({col}) >= date(?)")
+                args.append(date_from)
+            if date_to:
+                parts.append(f"date({col}) <= date(?)")
+                args.append(date_to)
+            return parts, args
+
+        def split_amount(amount: float, method: Any) -> Tuple[float, float]:
+            value = float(amount or 0.0)
+            method_u = str(method or PAYMENT_METHOD_CASH).strip().upper()
+            if method_u == PAYMENT_METHOD_VISA:
+                return 0.0, value
+            return value, 0.0
+
+        def add_row(
+            *,
+            key: str,
+            event_at: Any,
+            bill_no: Any,
+            bill_type: str,
+            customer: Any,
+            phone: Any = "",
+            schools_text: Any,
+            payment_method: Any,
+            amount: float,
+            status: Any = "",
+        ) -> None:
+            cash, visa = split_amount(amount, payment_method)
+            rows.append({
+                "key": key,
+                "event_at": str(event_at or ""),
+                "bill_no": str(bill_no or ""),
+                "bill_type": bill_type,
+                "customer": str(customer or ""),
+                "customer_phone": str(phone or ""),
+                "schools": str(schools_text or ""),
+                "payment_method": str(payment_method or PAYMENT_METHOD_CASH).strip().upper() or PAYMENT_METHOD_CASH,
+                "cash_total": cash,
+                "visa_total": visa,
+                "total_paid": cash + visa,
+                "status": str(status or ""),
+            })
+
+        cur = self.conn.cursor()
+        try:
+            bill_base = [
+                f"""
+                EXISTS (
+                    SELECT 1 FROM bill_items bi
+                     WHERE bi.bill_id = b.id
+                       AND LOWER(TRIM(bi.school)) IN ({placeholders})
+                )
+                """
+            ]
+            bill_base_args: List[Any] = list(schools_lower)
+
+            bill_date, bill_date_args = date_parts("b", "created_at")
+            bill_where = bill_base + bill_date
+            cur.execute(
+                f"""
+                SELECT
+                    b.id,
+                    b.created_at,
+                    COALESCE(b.customer, '') AS customer,
+                    COALESCE(b.customer_phone, '') AS customer_phone,
+                    COALESCE(b.total, 0) AS total,
+                    COALESCE(b.bill_type, 'SALE') AS bill_type,
+                    COALESCE(b.status, 'CONFIRMED') AS status,
+                    COALESCE(b.payment_method, '{PAYMENT_METHOD_CASH}') AS payment_method,
+                    (
+                        SELECT GROUP_CONCAT(school_name)
+                          FROM (
+                              SELECT DISTINCT TRIM(bi2.school) AS school_name
+                                FROM bill_items bi2
+                               WHERE bi2.bill_id = b.id
+                                 AND LOWER(TRIM(bi2.school)) IN ({placeholders})
+                               ORDER BY school_name
+                          )
+                    ) AS schools_text
+                FROM bills b
+                WHERE {' AND '.join(bill_where)}
+                  AND COALESCE(b.bill_type, 'SALE') IN ('SALE', 'RETURN', 'EXCHANGE')
+                  AND UPPER(COALESCE(b.status, 'CONFIRMED')) != 'VOID'
+                ORDER BY b.created_at DESC, b.id DESC
+                """,
+                list(schools_lower) + bill_base_args + bill_date_args,
+            )
+            for b in cur.fetchall():
+                bt = str(b["bill_type"] or "SALE").upper()
+                total = float(b["total"] or 0.0)
+                if bt == "RETURN":
+                    amount = -abs(total)
+                elif bt == "EXCHANGE":
+                    amount = total
+                else:
+                    amount = total
+                add_row(
+                    key=f"bill:{bt}:{b['id']}",
+                    event_at=b["created_at"],
+                    bill_no=b["id"],
+                    bill_type=bt,
+                    customer=b["customer"],
+                    phone=b["customer_phone"],
+                    schools_text=b["schools_text"],
+                    payment_method=b["payment_method"],
+                    amount=amount,
+                    status=b["status"],
+                )
+
+            void_date, void_date_args = date_parts("b", "voided_at")
+            void_where = bill_base + [
+                "COALESCE(b.bill_type, 'SALE') = 'SALE'",
+                "UPPER(COALESCE(b.status, 'CONFIRMED')) = 'VOID'",
+                "COALESCE(TRIM(b.voided_at), '') <> ''",
+            ] + void_date
+            cur.execute(
+                f"""
+                SELECT
+                    b.id,
+                    b.voided_at AS event_at,
+                    COALESCE(b.customer, '') AS customer,
+                    COALESCE(b.customer_phone, '') AS customer_phone,
+                    COALESCE(b.total, 0) AS total,
+                    COALESCE(b.payment_method, '{PAYMENT_METHOD_CASH}') AS payment_method,
+                    (
+                        SELECT GROUP_CONCAT(school_name)
+                          FROM (
+                              SELECT DISTINCT TRIM(bi2.school) AS school_name
+                                FROM bill_items bi2
+                               WHERE bi2.bill_id = b.id
+                                 AND LOWER(TRIM(bi2.school)) IN ({placeholders})
+                               ORDER BY school_name
+                          )
+                    ) AS schools_text
+                FROM bills b
+                WHERE {' AND '.join(void_where)}
+                ORDER BY b.voided_at DESC, b.id DESC
+                """,
+                list(schools_lower) + bill_base_args + void_date_args,
+            )
+            for b in cur.fetchall():
+                add_row(
+                    key=f"bill:VOID:{b['id']}",
+                    event_at=b["event_at"],
+                    bill_no=b["id"],
+                    bill_type="VOID",
+                    customer=b["customer"],
+                    phone=b["customer_phone"],
+                    schools_text=b["schools_text"],
+                    payment_method=b["payment_method"],
+                    amount=-abs(float(b["total"] or 0.0)),
+                    status="VOID",
+                )
+
+            movement_date, movement_date_args = date_parts("m", "ts")
+            movement_where = [
+                "m.direction IN ('RESERVE_PAY', 'DELIVER_PAY', 'RESERVE_REFUND')",
+                f"LOWER(TRIM(m.school)) IN ({placeholders})",
+            ] + movement_date
+            cur.execute(
+                f"""
+                SELECT
+                    m.id,
+                    m.ts,
+                    m.direction,
+                    COALESCE(m.note, '') AS note,
+                    TRIM(m.school) AS school,
+                    COALESCE(m.unit_price, 0) AS amount,
+                    COALESCE(m.payment_method, '{PAYMENT_METHOD_CASH}') AS payment_method,
+                    COALESCE((
+                        SELECT MAX(NULLIF(TRIM(r.customer), ''))
+                          FROM reservations r
+                         WHERE LOWER(TRIM(r.school)) = LOWER(TRIM(m.school))
+                           AND LOWER(TRIM(r.item_type)) = LOWER(TRIM(m.item_type))
+                           AND LOWER(TRIM(r.color)) = LOWER(TRIM(m.color))
+                           AND LOWER(TRIM(r.size)) = LOWER(TRIM(m.size))
+                           AND (m.note LIKE '%' || '#' || r.id || '%' OR date(r.created_at) <= date(m.ts))
+                    ), '') AS customer,
+                    COALESCE((
+                        SELECT MAX(NULLIF(TRIM(r.customer_phone), ''))
+                          FROM reservations r
+                         WHERE LOWER(TRIM(r.school)) = LOWER(TRIM(m.school))
+                           AND LOWER(TRIM(r.item_type)) = LOWER(TRIM(m.item_type))
+                           AND LOWER(TRIM(r.color)) = LOWER(TRIM(m.color))
+                           AND LOWER(TRIM(r.size)) = LOWER(TRIM(m.size))
+                           AND (m.note LIKE '%' || '#' || r.id || '%' OR date(r.created_at) <= date(m.ts))
+                    ), '') AS customer_phone
+                FROM movements m
+                WHERE {' AND '.join(movement_where)}
+                ORDER BY m.ts DESC, m.id DESC
+                """,
+                list(schools_lower) + movement_date_args,
+            )
+            reservation_labels = {
+                "RESERVE_PAY": "RESERVATION",
+                "DELIVER_PAY": "RESERVATION_DELIVERY",
+                "RESERVE_REFUND": "RESERVATION_REFUND",
+            }
+            for m in cur.fetchall():
+                direction = str(m["direction"] or "").upper()
+                amount = float(m["amount"] or 0.0)
+                if direction == "RESERVE_REFUND":
+                    amount = -abs(amount)
+                bill_no = str(m["note"] or "").strip() or str(m["id"])
+                add_row(
+                    key=f"movement:{m['id']}",
+                    event_at=m["ts"],
+                    bill_no=bill_no,
+                    bill_type=reservation_labels.get(direction, direction),
+                    customer=m["customer"],
+                    phone=m["customer_phone"],
+                    schools_text=m["school"],
+                    payment_method=m["payment_method"],
+                    amount=amount,
+                    status="",
+                )
+
+            rows.sort(key=lambda r: (str(r.get("event_at") or ""), str(r.get("key") or "")), reverse=True)
+            total_cash = sum(float(r.get("cash_total") or 0.0) for r in rows)
+            total_visa = sum(float(r.get("visa_total") or 0.0) for r in rows)
+            return {
+                "rows": rows,
+                "total_day": total_cash + total_visa,
+                "total_cash": total_cash,
+                "total_visa": total_visa,
+            }
+        finally:
+            cur.close()
+
     def list_items_for_school(self, school: str) -> List[Tuple[str, str]]:
         sc = (school or "").strip()
         if not sc:
@@ -3440,8 +4575,16 @@ class SqliteDatabase:
 
     def _size_row(self, school, item_type, color, size):
         """Return dict with size, current count, and last price for a specific size."""
+        size = _normalize_size_label(size)
         cur = self.conn.execute(
-            "SELECT COALESCE(SUM(count),0) AS c FROM stocks WHERE LOWER(TRIM(item_type))=LOWER(?) AND LOWER(TRIM(school))=LOWER(?) AND LOWER(TRIM(color))=LOWER(?) AND LOWER(TRIM(size))=LOWER(?)",
+            """
+            SELECT COALESCE(SUM(count),0) AS c
+              FROM stocks
+             WHERE LOWER(TRIM(item_type))=LOWER(?)
+               AND LOWER(TRIM(school))=LOWER(?)
+               AND LOWER(TRIM(color))=LOWER(?)
+               AND LOWER(TRIM(REPLACE(REPLACE(size, char(8206), ''), char(8207), '')))=LOWER(?)
+            """,
             (item_type, school, color, size),
         )
         count = int(cur.fetchone()["c"] or 0)
@@ -3451,6 +4594,17 @@ class SqliteDatabase:
     def list_sizes_for_item(self, school, item_type, color):
         ranges = self._get_size_ranges(item_type, school, color)
         out = []
+        seen: Set[str] = set()
+
+        def _add_size(sz: Any) -> None:
+            label = _normalize_size_label(sz)
+            if not label:
+                return
+            key = label.casefold()
+            if key in seen:
+                return
+            seen.add(key)
+            out.append(self._size_row(school, item_type, color, label))
 
         for r in ranges:
             if r["range_type"] == "NUMERIC":
@@ -3458,25 +4612,29 @@ class SqliteDatabase:
                 if labels is None:
                     labels = [str(sz) for sz in range(r["start"], r["end"] + 1)]
                 for sz in labels:
-                    out.append(self._size_row(school, item_type, color, str(sz)))
+                    _add_size(str(sz))
 
             elif r["range_type"] == "ALPHA":
                 for sz in r["alpha_set"]:
-                    out.append(self._size_row(school, item_type, color, sz))
+                    _add_size(sz)
 
-        if out:
-            return out
-
-        seen = set()
         try:
             rows = self.current_inventory({"school": school, "item_type": item_type, "color": color})
         except Exception:
             rows = []
         for row in rows:
-            sz = str(row.get("size") or "").strip()
-            if sz and sz not in seen:
-                seen.add(sz)
-                out.append(self._size_row(school, item_type, color, sz))
+            _add_size(row.get("size"))
+
+        def _sort_size_row(row: Dict[str, Any]):
+            sz = _normalize_size_label(row.get("size"))
+            if sz.isdigit():
+                return (0, int(sz), "")
+            up = sz.upper()
+            if up in ALPHA_SIZES:
+                return (1, ALPHA_SIZES.index(up), "")
+            return (2, 9999, sz.casefold())
+
+        out.sort(key=_sort_size_row)
         return out
 
     def last_price_for_specs(
@@ -3680,12 +4838,12 @@ class SqliteDatabase:
                 except sqlite3.OperationalError:
                     pass
 
-    def get_distinct_filtered(self, target: str, constraints: Dict[str, Any]) -> List[str]:
+    def get_distinct_filtered(self, target: str, constraints: Dict[str, Any], *, available_only: bool = False) -> List[str]:
         valid = {"item_type", "school", "color", "size"}
         if target not in valid:
             return []
 
-        where: List[str] = ["1=1"]
+        where: List[str] = ["count > 0"] if available_only else ["1=1"]
         args: List[Any] = []
 
         def _is_list(x): return isinstance(x, (list, tuple))
@@ -4000,6 +5158,1747 @@ class SqliteDatabase:
         finally:
             cur.close()
 
+    def repair_unsafe_spec_value_rename_damage(self) -> Dict[str, int]:
+        """Undo old broad SPEC_RENAMED value updates using shipment evidence."""
+        fields = ("item_type", "school", "color", "size")
+
+        def _clean(value: Any) -> str:
+            return str(value or "").strip()
+
+        def _key(spec: Dict[str, str]) -> Tuple[str, str, str, str]:
+            return tuple(_clean(spec.get(k)).casefold() for k in fields)
+
+        try:
+            rename_rows = self.conn.execute(
+                """
+                SELECT payload_json
+                  FROM sync_inbox
+                 WHERE event_type='SPEC_RENAMED'
+                   AND payload_json LIKE '%value_renames%'
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return {"rename_events": 0, "candidate_specs": 0, "updated_rows": 0, "deleted_zero_duplicates": 0}
+
+        unsafe_renames: List[Dict[str, str]] = []
+        protected_specs: Set[Tuple[str, str, str, str]] = set()
+        for row in rename_rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except Exception:
+                continue
+            if bool(payload.get("allow_global_value_renames")):
+                continue
+            old_raw = payload.get("old_spec") or {}
+            new_raw = payload.get("new_spec") or {}
+            old_spec = {k: _clean(old_raw.get(k)) for k in fields}
+            new_spec = {k: _clean(new_raw.get(k)) for k in fields}
+            if all(old_spec.values()) and all(new_spec.values()):
+                protected_specs.add(_key(old_spec))
+            renames = payload.get("value_renames") or []
+            if not isinstance(renames, list):
+                continue
+            for raw in renames:
+                if not isinstance(raw, dict):
+                    continue
+                field = _clean(raw.get("field"))
+                old_value = _clean(raw.get("old_value"))
+                new_value = _clean(raw.get("new_value"))
+                if field in fields and old_value and new_value and old_value != new_value:
+                    unsafe_renames.append({
+                        "field": field,
+                        "old_value": old_value,
+                        "new_value": new_value,
+                    })
+
+        if not unsafe_renames:
+            return {"rename_events": 0, "candidate_specs": 0, "updated_rows": 0, "deleted_zero_duplicates": 0}
+
+        try:
+            shipment_rows = self.conn.execute(
+                "SELECT payload_json FROM sync_inbox WHERE event_type='STOCK_TRANSFER_OUT'"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            shipment_rows = []
+
+        candidates: Dict[Tuple[str, str, str, str, str, str, str], Dict[str, str]] = {}
+        for row in shipment_rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except Exception:
+                continue
+            for item in payload.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    qty = int(float(item.get("qty") or 0))
+                except (TypeError, ValueError):
+                    qty = 0
+                if qty <= 0:
+                    continue
+                shipped = {k: _clean(item.get(k)) for k in fields}
+                if not all(shipped.values()) or _key(shipped) in protected_specs:
+                    continue
+                for rename in unsafe_renames:
+                    field = rename["field"]
+                    if shipped[field].casefold() != rename["old_value"].casefold():
+                        continue
+                    corrupt = dict(shipped)
+                    corrupt[field] = rename["new_value"]
+                    key = (field, rename["old_value"].casefold(), rename["new_value"].casefold(), *_key(shipped))
+                    candidates[key] = {
+                        **shipped,
+                        "corrupt_item_type": corrupt["item_type"],
+                        "corrupt_school": corrupt["school"],
+                        "corrupt_color": corrupt["color"],
+                        "corrupt_size": corrupt["size"],
+                    }
+
+        updated_total = 0
+        deleted_zero = 0
+        if candidates:
+            with self.conn:
+                for candidate in candidates.values():
+                    src_args = (
+                        candidate["corrupt_item_type"],
+                        candidate["corrupt_school"],
+                        candidate["corrupt_color"],
+                        candidate["corrupt_size"],
+                    )
+                    exists = self.conn.execute(
+                        """
+                        SELECT 1
+                          FROM stocks
+                         WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                           AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                           AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                           AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+                         LIMIT 1
+                        """,
+                        src_args,
+                    ).fetchone()
+                    if exists is None:
+                        continue
+                    dst_values = (
+                        candidate["item_type"],
+                        candidate["school"],
+                        candidate["color"],
+                        candidate["size"],
+                    )
+                    for table in (
+                        "stocks",
+                        "movements",
+                        "bill_items",
+                        "reservations",
+                        "reservation_alerts",
+                        "incoming_shipment_items_pending",
+                        "branch_catalog_definitions",
+                        "stock_audit_report_lines",
+                        "size_profiles",
+                    ):
+                        try:
+                            cur = self.conn.execute(
+                                f"""
+                                UPDATE {table}
+                                   SET item_type = ?, school = ?, color = ?, size = ?
+                                 WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                                   AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                                   AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                                   AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+                                """,
+                                (*dst_values, *src_args),
+                            )
+                            updated_total += int(cur.rowcount or 0)
+                        except sqlite3.OperationalError:
+                            continue
+                try:
+                    cur = self.conn.execute(
+                        """
+                        DELETE FROM stocks
+                         WHERE COALESCE(count, 0) = 0
+                           AND EXISTS (
+                                SELECT 1
+                                  FROM stocks AS s2
+                                 WHERE s2.id <> stocks.id
+                                   AND LOWER(TRIM(s2.item_type)) = LOWER(TRIM(stocks.item_type))
+                                   AND LOWER(TRIM(s2.school)) = LOWER(TRIM(stocks.school))
+                                   AND LOWER(TRIM(s2.color)) = LOWER(TRIM(stocks.color))
+                                   AND LOWER(TRIM(s2.size)) = LOWER(TRIM(stocks.size))
+                                   AND COALESCE(s2.count, 0) > 0
+                           )
+                        """
+                    )
+                    deleted_zero = int(cur.rowcount or 0)
+                except sqlite3.OperationalError:
+                    deleted_zero = 0
+                for candidate in candidates.values():
+                    for field in fields:
+                        self.conn.execute(
+                            "INSERT OR IGNORE INTO spec_history(field, value) VALUES (?, ?)",
+                            (field, candidate[field]),
+                        )
+
+        result = {
+            "rename_events": len(unsafe_renames),
+            "candidate_specs": len(candidates),
+            "updated_rows": int(updated_total),
+            "deleted_zero_duplicates": int(deleted_zero),
+        }
+        if updated_total or deleted_zero:
+            self._audit("unsafe_spec_value_rename_repair", result)
+        return result
+
+    def _upsert_branch_catalog_definition_compat(
+        self,
+        item_type: str,
+        school: str,
+        color: str,
+        size: str,
+        unit_price: float,
+        source_event_uuid: str,
+        note: str,
+    ) -> None:
+        now = now_iso()
+        cur = self.conn.execute(
+            """
+            UPDATE branch_catalog_definitions
+               SET unit_price = ?,
+                   source_event_uuid = ?,
+                   note = ?,
+                   created_at = ?
+             WHERE item_type = ?
+               AND school = ?
+               AND color = ?
+               AND size = ?
+            """,
+            (
+                float(unit_price or 0),
+                str(source_event_uuid or ""),
+                str(note or ""),
+                now,
+                item_type,
+                school,
+                color,
+                size,
+            ),
+        )
+        if int(cur.rowcount or 0) == 0:
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO branch_catalog_definitions
+                    (item_type, school, color, size, unit_price, source_event_uuid, note, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item_type,
+                    school,
+                    color,
+                    size,
+                    float(unit_price or 0),
+                    str(source_event_uuid or ""),
+                    str(note or ""),
+                    now,
+                ),
+            )
+
+    def repair_missing_branch_reclassification_counts(self) -> Dict[str, int]:
+        """Restore quantities for branch reclassification events that never landed.
+
+        Older runs could mark a branch-owned target spec while the quantity move
+        itself failed or was later removed. The event UUID in the movement note is
+        the idempotency anchor used by the sync applier, so this repair only adds
+        count when no RECLASS_IN movement exists for that exact event.
+        """
+        fields = ("item_type", "school", "color", "size")
+
+        def _clean(value: Any) -> str:
+            return str(value or "").strip()
+
+        def _complete_spec(raw: Any) -> Optional[Dict[str, str]]:
+            if not isinstance(raw, dict):
+                return None
+            spec = {field: _clean(raw.get(field)) for field in fields}
+            return spec if all(spec.values()) else None
+
+        def _stock_sum(spec: Dict[str, str]) -> int:
+            row = self.conn.execute(
+                """
+                SELECT COALESCE(SUM(count), 0) AS qty
+                  FROM stocks
+                 WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+                """,
+                (spec["item_type"], spec["school"], spec["color"], spec["size"]),
+            ).fetchone()
+            return int((row["qty"] if row else 0) or 0)
+
+        def _add_stock(spec: Dict[str, str], qty: int, unit_price: float, note: str) -> int:
+            row = self.conn.execute(
+                """
+                SELECT id
+                  FROM stocks
+                 WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+                   AND ABS(COALESCE(unit_price, 0) - ?) < 0.001
+                 ORDER BY id ASC
+                 LIMIT 1
+                """,
+                (spec["item_type"], spec["school"], spec["color"], spec["size"], float(unit_price)),
+            ).fetchone()
+            if row:
+                stock_id = int(row["id"])
+                self.conn.execute(
+                    "UPDATE stocks SET count = COALESCE(count, 0) + ?, unit_price = ? WHERE id = ?",
+                    (int(qty), float(unit_price), stock_id),
+                )
+            else:
+                cur = self.conn.execute(
+                    """
+                    INSERT INTO stocks(item_type, school, color, size, unit_price, count)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        spec["item_type"],
+                        spec["school"],
+                        spec["color"],
+                        spec["size"],
+                        float(unit_price),
+                        int(qty),
+                    ),
+                )
+                stock_id = int(cur.lastrowid)
+            self.conn.execute(
+                """
+                INSERT INTO movements
+                    (ts, direction, stock_id, qty, note, bill_id,
+                     item_type, school, color, size, unit_price)
+                VALUES (?, 'RECLASS_IN', ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now_iso(),
+                    stock_id,
+                    int(qty),
+                    note,
+                    spec["item_type"],
+                    spec["school"],
+                    spec["color"],
+                    spec["size"],
+                    float(unit_price),
+                ),
+            )
+            return stock_id
+
+        try:
+            rows = self.conn.execute(
+                """
+                SELECT event_uuid, payload_json
+                  FROM sync_inbox
+                 WHERE event_type = 'BRANCH_STOCK_RECLASSIFIED'
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return {"events_checked": 0, "events_repaired": 0, "qty_restored": 0, "already_applied": 0}
+
+        events_checked = 0
+        events_repaired = 0
+        qty_restored = 0
+        already_applied = 0
+        skipped_source_present = 0
+        with self.conn:
+            for row in rows:
+                event_uuid = _clean(row["event_uuid"])
+                if not event_uuid:
+                    continue
+                events_checked += 1
+                if self.conn.execute(
+                    """
+                    SELECT 1
+                      FROM movements
+                     WHERE direction = 'RECLASS_IN'
+                       AND note LIKE ?
+                     LIMIT 1
+                    """,
+                    ("%" + event_uuid + "%",),
+                ).fetchone():
+                    already_applied += 1
+                    continue
+                try:
+                    payload = json.loads(row["payload_json"] or "{}")
+                except Exception:
+                    continue
+                from_spec = _complete_spec(payload.get("from_spec"))
+                to_spec = _complete_spec(payload.get("to_spec"))
+                if from_spec is None or to_spec is None:
+                    continue
+                try:
+                    qty = int(payload.get("qty") or 0)
+                except (TypeError, ValueError):
+                    qty = 0
+                if qty <= 0:
+                    continue
+                # If the source stock is still present, the normal sync applier
+                # should handle the real move so we do not create duplicates.
+                if _stock_sum(from_spec) >= qty:
+                    skipped_source_present += 1
+                    continue
+                try:
+                    unit_price = float((payload.get("to_spec") or {}).get("unit_price") or (payload.get("from_spec") or {}).get("unit_price") or 0)
+                except (TypeError, ValueError):
+                    unit_price = 0.0
+                note = f"{_clean(payload.get('note')) or 'Branch stock reclassification repair'} #{event_uuid}"
+                _add_stock(to_spec, qty, unit_price, note)
+                self._upsert_branch_catalog_definition_compat(
+                    to_spec["item_type"],
+                    to_spec["school"],
+                    to_spec["color"],
+                    to_spec["size"],
+                    float(unit_price),
+                    event_uuid,
+                    "Branch stock reclassification",
+                )
+                for field in fields:
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO spec_history(field, value) VALUES (?, ?)",
+                        (field, to_spec[field]),
+                    )
+                events_repaired += 1
+                qty_restored += int(qty)
+
+        result = {
+            "events_checked": int(events_checked),
+            "events_repaired": int(events_repaired),
+            "qty_restored": int(qty_restored),
+            "already_applied": int(already_applied),
+            "skipped_source_present": int(skipped_source_present),
+        }
+        if events_repaired:
+            self._audit("branch_reclassification_count_repair", result)
+        return result
+
+    def repair_branch_group_general_school_counts_from_snapshots(self) -> Dict[str, int]:
+        """Restore branch-group counts lost during عام school splitting.
+
+        Some older warehouse corrections renamed branch rows with SPEC_RENAMED
+        events instead of quantity reclassification events. That could leave the
+        POS with catalog/price rows under the new branch-group school but with
+        part of the previous quantity silently gone. Local POS stock snapshots
+        are the safest source for this one-time recovery.
+        """
+        fields = ("item_type", "school", "color", "size")
+        source_school = GENERAL_SHARED_SCHOOL_NAME
+        device = (self._current_device_name() or "").strip()
+        target_school = BRANCH_GENERAL_SCHOOL_TARGET_BY_DEVICE.get(device)
+        if not target_school:
+            return {
+                "skipped": 1,
+                "reason": "branch_not_mapped",
+                "device": device,
+                "qty_restored": 0,
+            }
+
+        def _clean(value: Any) -> str:
+            return str(value or "").strip()
+
+        def _qty_from(raw: Dict[str, Any]) -> int:
+            for key in ("count", "qty", "quantity"):
+                try:
+                    return int(raw.get(key) or 0)
+                except Exception:
+                    continue
+            return 0
+
+        def _price_from(raw: Dict[str, Any]) -> float:
+            for key in ("unit_price", "price"):
+                try:
+                    return float(raw.get(key) or 0)
+                except Exception:
+                    continue
+            return 0.0
+
+        def _mapped_key(raw: Dict[str, Any]) -> Optional[Tuple[str, str, str, str]]:
+            item_type = _clean(raw.get("item_type"))
+            school = _clean(raw.get("school"))
+            color = _clean(raw.get("color"))
+            size = _normalize_size_label(_strip_digit_marks(raw.get("size")))
+            if not (item_type and school and color and size):
+                return None
+            if school not in (source_school, target_school):
+                return None
+            return (item_type, target_school, color, size)
+
+        def _add_stock(key: Tuple[str, str, str, str], qty: int, unit_price: float, note: str) -> int:
+            item_type, school, color, size = key
+            row = self.conn.execute(
+                """
+                SELECT id
+                  FROM stocks
+                 WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+                   AND ABS(COALESCE(unit_price, 0) - ?) < 0.001
+                 ORDER BY id ASC
+                 LIMIT 1
+                """,
+                (item_type, school, color, size, float(unit_price)),
+            ).fetchone()
+            if row:
+                stock_id = int(row["id"])
+                self.conn.execute(
+                    "UPDATE stocks SET count = COALESCE(count, 0) + ?, unit_price = ? WHERE id = ?",
+                    (int(qty), float(unit_price), stock_id),
+                )
+            else:
+                cur = self.conn.execute(
+                    """
+                    INSERT INTO stocks(item_type, school, color, size, unit_price, count)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (item_type, school, color, size, float(unit_price), int(qty)),
+                )
+                stock_id = int(cur.lastrowid)
+            self.conn.execute(
+                """
+                INSERT INTO movements
+                    (ts, direction, stock_id, qty, note, bill_id,
+                     item_type, school, color, size, unit_price)
+                VALUES (?, 'ADJUST_IN', ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+                """,
+                (now_iso(), stock_id, int(qty), note, item_type, school, color, size, float(unit_price)),
+            )
+            return stock_id
+
+        def _current_group_counts() -> Dict[Tuple[str, str, str, str], int]:
+            counts: Dict[Tuple[str, str, str, str], int] = {}
+            rows = self.conn.execute(
+                """
+                SELECT item_type, school, color, size, unit_price, COALESCE(SUM(count), 0) AS qty
+                  FROM stocks
+                 WHERE school IN (?, ?)
+                 GROUP BY item_type, school, color, size, unit_price
+                """,
+                (source_school, target_school),
+            ).fetchall()
+            for row in rows:
+                key = _mapped_key(dict(row))
+                if key is not None:
+                    counts[key] = counts.get(key, 0) + int(row["qty"] or 0)
+            return counts
+
+        try:
+            snapshot_rows = self.conn.execute(
+                """
+                SELECT local_seq, created_at, payload_json
+                 FROM sync_outbox
+                 WHERE event_type = 'POS_STOCK_SNAPSHOT'
+                 ORDER BY local_seq DESC
+                 LIMIT 150
+                """
+            ).fetchall()
+        except (sqlite3.OperationalError, sqlite3.DatabaseError):
+            return {"skipped": 1, "reason": "no_sync_outbox", "device": device, "qty_restored": 0}
+
+        current_counts = _current_group_counts()
+        current_total = sum(max(0, qty) for qty in current_counts.values())
+        best_snapshot: Optional[Dict[str, Any]] = None
+        for row in snapshot_rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except Exception:
+                continue
+            rows = payload.get("rows") or payload.get("items") or payload.get("stocks") or []
+            if not isinstance(rows, list):
+                continue
+            counts: Dict[Tuple[str, str, str, str], int] = {}
+            prices: Dict[Tuple[str, str, str, str], float] = {}
+            total = 0
+            for raw in rows:
+                if not isinstance(raw, dict):
+                    continue
+                key = _mapped_key(raw)
+                if key is None:
+                    continue
+                qty = _qty_from(raw)
+                if qty <= 0:
+                    continue
+                counts[key] = counts.get(key, 0) + qty
+                if key not in prices or prices[key] <= 0:
+                    prices[key] = _price_from(raw)
+                total += qty
+            if total > current_total:
+                best_snapshot = {
+                    "local_seq": int(row["local_seq"] or 0),
+                    "created_at": _clean(row["created_at"]) or _clean(payload.get("snapshot_at")),
+                    "counts": counts,
+                    "prices": prices,
+                    "total": total,
+                }
+                break
+
+        if not best_snapshot:
+            cleanup = {
+                "wrong_zero_stock_rows": 0,
+                "wrong_zero_catalog_rows": 0,
+                "cleanup": "manual_delete_definition_only",
+            }
+            return {
+                "device": device,
+                "source_school": source_school,
+                "target_school": target_school,
+                "snapshot_seq": 0,
+                "qty_restored": 0,
+                "rows_restored": 0,
+                "current_total": int(current_total),
+                "snapshot_total": 0,
+                **cleanup,
+            }
+
+        expected_counts = dict(best_snapshot["counts"])
+        expected_prices = dict(best_snapshot.get("prices") or {})
+        snapshot_at = _clean(best_snapshot.get("created_at"))
+        plus_dirs = {"IN", "RETURN_IN", "ADJUST_IN", "RECLASS_IN", "TRANSFER_IN"}
+        minus_dirs = {"OUT", "ADJUST_OUT", "RECLASS_OUT", "TRANSFER_OUT", "OUT_FACTORY"}
+        if snapshot_at:
+            movement_rows = self.conn.execute(
+                """
+                SELECT direction, item_type, school, color, size, unit_price, qty, note
+                  FROM movements
+                  WHERE school IN (?, ?)
+                    AND REPLACE(ts, 'T', ' ') > ?
+                 ORDER BY ts ASC, id ASC
+                """,
+                (source_school, target_school, snapshot_at),
+            ).fetchall()
+            for row in movement_rows:
+                direction = _clean(row["direction"]).upper()
+                note_text = _clean(row["note"]).casefold()
+                if "branch group school snapshot repair" in note_text:
+                    continue
+                if direction not in plus_dirs and direction not in minus_dirs:
+                    continue
+                key = _mapped_key(dict(row))
+                if key is None:
+                    continue
+                qty = abs(int(row["qty"] or 0))
+                if key not in expected_prices or expected_prices[key] <= 0:
+                    expected_prices[key] = _price_from(dict(row))
+                if direction in plus_dirs:
+                    expected_counts[key] = expected_counts.get(key, 0) + qty
+                else:
+                    expected_counts[key] = expected_counts.get(key, 0) - qty
+
+        restored_qty = 0
+        restored_rows = 0
+        cleanup = {"wrong_zero_stock_rows": 0, "wrong_zero_catalog_rows": 0}
+        with self.conn:
+            current_counts = _current_group_counts()
+            note = (
+                f"Branch group school snapshot repair {source_school} -> {target_school} "
+                f"snapshot_seq={best_snapshot['local_seq']}"
+            )
+            for key, expected_qty in expected_counts.items():
+                expected_qty = int(expected_qty or 0)
+                if expected_qty <= 0:
+                    continue
+                current_qty = int(current_counts.get(key, 0) or 0)
+                missing = expected_qty - current_qty
+                if missing <= 0:
+                    continue
+                unit_price = float(expected_prices.get(key) or 0)
+                _add_stock(key, missing, unit_price, note)
+                item_type, school, color, size = key
+                self._upsert_branch_catalog_definition_compat(
+                    item_type,
+                    school,
+                    color,
+                    size,
+                    float(unit_price),
+                    f"snapshot-repair-{best_snapshot['local_seq']}",
+                    "Branch group school snapshot repair",
+                )
+                for field, value in zip(fields, (item_type, school, color, size)):
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO spec_history(field, value) VALUES (?, ?)",
+                        (field, value),
+                    )
+                restored_qty += missing
+                restored_rows += 1
+            cleanup = {
+                "wrong_zero_stock_rows": 0,
+                "wrong_zero_catalog_rows": 0,
+                "cleanup": "manual_delete_definition_only",
+            }
+
+        result = {
+            "device": device,
+            "source_school": source_school,
+            "target_school": target_school,
+            "snapshot_seq": int(best_snapshot["local_seq"]),
+            "snapshot_total": int(best_snapshot["total"]),
+            "current_total": int(current_total),
+            "qty_restored": int(restored_qty),
+            "rows_restored": int(restored_rows),
+            **cleanup,
+        }
+        if restored_qty or cleanup.get("wrong_zero_stock_rows") or cleanup.get("wrong_zero_catalog_rows"):
+            self._audit("branch_group_general_school_snapshot_repair", result)
+        return result
+
+    def repair_stock_counts_from_snapshots(self) -> Dict[str, int]:
+        """Restore broad count loss from the POS's own stock snapshots.
+
+        This covers failures that are not school-mapping-specific, like a sync
+        repair zeroing whole item groups. It uses the latest materially larger
+        local POS_STOCK_SNAPSHOT, then replays later stock movements so normal
+        sales/returns/reclassification after that snapshot are preserved.
+        """
+        fields = ("item_type", "school", "color", "size")
+
+        def _clean(value: Any) -> str:
+            return _strip_digit_marks(value).strip()
+
+        def _qty_from(raw: Dict[str, Any]) -> int:
+            for key in ("count", "qty", "quantity"):
+                try:
+                    return int(raw.get(key) or 0)
+                except Exception:
+                    continue
+            return 0
+
+        def _price_from(raw: Dict[str, Any]) -> float:
+            for key in ("unit_price", "price"):
+                try:
+                    return float(raw.get(key) or 0)
+                except Exception:
+                    continue
+            return 0.0
+
+        def _key_from(raw: Dict[str, Any]) -> Optional[Tuple[str, str, str, str]]:
+            item_type = _clean(raw.get("item_type"))
+            school = _clean(raw.get("school"))
+            color = _clean(raw.get("color"))
+            size = _normalize_size_label(_strip_digit_marks(raw.get("size")))
+            if not (item_type and school and color and size):
+                return None
+            return (item_type, school, color, size)
+
+        def _local_cutoff(value: Any) -> str:
+            text = str(value or "").strip()
+            if not text:
+                return ""
+            try:
+                raw = text.replace("Z", "")
+                if "T" in raw:
+                    raw = raw.split(".")[0]
+                    dt = datetime.fromisoformat(raw)
+                    # Sync timestamps are UTC; POS movement timestamps are local Cairo time.
+                    return (dt + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
+            return text.replace("T", " ").split(".")[0].replace("Z", "")
+
+        def _current_counts() -> Tuple[Dict[Tuple[str, str, str, str], int], Dict[Tuple[str, str, str, str], float]]:
+            counts: Dict[Tuple[str, str, str, str], int] = {}
+            prices: Dict[Tuple[str, str, str, str], float] = {}
+            rows = self.conn.execute(
+                """
+                SELECT item_type, school, color, size, unit_price, COALESCE(SUM(count), 0) AS qty
+                  FROM stocks
+                 GROUP BY item_type, school, color, size, unit_price
+                """
+            ).fetchall()
+            for row in rows:
+                key = _key_from(dict(row))
+                if key is None:
+                    continue
+                counts[key] = counts.get(key, 0) + int(row["qty"] or 0)
+                if key not in prices or prices[key] <= 0:
+                    prices[key] = float(row["unit_price"] or 0)
+            return counts, prices
+
+        def _add_stock(key: Tuple[str, str, str, str], qty: int, unit_price: float, note: str) -> int:
+            item_type, school, color, size = key
+            row = self.conn.execute(
+                """
+                SELECT id
+                  FROM stocks
+                 WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+                   AND ABS(COALESCE(unit_price, 0) - ?) < 0.001
+                 ORDER BY id ASC
+                 LIMIT 1
+                """,
+                (item_type, school, color, size, float(unit_price)),
+            ).fetchone()
+            if row:
+                stock_id = int(row["id"])
+                self.conn.execute(
+                    "UPDATE stocks SET count = COALESCE(count, 0) + ?, unit_price = ? WHERE id = ?",
+                    (int(qty), float(unit_price), stock_id),
+                )
+            else:
+                cur = self.conn.execute(
+                    """
+                    INSERT INTO stocks(item_type, school, color, size, unit_price, count)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (item_type, school, color, size, float(unit_price), int(qty)),
+                )
+                stock_id = int(cur.lastrowid)
+            self.conn.execute(
+                """
+                INSERT INTO movements
+                    (ts, direction, stock_id, qty, note, bill_id,
+                     item_type, school, color, size, unit_price)
+                VALUES (?, 'ADJUST_IN', ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+                """,
+                (now_iso(), stock_id, int(qty), note, item_type, school, color, size, float(unit_price)),
+            )
+            return stock_id
+
+        try:
+            snapshot_rows = self.conn.execute(
+                """
+                SELECT local_seq, created_at, payload_json
+                  FROM sync_outbox
+                 WHERE event_type = 'POS_STOCK_SNAPSHOT'
+                 ORDER BY local_seq DESC
+                 LIMIT 300
+                """
+            ).fetchall()
+        except (sqlite3.OperationalError, sqlite3.DatabaseError):
+            return {"skipped": 1, "reason": "no_local_stock_snapshots", "qty_restored": 0}
+
+        current_counts, current_prices = _current_counts()
+        current_total = sum(max(0, qty) for qty in current_counts.values())
+        best_snapshot: Optional[Dict[str, Any]] = None
+        for row in snapshot_rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except Exception:
+                continue
+            rows = payload.get("rows") or payload.get("items") or payload.get("stocks") or []
+            if not isinstance(rows, list):
+                continue
+            counts: Dict[Tuple[str, str, str, str], int] = {}
+            prices: Dict[Tuple[str, str, str, str], float] = {}
+            for raw in rows:
+                if not isinstance(raw, dict):
+                    continue
+                key = _key_from(raw)
+                if key is None:
+                    continue
+                qty = _qty_from(raw)
+                if qty <= 0:
+                    continue
+                counts[key] = counts.get(key, 0) + qty
+                if key not in prices or prices[key] <= 0:
+                    prices[key] = _price_from(raw)
+            total = sum(counts.values())
+            if total <= current_total + max(50, int(current_total * 0.05)):
+                continue
+            best_snapshot = {
+                "local_seq": int(row["local_seq"] or 0),
+                "created_at": _clean(payload.get("snapshot_at")) or _clean(row["created_at"]),
+                "counts": counts,
+                "prices": prices,
+                "total": int(total),
+            }
+            break
+
+        if not best_snapshot:
+            return {
+                "skipped": 0,
+                "reason": "no_materially_higher_snapshot",
+                "current_total": int(current_total),
+                "qty_restored": 0,
+            }
+
+        expected_counts = dict(best_snapshot["counts"])
+        expected_prices = dict(best_snapshot["prices"])
+        plus_dirs = {"IN", "RETURN", "RETURN_IN", "ADJUST_IN", "RECLASS_IN", "TRANSFER_IN", "SHIPMENT_RECEIVED"}
+        minus_dirs = {"OUT", "SALE", "RESERVE", "SHIPMENT_CANCEL", "ADJUST_OUT", "RECLASS_OUT", "TRANSFER_OUT", "OUT_FACTORY"}
+        invalid_shipment_cancel_notes: Set[str] = set()
+        try:
+            cancel_rows = self.conn.execute(
+                """
+                SELECT payload_json
+                  FROM sync_inbox
+                 WHERE event_type = 'STOCK_TRANSFER_CANCELLED'
+                """
+            ).fetchall()
+        except (sqlite3.OperationalError, sqlite3.DatabaseError):
+            cancel_rows = []
+        for cancel_row in cancel_rows:
+            try:
+                cancel_payload = json.loads(cancel_row["payload_json"] or "{}")
+            except Exception:
+                continue
+            shipment_uuid = _clean(cancel_payload.get("shipment_uuid") or cancel_payload.get("bill_uuid"))
+            if not shipment_uuid:
+                continue
+            known = self.conn.execute(
+                "SELECT 1 FROM incoming_shipment_items_pending WHERE shipment_uuid = ? LIMIT 1",
+                (shipment_uuid,),
+            ).fetchone()
+            if known is None:
+                cancel_note = _clean(cancel_payload.get("note"))
+                if cancel_note:
+                    invalid_shipment_cancel_notes.add(cancel_note.casefold())
+        cutoff = _local_cutoff(best_snapshot.get("created_at"))
+        movement_rows = []
+        if cutoff:
+            try:
+                movement_rows = self.conn.execute(
+                    """
+                    SELECT direction, item_type, school, color, size, unit_price, qty, note
+                      FROM movements
+                     WHERE REPLACE(ts, 'T', ' ') > ?
+                       AND direction <> 'PRICE_UPDATE'
+                     ORDER BY ts ASC, id ASC
+                    """,
+                    (cutoff,),
+                ).fetchall()
+            except (sqlite3.OperationalError, sqlite3.DatabaseError):
+                movement_rows = []
+        for row in movement_rows:
+            direction = _clean(row["direction"]).upper()
+            note_text = _clean(row["note"]).casefold()
+            if "stock snapshot count repair" in note_text:
+                continue
+            if direction == "SHIPMENT_CANCEL" and note_text in invalid_shipment_cancel_notes:
+                continue
+            if direction not in plus_dirs and direction not in minus_dirs:
+                continue
+            key = _key_from(dict(row))
+            if key is None:
+                continue
+            qty = abs(int(row["qty"] or 0))
+            if key not in expected_prices or expected_prices[key] <= 0:
+                expected_prices[key] = _price_from(dict(row))
+            if direction in plus_dirs:
+                expected_counts[key] = expected_counts.get(key, 0) + qty
+            else:
+                expected_counts[key] = expected_counts.get(key, 0) - qty
+
+        restored_qty = 0
+        restored_rows = 0
+        with self.conn:
+            current_counts, current_prices = _current_counts()
+            note = f"Stock snapshot count repair snapshot_seq={best_snapshot['local_seq']}"
+            for key, expected_qty in expected_counts.items():
+                expected_qty = max(0, int(expected_qty or 0))
+                current_qty = int(current_counts.get(key, 0) or 0)
+                missing = expected_qty - current_qty
+                if missing <= 0:
+                    continue
+                unit_price = float(expected_prices.get(key) or current_prices.get(key) or 0)
+                _add_stock(key, missing, unit_price, note)
+                item_type, school, color, size = key
+                self._upsert_branch_catalog_definition_compat(
+                    item_type,
+                    school,
+                    color,
+                    size,
+                    unit_price,
+                    f"stock-snapshot-repair-{best_snapshot['local_seq']}",
+                    "Stock snapshot count repair",
+                )
+                for field, value in zip(fields, key):
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO spec_history(field, value) VALUES (?, ?)",
+                        (field, value),
+                    )
+                restored_qty += int(missing)
+                restored_rows += 1
+
+        result = {
+            "snapshot_seq": int(best_snapshot["local_seq"]),
+            "snapshot_total": int(best_snapshot["total"]),
+            "current_total_before": int(current_total),
+            "movement_rows_replayed": int(len(movement_rows)),
+            "qty_restored": int(restored_qty),
+            "rows_restored": int(restored_rows),
+        }
+        if restored_qty:
+            self._audit("stock_snapshot_count_repair", result)
+        return result
+
+    def _cleanup_wrong_branch_group_school_rows(self, device: str, target_school: str) -> Dict[str, int]:
+        return {
+            "wrong_zero_stock_rows": 0,
+            "wrong_zero_catalog_rows": 0,
+            "cleanup": "manual_delete_definition_only",
+        }
+        wrong_schools = sorted(
+            {
+                school for school in BRANCH_GENERAL_SCHOOL_TARGET_BY_DEVICE.values()
+                if school and school != target_school
+            }
+        )
+        cleanup_schools = list(dict.fromkeys([GENERAL_SHARED_SCHOOL_NAME] + wrong_schools))
+        if not cleanup_schools:
+            return {"wrong_zero_stock_rows": 0, "wrong_zero_catalog_rows": 0}
+        placeholders = ",".join("?" for _ in cleanup_schools)
+        deleted_stocks = 0
+        deleted_catalog = 0
+        try:
+            cur = self.conn.execute(
+                f"DELETE FROM stocks WHERE COALESCE(count, 0) = 0 AND school IN ({placeholders})",
+                cleanup_schools,
+            )
+            deleted_stocks = int(cur.rowcount or 0)
+        except sqlite3.OperationalError:
+            deleted_stocks = 0
+        try:
+            cur = self.conn.execute(
+                f"""
+                DELETE FROM branch_catalog_definitions
+                 WHERE school IN ({placeholders})
+                   AND NOT EXISTS (
+                        SELECT 1 FROM stocks
+                         WHERE stocks.item_type = branch_catalog_definitions.item_type
+                           AND stocks.school = branch_catalog_definitions.school
+                           AND stocks.color = branch_catalog_definitions.color
+                           AND stocks.size = branch_catalog_definitions.size
+                           AND COALESCE(stocks.count, 0) > 0
+                   )
+                """,
+                cleanup_schools,
+            )
+            deleted_catalog = int(cur.rowcount or 0)
+        except sqlite3.OperationalError:
+            deleted_catalog = 0
+        return {
+            "wrong_zero_stock_rows": int(deleted_stocks),
+            "wrong_zero_catalog_rows": int(deleted_catalog),
+        }
+
+    def cleanup_unowned_branch_catalog_rows(self) -> Dict[str, int]:
+        """Remove catalog-only rows that this POS branch never received or owned.
+
+        A branch owns a spec only when it has a warehouse bill shipment
+        trail, a pending/confirmed shipment row, or the warehouse explicitly
+        sent it as a reservation definition recorded in
+        branch_catalog_definitions. Current stock quantity alone is not proof
+        of branch ownership, because a bad catalog/branch sync can create
+        positive rows for the wrong branch.
+
+        Counts are deliberately not rebuilt from shipment quantities here.
+        Shipments and reservation definitions decide visibility/ownership;
+        POS sales, returns, audits, and stock movements decide current count.
+        """
+        return {
+            "skipped": 1,
+            "reason": "automatic_cleanup_disabled",
+            "manual_cleanup": "use warehouse delete-definition",
+            "stock_rows": 0,
+            "size_profiles": 0,
+            "spec_history": 0,
+            "catalog_definitions": 0,
+            "restored_stock_rows": 0,
+            "hidden_definitions": 0,
+            "price_updates": 0,
+        }
+        def _norm_expr(table_alias: str, column: str) -> str:
+            return f"LOWER(TRIM(COALESCE({table_alias}.{column}, '')))"
+
+        try:
+            with self.conn:
+                def _complete_spec_from(raw: Dict[str, Any]) -> Optional[Dict[str, str]]:
+                    spec = {
+                        "item_type": str(raw.get("item_type") or "").strip(),
+                        "school": str(raw.get("school") or "").strip(),
+                        "color": str(raw.get("color") or "").strip(),
+                        "size": str(raw.get("size") or "").strip(),
+                    }
+                    return spec if all(spec.values()) else None
+
+                def _load_rename_history() -> List[Tuple[Dict[str, str], Dict[str, str], List[Dict[str, str]]]]:
+                    try:
+                        rows = self.conn.execute(
+                            """
+                            SELECT payload_json
+                              FROM sync_inbox
+                             WHERE event_type = 'SPEC_RENAMED'
+                             ORDER BY server_seq ASC
+                            """
+                        ).fetchall()
+                    except sqlite3.OperationalError:
+                        return []
+                    history: List[Tuple[Dict[str, str], Dict[str, str], List[Dict[str, str]]]] = []
+                    for row in rows:
+                        try:
+                            payload = json.loads(row["payload_json"] or "{}")
+                        except Exception:
+                            continue
+                        old_spec_raw = payload.get("old_spec") or {}
+                        new_spec_raw = payload.get("new_spec") or {}
+                        if not isinstance(old_spec_raw, dict) or not isinstance(new_spec_raw, dict):
+                            continue
+                        old_spec = _complete_spec_from(old_spec_raw)
+                        if old_spec is None:
+                            continue
+                        new_spec = {
+                            k: str(new_spec_raw.get(k) or old_spec.get(k) or "").strip()
+                            for k in ("item_type", "school", "color", "size")
+                        }
+                        renames = [
+                            {
+                                "field": str(v.get("field") or "").strip(),
+                                "old_value": str(v.get("old_value") or "").strip(),
+                                "new_value": str(v.get("new_value") or "").strip(),
+                            }
+                            for v in (payload.get("value_renames") or [])
+                            if isinstance(v, dict)
+                        ] if bool(payload.get("allow_global_value_renames")) else []
+                        if old_spec == new_spec and not renames:
+                            continue
+                        history.append((old_spec, new_spec, renames))
+                    return history
+
+                rename_history = _load_rename_history()
+
+                def _apply_local_renames(spec: Dict[str, str]) -> Dict[str, str]:
+                    current = {k: str(spec.get(k) or "").strip() for k in ("item_type", "school", "color", "size")}
+                    for old_spec, new_spec, value_renames in rename_history:
+                        if all(
+                            current.get(k, "").casefold() == str(old_spec.get(k) or "").strip().casefold()
+                            for k in ("item_type", "school", "color", "size")
+                        ):
+                            current = {k: str(new_spec.get(k) or current.get(k) or "").strip() for k in current}
+                        for rename in value_renames:
+                            field = rename.get("field")
+                            if field not in current:
+                                continue
+                            old_value = str(rename.get("old_value") or "").strip()
+                            new_value = str(rename.get("new_value") or "").strip()
+                            if old_value and new_value and current[field].casefold() == old_value.casefold():
+                                current[field] = new_value
+                    return current
+
+                def _spec_key(spec: Dict[str, str]) -> Tuple[str, str, str, str]:
+                    return tuple(str(spec[k] or "").strip().casefold() for k in ("item_type", "school", "color", "size"))  # type: ignore[return-value]
+
+                def _load_delete_filters() -> List[Dict[str, str]]:
+                    try:
+                        self.conn.execute(
+                            """
+                            CREATE TABLE IF NOT EXISTS branch_catalog_delete_tombstones(
+                                item_type TEXT,
+                                school TEXT,
+                                color TEXT,
+                                size TEXT,
+                                delete_server_seq INTEGER,
+                                source_event_uuid TEXT,
+                                note TEXT,
+                                created_at TEXT NOT NULL
+                            )
+                            """
+                        )
+                        try:
+                            cols = {
+                                str(row["name"])
+                                for row in self.conn.execute("PRAGMA table_info(branch_catalog_delete_tombstones)").fetchall()
+                            }
+                            if "delete_server_seq" not in cols:
+                                self.conn.execute("ALTER TABLE branch_catalog_delete_tombstones ADD COLUMN delete_server_seq INTEGER")
+                        except sqlite3.OperationalError:
+                            pass
+                        rows = self.conn.execute(
+                            "SELECT item_type, school, color, size, delete_server_seq FROM branch_catalog_delete_tombstones"
+                        ).fetchall()
+                    except sqlite3.OperationalError:
+                        return []
+                    out = []
+                    for row in rows:
+                        filt = {
+                            "item_type": str(row["item_type"] or "").strip(),
+                            "school": str(row["school"] or "").strip(),
+                            "color": str(row["color"] or "").strip(),
+                            "size": str(row["size"] or "").strip(),
+                        }
+                        try:
+                            filt["delete_server_seq"] = int(row["delete_server_seq"]) if row["delete_server_seq"] is not None else None  # type: ignore[assignment]
+                        except (TypeError, ValueError):
+                            filt["delete_server_seq"] = None  # type: ignore[assignment]
+                        out.append(filt)
+                    return out
+
+                delete_filters = _load_delete_filters()
+
+                def _deleted_by_filter(spec: Dict[str, str], event_seq: Optional[int] = None) -> bool:
+                    for filt in delete_filters:
+                        delete_seq = filt.get("delete_server_seq")
+                        if isinstance(delete_seq, int) and event_seq is not None and event_seq > delete_seq:
+                            continue
+                        if isinstance(delete_seq, int) and event_seq is None:
+                            continue
+                        matched = True
+                        for field in ("item_type", "school", "color", "size"):
+                            value = str(filt.get(field) or "").strip()
+                            if value and value.casefold() != str(spec.get(field) or "").strip().casefold():
+                                matched = False
+                                break
+                        if matched:
+                            return True
+                    return False
+
+                price_overrides: Dict[Tuple[str, str, str, str], float] = {}
+                try:
+                    price_rows = self.conn.execute(
+                        """
+                        SELECT payload_json
+                          FROM sync_inbox
+                         WHERE event_type = 'PRICE_UPDATE'
+                         ORDER BY server_seq ASC
+                        """
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    price_rows = []
+                for price_row in price_rows:
+                    try:
+                        payload = json.loads(price_row["payload_json"] or "{}")
+                    except Exception:
+                        continue
+                    raw_filters = payload.get("filters") or {}
+                    if not isinstance(raw_filters, dict):
+                        continue
+                    spec = _complete_spec_from(raw_filters)
+                    if spec is None:
+                        continue
+                    try:
+                        new_price = float(payload.get("new_price"))
+                    except (TypeError, ValueError):
+                        continue
+                    if new_price < 0:
+                        continue
+                    price_overrides[_spec_key(spec)] = new_price
+                    price_overrides[_spec_key(_apply_local_renames(spec))] = new_price
+
+                self.conn.executescript(
+                    """
+                    DROP TABLE IF EXISTS temp._owned_branch_specs;
+                    CREATE TEMP TABLE _owned_branch_specs(
+                        item_type TEXT NOT NULL,
+                        school TEXT NOT NULL,
+                        color TEXT NOT NULL,
+                        size TEXT NOT NULL,
+                        PRIMARY KEY(item_type, school, color, size)
+                    );
+                    DROP TABLE IF EXISTS temp._owned_branch_values;
+                    CREATE TEMP TABLE _owned_branch_values(
+                        field TEXT NOT NULL,
+                        value TEXT NOT NULL,
+                        PRIMARY KEY(field, value)
+                    );
+                    """
+                )
+
+                restored_stock_rows = 0
+                price_updates = 0
+                positive_stock_preserved = self.conn.execute(
+                    """
+                    INSERT OR IGNORE INTO _owned_branch_specs(item_type, school, color, size)
+                    SELECT LOWER(TRIM(COALESCE(item_type, ''))),
+                           LOWER(TRIM(COALESCE(school, ''))),
+                           LOWER(TRIM(COALESCE(color, ''))),
+                           LOWER(TRIM(COALESCE(size, '')))
+                      FROM stocks
+                     WHERE COALESCE(count, 0) > 0
+                       AND COALESCE(TRIM(item_type), '') <> ''
+                       AND COALESCE(TRIM(school), '') <> ''
+                       AND COALESCE(TRIM(color), '') <> ''
+                       AND COALESCE(TRIM(size), '') <> ''
+                    """
+                ).rowcount
+                audit_specs_preserved = 0
+                try:
+                    audit_specs_preserved = int(self.conn.execute(
+                        """
+                        INSERT OR IGNORE INTO _owned_branch_specs(item_type, school, color, size)
+                        SELECT LOWER(TRIM(COALESCE(item_type, ''))),
+                               LOWER(TRIM(COALESCE(school, ''))),
+                               LOWER(TRIM(COALESCE(color, ''))),
+                               LOWER(TRIM(COALESCE(size, '')))
+                          FROM stock_audit_report_lines
+                         WHERE COALESCE(TRIM(item_type), '') <> ''
+                           AND COALESCE(TRIM(school), '') <> ''
+                           AND COALESCE(TRIM(color), '') <> ''
+                           AND COALESCE(TRIM(size), '') <> ''
+                        """
+                    ).rowcount or 0)
+                except sqlite3.OperationalError:
+                    audit_specs_preserved = 0
+
+                deleted_definitions = self.conn.execute(
+                    """
+                    DELETE FROM branch_catalog_definitions
+                     WHERE LOWER(COALESCE(note, '')) NOT LIKE '%reservation%'
+                       AND COALESCE(note, '') NOT LIKE '%حجز%'
+                       AND LOWER(COALESCE(note, '')) NOT LIKE '%reclassification%'
+                       AND NOT EXISTS (
+                            SELECT 1 FROM stocks
+                             WHERE LOWER(TRIM(COALESCE(stocks.item_type, ''))) =
+                                   LOWER(TRIM(COALESCE(branch_catalog_definitions.item_type, '')))
+                               AND LOWER(TRIM(COALESCE(stocks.school, ''))) =
+                                   LOWER(TRIM(COALESCE(branch_catalog_definitions.school, '')))
+                               AND LOWER(TRIM(COALESCE(stocks.color, ''))) =
+                                   LOWER(TRIM(COALESCE(branch_catalog_definitions.color, '')))
+                               AND LOWER(TRIM(COALESCE(stocks.size, ''))) =
+                                   LOWER(TRIM(COALESCE(branch_catalog_definitions.size, '')))
+                               AND COALESCE(stocks.count, 0) > 0
+                       )
+                       AND NOT EXISTS (
+                            SELECT 1 FROM incoming_shipment_items_pending
+                             WHERE LOWER(TRIM(COALESCE(incoming_shipment_items_pending.item_type, ''))) =
+                                   LOWER(TRIM(COALESCE(branch_catalog_definitions.item_type, '')))
+                               AND LOWER(TRIM(COALESCE(incoming_shipment_items_pending.school, ''))) =
+                                   LOWER(TRIM(COALESCE(branch_catalog_definitions.school, '')))
+                               AND LOWER(TRIM(COALESCE(incoming_shipment_items_pending.color, ''))) =
+                                   LOWER(TRIM(COALESCE(branch_catalog_definitions.color, '')))
+                               AND LOWER(TRIM(COALESCE(incoming_shipment_items_pending.size, ''))) =
+                                   LOWER(TRIM(COALESCE(branch_catalog_definitions.size, '')))
+                               AND (COALESCE(expected_qty, 0) > 0 OR COALESCE(received_qty, 0) > 0)
+                               AND UPPER(COALESCE(status, '')) <> 'CANCELLED'
+                       )
+                       AND NOT EXISTS (
+                            SELECT 1 FROM stock_audit_report_lines
+                             WHERE LOWER(TRIM(COALESCE(stock_audit_report_lines.item_type, ''))) =
+                                   LOWER(TRIM(COALESCE(branch_catalog_definitions.item_type, '')))
+                               AND LOWER(TRIM(COALESCE(stock_audit_report_lines.school, ''))) =
+                                   LOWER(TRIM(COALESCE(branch_catalog_definitions.school, '')))
+                               AND LOWER(TRIM(COALESCE(stock_audit_report_lines.color, ''))) =
+                                   LOWER(TRIM(COALESCE(branch_catalog_definitions.color, '')))
+                               AND LOWER(TRIM(COALESCE(stock_audit_report_lines.size, ''))) =
+                                   LOWER(TRIM(COALESCE(branch_catalog_definitions.size, '')))
+                       )
+                    """
+                ).rowcount
+
+                def _remember_owned_spec(
+                    spec: Dict[str, str],
+                    unit_price: float,
+                    *,
+                    create_stock_row: bool,
+                    definition_event_uuid: str = "",
+                    definition_note: str = "",
+                    event_seq: Optional[int] = None,
+                ) -> None:
+                    truth_spec = _apply_local_renames(spec)
+                    if not all(truth_spec.values()):
+                        return
+                    if _deleted_by_filter(truth_spec, event_seq):
+                        return
+                    key = _spec_key(truth_spec)
+                    effective_price = float(price_overrides.get(key, unit_price or 0.0))
+                    self.conn.execute(
+                        """
+                        INSERT OR IGNORE INTO _owned_branch_specs(item_type, school, color, size)
+                        VALUES (LOWER(TRIM(?)), LOWER(TRIM(?)), LOWER(TRIM(?)), LOWER(TRIM(?)))
+                        """,
+                        (
+                            truth_spec["item_type"],
+                            truth_spec["school"],
+                            truth_spec["color"],
+                            truth_spec["size"],
+                        ),
+                    )
+                    for field, value in truth_spec.items():
+                        self.conn.execute(
+                            "INSERT OR IGNORE INTO spec_history(field, value) VALUES (?, ?)",
+                            (field, value),
+                        )
+                    if definition_note:
+                        self._upsert_branch_catalog_definition_compat(
+                            truth_spec["item_type"],
+                            truth_spec["school"],
+                            truth_spec["color"],
+                            truth_spec["size"],
+                            effective_price,
+                            definition_event_uuid,
+                            definition_note,
+                        )
+                    if not create_stock_row:
+                        return
+                    existing = self.conn.execute(
+                        """
+                        SELECT id, unit_price
+                          FROM stocks
+                         WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                           AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                           AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                           AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+                         ORDER BY id ASC
+                         LIMIT 1
+                        """,
+                        (
+                            truth_spec["item_type"],
+                            truth_spec["school"],
+                            truth_spec["color"],
+                            truth_spec["size"],
+                        ),
+                    ).fetchone()
+                    nonlocal restored_stock_rows, price_updates
+                    if existing is None:
+                        self.conn.execute(
+                            """
+                            INSERT INTO stocks(item_type, school, color, size, unit_price, count)
+                            VALUES (?, ?, ?, ?, ?, 0)
+                            """,
+                            (
+                                truth_spec["item_type"],
+                                truth_spec["school"],
+                                truth_spec["color"],
+                                truth_spec["size"],
+                                effective_price,
+                            ),
+                        )
+                        restored_stock_rows += 1
+                    elif abs(float(existing["unit_price"] or 0) - effective_price) >= 0.001:
+                        self.conn.execute(
+                            "UPDATE stocks SET unit_price = ? WHERE id = ?",
+                            (effective_price, int(existing["id"])),
+                        )
+                        price_updates += 1
+
+                try:
+                    cancel_rows = self.conn.execute(
+                        """
+                        SELECT payload_json
+                          FROM sync_inbox
+                         WHERE event_type = 'STOCK_TRANSFER_CANCELLED'
+                        """
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    cancel_rows = []
+                cancelled_shipments: Set[str] = set()
+                for cancel_row in cancel_rows:
+                    try:
+                        cancel_payload = json.loads(cancel_row["payload_json"] or "{}")
+                    except Exception:
+                        continue
+                    shipment_uuid = str(cancel_payload.get("shipment_uuid") or cancel_payload.get("bill_uuid") or "").strip()
+                    if shipment_uuid:
+                        cancelled_shipments.add(shipment_uuid.casefold())
+
+                try:
+                    inbox_rows = self.conn.execute(
+                        """
+                        SELECT event_uuid, payload_json, server_seq
+                          FROM sync_inbox
+                         WHERE event_type = 'STOCK_TRANSFER_OUT'
+                        """
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    inbox_rows = []
+                for inbox_row in inbox_rows:
+                    try:
+                        payload = json.loads(inbox_row["payload_json"] or "{}")
+                    except Exception:
+                        continue
+                    shipment_uuid = str(payload.get("shipment_uuid") or "").strip()
+                    if shipment_uuid and shipment_uuid.casefold() in cancelled_shipments:
+                        continue
+                    note_text = str(payload.get("note") or "")
+                    is_reservation_definition = (
+                        "reservation" in note_text.casefold()
+                        or "\u062d\u062c\u0632" in note_text
+                    )
+                    event_uuid = str(inbox_row["event_uuid"] or "")
+                    for item in payload.get("items") or []:
+                        if not isinstance(item, dict):
+                            continue
+                        item_type = str(item.get("item_type") or "").strip()
+                        school = str(item.get("school") or "").strip()
+                        color = str(item.get("color") or "").strip()
+                        size = str(item.get("size") or "").strip()
+                        if not (item_type and school and color and size):
+                            continue
+                        try:
+                            qty = int(float(item.get("qty") or 0))
+                        except (TypeError, ValueError):
+                            qty = 0
+                        catalog_only = bool(item.get("catalog_only"))
+                        owns_spec = qty > 0 or (catalog_only and is_reservation_definition)
+                        if not owns_spec:
+                            continue
+                        try:
+                            unit_price = float(item.get("unit_price") or 0)
+                        except (TypeError, ValueError):
+                            unit_price = 0.0
+                        try:
+                            event_seq = int(inbox_row["server_seq"])
+                        except (TypeError, ValueError):
+                            event_seq = None
+                        _remember_owned_spec(
+                            {
+                                "item_type": item_type,
+                                "school": school,
+                                "color": color,
+                                "size": size,
+                            },
+                            unit_price,
+                            create_stock_row=True,
+                            definition_event_uuid=(event_uuid if catalog_only and is_reservation_definition else ""),
+                            definition_note=(note_text if catalog_only and is_reservation_definition else ""),
+                            event_seq=event_seq,
+                        )
+
+                try:
+                    reclass_rows = self.conn.execute(
+                        """
+                        SELECT event_uuid, payload_json, server_seq
+                          FROM sync_inbox
+                         WHERE event_type = 'BRANCH_STOCK_RECLASSIFIED'
+                        """
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    reclass_rows = []
+                for reclass_row in reclass_rows:
+                    try:
+                        payload = json.loads(reclass_row["payload_json"] or "{}")
+                    except Exception:
+                        continue
+                    try:
+                        event_seq = int(reclass_row["server_seq"])
+                    except (TypeError, ValueError):
+                        event_seq = None
+                    event_uuid = str(reclass_row["event_uuid"] or "")
+                    reclass_specs: List[Dict[str, Any]] = []
+                    to_spec = payload.get("to_spec") or {}
+                    if isinstance(to_spec, dict):
+                        reclass_specs.append(to_spec)
+                    catalog_rows = payload.get("catalog_rows") or []
+                    if isinstance(catalog_rows, list):
+                        reclass_specs.extend([r for r in catalog_rows if isinstance(r, dict)])
+                    for raw_spec in reclass_specs:
+                        spec = _complete_spec_from(raw_spec)
+                        if spec is None:
+                            continue
+                        try:
+                            unit_price = float(raw_spec.get("unit_price") or 0)
+                        except (TypeError, ValueError):
+                            unit_price = 0.0
+                        _remember_owned_spec(
+                            spec,
+                            unit_price,
+                            create_stock_row=True,
+                            definition_event_uuid=event_uuid,
+                            definition_note="Branch stock reclassification",
+                            event_seq=event_seq,
+                        )
+
+                try:
+                    pending_rows = self.conn.execute(
+                        """
+                        SELECT item_type, school, color, size, unit_price
+                         FROM incoming_shipment_items_pending
+                         WHERE (
+                                COALESCE(expected_qty, 0) > 0
+                                OR COALESCE(received_qty, 0) > 0
+                           )
+                           AND UPPER(COALESCE(status, '')) <> 'CANCELLED'
+                        """
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    pending_rows = []
+                for pending in pending_rows:
+                    spec = _complete_spec_from(dict(pending))
+                    if spec is None:
+                        continue
+                    try:
+                        unit_price = float(pending["unit_price"] or 0)
+                    except (TypeError, ValueError):
+                        unit_price = 0.0
+                    _remember_owned_spec(spec, unit_price, create_stock_row=True)
+
+                try:
+                    definition_rows = self.conn.execute(
+                        """
+                        SELECT item_type, school, color, size, unit_price,
+                               source_event_uuid, note
+                          FROM branch_catalog_definitions
+                         WHERE LOWER(COALESCE(note, '')) LIKE '%reservation%'
+                            OR COALESCE(note, '') LIKE '%حجز%'
+                            OR LOWER(COALESCE(note, '')) LIKE '%reclassification%'
+                        """
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    definition_rows = []
+                for definition in definition_rows:
+                    spec = _complete_spec_from(dict(definition))
+                    if spec is None:
+                        continue
+                    try:
+                        unit_price = float(definition["unit_price"] or 0)
+                    except (TypeError, ValueError):
+                        unit_price = 0.0
+                    source_uuid = str(definition["source_event_uuid"] or "").strip()
+                    event_seq = None
+                    if source_uuid:
+                        seq_row = self.conn.execute(
+                            "SELECT server_seq FROM sync_inbox WHERE event_uuid = ? LIMIT 1",
+                            (source_uuid,),
+                        ).fetchone()
+                        try:
+                            event_seq = int(seq_row["server_seq"]) if seq_row else None
+                        except (TypeError, ValueError):
+                            event_seq = None
+                    _remember_owned_spec(
+                        spec,
+                        unit_price,
+                        create_stock_row=True,
+                        definition_event_uuid=source_uuid,
+                        definition_note=str(definition["note"] or ""),
+                        event_seq=event_seq,
+                    )
+
+                spec_sources: List[Tuple[str, str]] = []
+                for table_name, where_sql in spec_sources:
+                    try:
+                        self.conn.execute(
+                            f"""
+                            INSERT OR IGNORE INTO _owned_branch_specs(item_type, school, color, size)
+                            SELECT LOWER(TRIM(COALESCE(item_type, ''))),
+                                   LOWER(TRIM(COALESCE(school, ''))),
+                                   LOWER(TRIM(COALESCE(color, ''))),
+                                   LOWER(TRIM(COALESCE(size, '')))
+                              FROM {table_name}
+                             WHERE {where_sql}
+                               AND COALESCE(TRIM(item_type), '') <> ''
+                               AND COALESCE(TRIM(school), '') <> ''
+                               AND COALESCE(TRIM(color), '') <> ''
+                               AND COALESCE(TRIM(size), '') <> ''
+                            """
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+
+                deleted_stock = self.conn.execute(
+                    """
+                    DELETE FROM stocks
+                     WHERE NOT EXISTS (
+                            SELECT 1 FROM _owned_branch_specs o
+                             WHERE o.item_type = LOWER(TRIM(COALESCE(stocks.item_type, '')))
+                               AND o.school = LOWER(TRIM(COALESCE(stocks.school, '')))
+                               AND o.color = LOWER(TRIM(COALESCE(stocks.color, '')))
+                               AND o.size = LOWER(TRIM(COALESCE(stocks.size, '')))
+                       )
+                       AND COALESCE(count, 0) <= 0
+                    """
+                ).rowcount
+
+                deleted_profiles = self.conn.execute(
+                    """
+                    DELETE FROM size_profiles
+                     WHERE NOT EXISTS (
+                            SELECT 1 FROM _owned_branch_specs o
+                             WHERE o.item_type = LOWER(TRIM(COALESCE(size_profiles.item_type, '')))
+                               AND o.school = LOWER(TRIM(COALESCE(size_profiles.school, '')))
+                               AND o.color = LOWER(TRIM(COALESCE(size_profiles.color, '')))
+                       )
+                       AND NOT EXISTS (
+                            SELECT 1 FROM stocks
+                             WHERE LOWER(TRIM(COALESCE(stocks.item_type, ''))) =
+                                   LOWER(TRIM(COALESCE(size_profiles.item_type, '')))
+                               AND LOWER(TRIM(COALESCE(stocks.school, ''))) =
+                                   LOWER(TRIM(COALESCE(size_profiles.school, '')))
+                               AND LOWER(TRIM(COALESCE(stocks.color, ''))) =
+                                   LOWER(TRIM(COALESCE(size_profiles.color, '')))
+                               AND COALESCE(stocks.count, 0) > 0
+                       )
+                    """
+                ).rowcount
+
+                for field, column in (
+                    ("item_type", "item_type"),
+                    ("school", "school"),
+                    ("color", "color"),
+                    ("size", "size"),
+                ):
+                    self.conn.execute(
+                        f"""
+                        INSERT OR IGNORE INTO _owned_branch_values(field, value)
+                        SELECT ?, {column}
+                          FROM _owned_branch_specs
+                         WHERE COALESCE(TRIM({column}), '') <> ''
+                        """,
+                        (field,),
+                    )
+                    for table_name, where_sql in spec_sources:
+                        try:
+                            self.conn.execute(
+                                f"""
+                                INSERT OR IGNORE INTO _owned_branch_values(field, value)
+                                SELECT ?, LOWER(TRIM(COALESCE({column}, '')))
+                                  FROM {table_name}
+                                 WHERE {where_sql}
+                                   AND COALESCE(TRIM({column}), '') <> ''
+                                """,
+                                (field,),
+                            )
+                        except sqlite3.OperationalError:
+                            pass
+
+                deleted_hidden = self.conn.execute(
+                    """
+                    DELETE FROM hidden_definitions
+                     WHERE EXISTS (
+                            SELECT 1 FROM _owned_branch_values v
+                             WHERE v.field = hidden_definitions.field
+                               AND v.value = LOWER(TRIM(COALESCE(hidden_definitions.value, '')))
+                       )
+                    """
+                ).rowcount
+
+                deleted_history = self.conn.execute(
+                    """
+                    DELETE FROM spec_history
+                     WHERE NOT EXISTS (
+                            SELECT 1 FROM _owned_branch_values v
+                             WHERE v.field = spec_history.field
+                               AND v.value = LOWER(TRIM(COALESCE(spec_history.value, '')))
+                       )
+                    """
+                ).rowcount
+
+                self.conn.executescript(
+                    """
+                    DROP TABLE IF EXISTS temp._owned_branch_specs;
+                    DROP TABLE IF EXISTS temp._owned_branch_values;
+                    """
+                )
+            return {
+                "stock_rows": int(deleted_stock or 0),
+                "size_profiles": int(deleted_profiles or 0),
+                "spec_history": int(deleted_history or 0),
+                "catalog_definitions": int(deleted_definitions or 0),
+                "restored_stock_rows": int(restored_stock_rows or 0),
+                "positive_stock_preserved": int(positive_stock_preserved or 0),
+                "audit_specs_preserved": int(audit_specs_preserved or 0),
+                "hidden_definitions": int(deleted_hidden or 0),
+                "price_updates": int(price_updates or 0),
+            }
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            return {
+                "stock_rows": 0,
+                "size_profiles": 0,
+                "spec_history": 0,
+                "catalog_definitions": 0,
+                "restored_stock_rows": 0,
+                "hidden_definitions": 0,
+                "price_updates": 0,
+            }
+
     def _filters_where(self, filters: Dict[str, Any], prefix: str = "") -> Tuple[str, List[Any]]:
         """Include count = 0 stock rows so schools/items/colors stay visible when out of stock."""
         where: List[str] = ["1=1"]
@@ -4017,7 +6916,13 @@ class SqliteDatabase:
             if v and not isinstance(v, list):
                 v = str(v).strip()
                 if v:
-                    where.append(f"LOWER(TRIM({prefix}{k})) = LOWER(?)")
+                    col = f"{prefix}{k}"
+                    if k == "size":
+                        col = f"TRIM(REPLACE(REPLACE({col}, char(8206), ''), char(8207), ''))"
+                        v = _normalize_size_label(v)
+                    else:
+                        col = f"TRIM({col})"
+                    where.append(f"LOWER({col}) = LOWER(?)")
                     args.append(v)
 
         if multi_keys:
@@ -4025,8 +6930,14 @@ class SqliteDatabase:
             vals = [x for x in (filters.get(mk) or []) if x not in (None, "")]
             if vals:
                 placeholders = ",".join(["?"] * len(vals))
-                where.append(f"LOWER({prefix}{mk}) IN ({placeholders})")
-                args.extend([str(x).strip().lower() for x in vals])
+                col = f"{prefix}{mk}"
+                if mk == "size":
+                    col = f"TRIM(REPLACE(REPLACE({col}, char(8206), ''), char(8207), ''))"
+                    args.extend([_normalize_size_label(str(x).strip()).lower() for x in vals])
+                else:
+                    col = f"TRIM({col})"
+                    args.extend([str(x).strip().lower() for x in vals])
+                where.append(f"LOWER({col}) IN ({placeholders})")
 
         return (" AND ".join(where)) if where else "1=1", args
 
@@ -4054,6 +6965,7 @@ class SqliteDatabase:
     def current_inventory(self, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
         where, args = self._filters_where(filters, prefix="s.")
         having_sql = "HAVING SUM(s.count) > 0" if (filters or {}).get("hide_zero") else ""
+        size_expr = "COALESCE(TRIM(REPLACE(REPLACE(s.size, char(8206), ''), char(8207), '')), '')"
 
         cur = self.conn.cursor()
         cur.execute(
@@ -4063,7 +6975,7 @@ class SqliteDatabase:
                 COALESCE(s.item_type, '') AS item_type,
                 COALESCE(s.school, '')    AS school,
                 COALESCE(s.color, '')     AS color,
-                COALESCE(s.size, '')      AS size,
+                {size_expr}               AS size,
                 COALESCE(s.unit_price, 0) AS unit_price,
                 COALESCE(SUM(COALESCE(s.count, 0)), 0) AS count,
                 COALESCE(SUM(COALESCE(s.count, 0) * COALESCE(s.unit_price, 0)), 0) AS value
@@ -4073,7 +6985,7 @@ class SqliteDatabase:
                 COALESCE(s.item_type, ''),
                 COALESCE(s.school, ''),
                 COALESCE(s.color, ''),
-                COALESCE(s.size, ''),
+                {size_expr},
                 COALESCE(s.unit_price, 0)
             {having_sql}
             ORDER BY
@@ -4082,17 +6994,17 @@ class SqliteDatabase:
                 s.color,
 
                 CASE
-                    WHEN TRIM(s.size) NOT GLOB '*[^0-9]*' THEN 0
+                    WHEN {size_expr} NOT GLOB '*[^0-9]*' THEN 0
                     ELSE 1
                 END,
 
                 CASE
-                    WHEN TRIM(s.size) NOT GLOB '*[^0-9]*'
-                    THEN CAST(s.size AS INTEGER)
+                    WHEN {size_expr} NOT GLOB '*[^0-9]*'
+                    THEN CAST({size_expr} AS INTEGER)
                     ELSE NULL
                 END,
 
-                CASE UPPER(TRIM(s.size))
+                CASE UPPER({size_expr})
                     WHEN 'XXS' THEN 1
                     WHEN 'XS'  THEN 2
                     WHEN 'S'   THEN 3
@@ -4126,6 +7038,43 @@ class SqliteDatabase:
 
         cur.close()
         return rows
+
+    def low_stock_summary(self, *, threshold: int = 5, limit: int = 80) -> Tuple[int, List[Dict[str, Any]]]:
+        threshold = max(1, int(threshold or 5))
+        limit = max(1, int(limit or 80))
+        hidden_sql = " AND ".join(
+            self._hidden_definition_sql(field, f"s.{field}")
+            for field in ("item_type", "school", "color", "size")
+        )
+        base_sql = f"""
+            FROM (
+                SELECT
+                    COALESCE(s.item_type, '') AS item_type,
+                    COALESCE(s.school, '') AS school,
+                    COALESCE(s.color, '') AS color,
+                    COALESCE(s.size, '') AS size,
+                    COALESCE(SUM(COALESCE(s.count, 0)), 0) AS count
+                FROM stocks s
+                WHERE {hidden_sql}
+                GROUP BY
+                    COALESCE(s.item_type, ''),
+                    COALESCE(s.school, ''),
+                    COALESCE(s.color, ''),
+                    COALESCE(s.size, '')
+                HAVING count > 0 AND count <= ?
+            ) low
+        """
+        total_row = self.conn.execute(f"SELECT COUNT(*) AS c {base_sql}", (threshold,)).fetchone()
+        rows = self.conn.execute(
+            f"""
+            SELECT item_type, school, color, size, count
+            {base_sql}
+            ORDER BY count ASC, item_type, school, color, size
+            LIMIT ?
+            """,
+            (threshold, limit),
+        ).fetchall()
+        return int(total_row["c"] if total_row else 0), [dict(r) for r in rows]
 
     # -------- Billing --------
     def create_bill(
@@ -4358,6 +7307,23 @@ class SqliteDatabase:
                     "shift_id": self.active_shift_id,
                 })
 
+            bill_type_row = self.conn.execute(
+                "SELECT COALESCE(bill_type,'SALE') FROM bills WHERE id=?", (bill_id,)
+            ).fetchone()
+            self._audit("sale_created", {
+                "bill_id": bill_id,
+                "bill_uuid": bill_uuid,
+                "bill_type": bill_type_row[0] if bill_type_row else "SALE",
+                "customer": (customer or "").strip() or None,
+                "customer_phone": customer_phone or None,
+                "total": float(total),
+                "payment_method": payment_method,
+                "warehouse_target": warehouse_target,
+                "branch_target": branch_target,
+                "item_count": len(items_payload),
+                "qty_total": sum(int(it.get("qty") or 0) for it in items_payload),
+                "items": items_payload,
+            }, actor="cashier")
             return bill_id
 
     # -------- Return Bill Methods --------
@@ -4448,6 +7414,17 @@ class SqliteDatabase:
                 ],
                 "shift_id": self.active_shift_id,
             })
+            self._audit("return_bill_created", {
+                "bill_id": bill_id,
+                "bill_uuid": bill_uuid_row[0] if bill_uuid_row else None,
+                "customer": (customer or "").strip() or None,
+                "customer_phone": customer_phone or None,
+                "total": float(total),
+                "payment_method": payment_method,
+                "item_count": len(return_lines),
+                "qty_total": sum(int(ln.get("qty") or 0) for ln in return_lines),
+                "lines": return_lines,
+            }, actor="cashier")
             return bill_id
 
     def create_exchange_bill(self, customer: str,
@@ -4608,6 +7585,18 @@ class SqliteDatabase:
                 ],
                 "shift_id": self.active_shift_id,
             })
+            self._audit("exchange_bill_created", {
+                "bill_id": bill_id,
+                "bill_uuid": bill_uuid_row[0] if bill_uuid_row else None,
+                "customer": (customer or "").strip() or None,
+                "customer_phone": customer_phone or None,
+                "return_total": float(return_total),
+                "take_total": float(take_total),
+                "diff": float(diff),
+                "payment_method": payment_method,
+                "return_lines": return_lines,
+                "take_lines": take_lines,
+            }, actor="cashier")
             return bill_id
 
     # -------- New Reservation Methods --------
@@ -4639,7 +7628,7 @@ class SqliteDatabase:
                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (now_iso(), (customer or "").strip(), customer_phone or None, line["item_type"], line["school"],
                      line["color"], line["size"], int(line["qty"]), float(line["unit_price"]),
-                     total, alloc_paid, payment_method, "معلق", line.get("note", ""), group_uuid, self.active_shift_id),
+                     total, alloc_paid, payment_method, RESERVATION_STATUS_PENDING, line.get("note", ""), group_uuid, self.active_shift_id),
                 )
                 created.append(cur.lastrowid)
                 self.conn.execute(
@@ -4686,6 +7675,30 @@ class SqliteDatabase:
                     ],
                     "shift_id": self.active_shift_id,
                 })
+                self._audit("reservation_created", {
+                    "reservation_group_uuid": group_uuid,
+                    "reservation_ids": [int(x) for x in created],
+                    "customer": (customer or "").strip() or None,
+                    "customer_phone": customer_phone or None,
+                    "total": float(sum(line_totals)),
+                    "paid_amount": float(paid_amount or 0.0),
+                    "payment_method": payment_method,
+                    "item_count": len(lines),
+                    "qty_total": sum(int(ln.get("qty") or 0) for ln in lines),
+                    "lines": [
+                        {
+                            "reservation_id": int(rid),
+                            "item_type": ln.get("item_type"),
+                            "school": ln.get("school"),
+                            "color": ln.get("color"),
+                            "size": ln.get("size"),
+                            "qty": int(ln["qty"]),
+                            "unit_price": float(ln["unit_price"]),
+                            "paid_amount": float(paid_allocations[idx] if idx < len(paid_allocations) else 0.0),
+                        }
+                        for idx, (rid, ln) in enumerate(zip(created, lines))
+                    ],
+                }, actor="cashier")
         return created
 
     def get_available_qty_for_reservation(self, item_type: str, school: str, color: str, size: str) -> int:
@@ -4934,7 +7947,27 @@ class SqliteDatabase:
                 },
             )
             self.mark_incoming_shipment_confirmed(ship)
-        return {"shipment_uuid": ship, "has_diff": bool(diffs), "lines": len(rows)}
+        summary = {"shipment_uuid": ship, "has_diff": bool(diffs), "lines": len(rows)}
+        self._audit("incoming_shipment_confirmed", {
+            **summary,
+            "from_device": from_device,
+            "note": (note or "").strip() or None,
+            "lines_detail": [
+                {
+                    "line_index": int(r["line_index"]),
+                    "item_type": r["item_type"],
+                    "school": r["school"],
+                    "color": r["color"],
+                    "size": r["size"],
+                    "unit_price": float(r["unit_price"] or 0.0),
+                    "expected_qty": int(r["expected_qty"] or 0),
+                    "received_qty": int(recv_by_idx.get(int(r["line_index"]), 0)),
+                    "diff_qty": int(recv_by_idx.get(int(r["line_index"]), 0) - int(r["expected_qty"] or 0)),
+                }
+                for r in rows
+            ],
+        }, actor="cashier")
+        return summary
 
     def confirm_grouped_incoming_shipment(
         self,
@@ -4959,8 +7992,6 @@ class SqliteDatabase:
                 if idx not in by_idx:
                     raise ValueError("يوجد بند مجمع غير صالح في التأكيد.")
                 expected_total += int(by_idx[idx].get("expected_qty") or 0)
-            if received_total > expected_total:
-                raise ValueError("الكمية المستلمة للبند المجمع لا يمكن أن تتجاوز الكمية المرسلة.")
 
             remaining = received_total
             for idx in line_indexes:
@@ -4969,6 +8000,8 @@ class SqliteDatabase:
                 payload.append({"line_index": idx, "received_qty": assigned})
                 seen.add(idx)
                 remaining -= assigned
+            if remaining > 0:
+                payload[-1]["received_qty"] = int(payload[-1]["received_qty"]) + int(remaining)
 
         if set(by_idx.keys()) != seen:
             raise ValueError("يجب إدخال الكمية المستلمة لكل بند.")
@@ -4998,6 +8031,74 @@ class SqliteDatabase:
             args.append(color.strip())
         cur = self.conn.execute(
             f"SELECT * FROM reservations WHERE {' AND '.join(where)} ORDER BY id DESC", args)
+        return [dict(r) for r in cur.fetchall()]
+
+    def count_reservations(self, status=None, date_from=None, date_to=None, school=None, item_type=None, color=None) -> int:
+        where = ["1=1"]
+        args = []
+        if status:
+            where.append("status = ?")
+            args.append(status)
+        if date_from:
+            where.append("date(created_at) >= date(?)")
+            args.append(date_from)
+        if date_to:
+            where.append("date(created_at) <= date(?)")
+            args.append(date_to)
+        if school:
+            where.append("LOWER(TRIM(school)) = LOWER(?)")
+            args.append(school.strip())
+        if item_type:
+            where.append("LOWER(TRIM(item_type)) = LOWER(?)")
+            args.append(item_type.strip())
+        if color:
+            where.append("LOWER(TRIM(color)) = LOWER(?)")
+            args.append(color.strip())
+        row = self.conn.execute(
+            f"SELECT COUNT(*) AS c FROM reservations WHERE {' AND '.join(where)}",
+            args,
+        ).fetchone()
+        return int(row["c"] if row else 0)
+
+    def list_reservation_totals(self, status=None, date_from=None, date_to=None, school=None, item_type=None, color=None) -> List[Dict[str, Any]]:
+        where = ["1=1"]
+        args = []
+        if status:
+            where.append("status = ?")
+            args.append(status)
+        if date_from:
+            where.append("date(created_at) >= date(?)")
+            args.append(date_from)
+        if date_to:
+            where.append("date(created_at) <= date(?)")
+            args.append(date_to)
+        if school:
+            where.append("LOWER(TRIM(school)) = LOWER(?)")
+            args.append(str(school).strip())
+        if item_type:
+            where.append("LOWER(TRIM(item_type)) = LOWER(?)")
+            args.append(str(item_type).strip())
+        if color:
+            where.append("LOWER(TRIM(color)) = LOWER(?)")
+            args.append(str(color).strip())
+        cur = self.conn.execute(
+            f"""
+            SELECT TRIM(item_type) AS item_type,
+                   TRIM(school) AS school,
+                   TRIM(color) AS color,
+                   TRIM(size) AS size,
+                   unit_price,
+                   SUM(qty) AS qty,
+                   SUM(total_amount) AS total_amount,
+                   SUM(paid_amount) AS paid_amount,
+                   COUNT(*) AS lines_count
+              FROM reservations
+             WHERE {' AND '.join(where)}
+             GROUP BY TRIM(item_type), TRIM(school), TRIM(color), TRIM(size), unit_price
+             ORDER BY TRIM(school), TRIM(color), TRIM(item_type), TRIM(size), unit_price
+            """,
+            args,
+        )
         return [dict(r) for r in cur.fetchall()]
 
     def list_reservation_group_items(self, reservation_id: int) -> List[Dict[str, Any]]:
@@ -5094,6 +8195,19 @@ class SqliteDatabase:
             "paid_amount":      new_paid_f,
             "payment_method":   payment_method,
         })
+        self._audit("reservation_payment_updated", {
+            "reservation_id": rid,
+            "reservation_uuid": row[0] if row else None,
+            "old_paid_amount": old_paid,
+            "new_paid_amount": new_paid_f,
+            "delta": float(delta),
+            "total_amount": total_amount,
+            "payment_method": payment_method,
+            "item_type": row_prev["item_type"],
+            "school": row_prev["school"],
+            "color": row_prev["color"],
+            "size": row_prev["size"],
+        }, actor="cashier")
 
     def complete_reservation(self, res_id):
         self.deliver_reservation(int(res_id), collected_amount=0.0)
@@ -5107,8 +8221,10 @@ class SqliteDatabase:
         row = cur.fetchone()
         if not row:
             raise ValueError("الحجز غير موجود")
-        if row["status"] == "تم التسليم":
+        if _is_reservation_delivered(row["status"]):
             raise ValueError("تم تسليم هذا الحجز مسبقاً")
+        if _is_reservation_cancelled(row["status"]):
+            raise ValueError("تم إلغاء هذا الحجز.")
         self._ensure_reservation_delivery_stock([row])
         collected = float(collected_amount)
         if collected < -1e-9:
@@ -5124,8 +8240,8 @@ class SqliteDatabase:
                 note=f"Reservation delivered #{rid}",
             )
             self.conn.execute(
-                "UPDATE reservations SET status='تم التسليم', paid_amount=? WHERE id=?",
-                (new_paid, rid))
+                "UPDATE reservations SET status=?, paid_amount=? WHERE id=?",
+                (RESERVATION_STATUS_DELIVERED, new_paid, rid))
             if collected > 1e-9:
                 self.conn.execute(
                     """INSERT INTO movements(ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,unit_price,shift_id,payment_method)
@@ -5142,6 +8258,21 @@ class SqliteDatabase:
                 "payment_method": payment_method,
                 "shift_id": self.active_shift_id,
             })
+            self._audit("reservation_delivered", {
+                "reservation_id": rid,
+                "reservation_uuid": row["uuid"] if "uuid" in row.keys() else None,
+                "customer": row["customer"] if "customer" in row.keys() else None,
+                "customer_phone": row["customer_phone"] if "customer_phone" in row.keys() else None,
+                "collected_amount": collected,
+                "paid_amount_total": float(new_paid),
+                "total_amount": total_amount,
+                "payment_method": payment_method,
+                "item_type": row["item_type"],
+                "school": row["school"],
+                "color": row["color"],
+                "size": row["size"],
+                "qty": int(row["qty"] or 0),
+            }, actor="cashier")
 
     def deliver_reservation_items(self, reservation_ids: Sequence[int], collected_amount: float = 0.0, payment_method: str = PAYMENT_METHOD_CASH) -> Dict[str, Any]:
         """Deliver selected reservation items with strict payment rules."""
@@ -5157,74 +8288,32 @@ class SqliteDatabase:
         ).fetchall()
         if len(rows) != len(ids):
             raise ValueError("بعض عناصر الحجز غير موجودة.")
-        pending_rows = [r for r in rows if str(r["status"]) != "تم التسليم"]
+        pending_rows = [r for r in rows if _is_reservation_active(r["status"])]
         if not pending_rows:
-            raise ValueError("العناصر المحددة تم تسليمها مسبقاً.")
+            raise ValueError("العناصر المحددة غير معلقة.")
         self._ensure_reservation_delivery_stock(pending_rows)
         group_uuid = str((rows[0]["reservation_group_uuid"] or "")).strip()
         selected_ids = {int(r["id"]) for r in pending_rows}
         selected_total = sum(float(r["total_amount"] or 0.0) for r in pending_rows)
         selected_credit = sum(float(r["paid_amount"] or 0.0) for r in pending_rows)
 
-        other_pending: List[sqlite3.Row] = []
-        if group_uuid:
-            ph_sel = ",".join("?" for _ in selected_ids)
-            other_pending = self.conn.execute(
-                f"""
-                SELECT * FROM reservations
-                WHERE reservation_group_uuid=?
-                  AND status!='تم التسليم'
-                  AND id NOT IN ({ph_sel})
-                ORDER BY id ASC
-                """,
-                (group_uuid, *tuple(sorted(selected_ids))),
-            ).fetchall()
-
-        partial_mode = bool(other_pending)
-        group_pending_total = selected_total + sum(float(r["total_amount"] or 0.0) for r in other_pending)
-        group_pending_credit = selected_credit + sum(float(r["paid_amount"] or 0.0) for r in other_pending)
-        group_remaining = max(0.0, group_pending_total - group_pending_credit)
-        required_collect = min(selected_total, group_remaining) if partial_mode else max(0.0, selected_total - selected_credit)
+        selected_unpaid = max(0.0, selected_total - selected_credit)
+        required_collect = selected_unpaid
         collect = max(0.0, float(collected_amount))
         if abs(collect - required_collect) > 1e-6:
             raise ValueError(
                 f"المبلغ المطلوب لهذه العملية هو {format_money(required_collect)} "
-                f"({'المتبقي الفعلي على فاتورة الحجز' if partial_mode else 'المتبقي بعد العربون'})."
+                f"(المتبقي على العناصر المحددة)."
             )
 
         cash_alloc: Dict[int, float] = {}
-        selected_unpaid = max(0.0, selected_total - selected_credit)
-        remaining_selected_cash = min(required_collect, selected_unpaid) if partial_mode else required_collect
-        for idx, r in enumerate(pending_rows):
+        for r in pending_rows:
             rid = int(r["id"])
             total = float(r["total_amount"] or 0.0)
             paid = float(r["paid_amount"] or 0.0)
-            row_unpaid = max(0.0, total - paid)
-            if partial_mode:
-                add_paid = remaining_selected_cash if idx == len(pending_rows) - 1 else min(row_unpaid, remaining_selected_cash)
-                cash_alloc[rid] = max(0.0, add_paid)
-                remaining_selected_cash = max(0.0, remaining_selected_cash - add_paid)
-            else:
-                cash_alloc[rid] = row_unpaid
-        if partial_mode and pending_rows:
-            movement_shortfall = max(0.0, required_collect - sum(cash_alloc.values()))
-            if movement_shortfall > 1e-9:
-                last_id = int(pending_rows[-1]["id"])
-                cash_alloc[last_id] = float(cash_alloc.get(last_id, 0.0)) + movement_shortfall
+            cash_alloc[rid] = max(0.0, total - paid)
 
         with self.conn:
-            if partial_mode:
-                credit_for_others = max(0.0, group_pending_credit + required_collect - selected_total)
-                for idx, rr in enumerate(other_pending):
-                    rr_id = int(rr["id"])
-                    rr_total = float(rr["total_amount"] or 0.0)
-                    new_other_paid = credit_for_others if idx == len(other_pending) - 1 else min(rr_total, credit_for_others)
-                    new_other_paid = max(0.0, min(rr_total, new_other_paid))
-                    self.conn.execute(
-                        "UPDATE reservations SET paid_amount=? WHERE id=?",
-                        (new_other_paid, rr_id),
-                    )
-                    credit_for_others = max(0.0, credit_for_others - new_other_paid)
             for r in pending_rows:
                 rid = int(r["id"])
                 row_total = float(r["total_amount"] or 0.0)
@@ -5236,8 +8325,8 @@ class SqliteDatabase:
                     note=f"Reservation delivered #{rid}",
                 )
                 self.conn.execute(
-                    "UPDATE reservations SET status='تم التسليم', paid_amount=? WHERE id=?",
-                    (new_paid, rid),
+                    "UPDATE reservations SET status=?, paid_amount=? WHERE id=?",
+                    (RESERVATION_STATUS_DELIVERED, new_paid, rid),
                 )
                 if add_paid > 1e-9:
                     self.conn.execute(
@@ -5259,10 +8348,36 @@ class SqliteDatabase:
         group_done = False
         if group_uuid:
             left_cnt = self.conn.execute(
-                "SELECT COUNT(*) FROM reservations WHERE reservation_group_uuid=? AND status!='تم التسليم'",
-                (group_uuid,),
+                "SELECT COUNT(*) FROM reservations WHERE reservation_group_uuid=? AND status NOT IN (?, ?)",
+                (group_uuid, RESERVATION_STATUS_DELIVERED, RESERVATION_STATUS_CANCELLED),
             ).fetchone()
             group_done = int((left_cnt[0] if left_cnt else 0) or 0) == 0
+        self._audit("reservation_items_delivered", {
+            "reservation_ids": [int(r["id"]) for r in pending_rows],
+            "group_uuid": group_uuid or None,
+            "delivered_items": len(pending_rows),
+            "collected_amount": collect,
+            "required_collect": required_collect,
+            "payment_method": payment_method,
+            "group_completed": group_done,
+            "items": [
+                {
+                    "reservation_id": int(r["id"]),
+                    "reservation_uuid": r["uuid"] if "uuid" in r.keys() else None,
+                    "customer": r["customer"] if "customer" in r.keys() else None,
+                    "customer_phone": r["customer_phone"] if "customer_phone" in r.keys() else None,
+                    "item_type": r["item_type"],
+                    "school": r["school"],
+                    "color": r["color"],
+                    "size": r["size"],
+                    "qty": int(r["qty"] or 0),
+                    "total_amount": float(r["total_amount"] or 0.0),
+                    "previous_paid_amount": float(r["paid_amount"] or 0.0),
+                    "collected_amount": float(cash_alloc.get(int(r["id"]), 0.0)),
+                }
+                for r in pending_rows
+            ],
+        }, actor="cashier")
         return {
             "delivered_items": len(pending_rows),
             "collected_amount": collect,
@@ -5270,16 +8385,157 @@ class SqliteDatabase:
             "group_uuid": group_uuid or None,
         }
 
+    def cancel_reservation_items(
+        self,
+        reservation_ids: Sequence[int],
+        *,
+        reason: str = "",
+        refund_payment_method: str = PAYMENT_METHOD_CASH,
+    ) -> Dict[str, Any]:
+        """Cancel selected pending reservation rows and reallocate their deposit.
+
+        The selected rows remain as cancelled audit rows. Their allocated
+        down-payment is moved onto the still-pending rows in the same visible
+        reservation bill. If no pending rows remain, that money is recorded as a
+        refund for shift totals.
+        """
+        self._require_shift()
+        refund_payment_method = _normalize_payment_method(refund_payment_method)
+        ids = sorted({int(x) for x in reservation_ids})
+        if not ids:
+            raise ValueError("اختر عنصر حجز واحد على الأقل.")
+        ph = ",".join("?" for _ in ids)
+        rows = self.conn.execute(
+            f"SELECT * FROM reservations WHERE id IN ({ph}) ORDER BY id ASC",
+            tuple(ids),
+        ).fetchall()
+        if len(rows) != len(ids):
+            raise ValueError("بعض عناصر الحجز غير موجودة.")
+        active_rows = [r for r in rows if _is_reservation_active(r["status"])]
+        if not active_rows:
+            raise ValueError("العناصر المحددة غير معلقة.")
+
+        group_uuid = str(active_rows[0]["reservation_group_uuid"] or "").strip()
+        if group_uuid:
+            for r in active_rows:
+                if str(r["reservation_group_uuid"] or "").strip() != group_uuid:
+                    raise ValueError("اختر عناصر من نفس فاتورة الحجز فقط.")
+        else:
+            group_uuid = f"legacy-{int(active_rows[0]['id'])}"
+            if len(active_rows) > 1:
+                raise ValueError("اختر عناصر من نفس فاتورة الحجز فقط.")
+
+        cancelled_ids = {int(r["id"]) for r in active_rows}
+        cancelled_paid = round(sum(float(r["paid_amount"] or 0.0) for r in active_rows), 2)
+        reason_text = (reason or "").strip() or "Reservation item cancelled"
+
+        with self.conn:
+            for r in active_rows:
+                rid = int(r["id"])
+                self.conn.execute(
+                    "UPDATE reservations SET status=?, paid_amount=0 WHERE id=?",
+                    (RESERVATION_STATUS_CANCELLED, rid),
+                )
+                self.conn.execute(
+                    """INSERT INTO movements(ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,unit_price,shift_id,payment_method)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        now_iso(), "RESERVATION_CANCELLED", None, int(r["qty"] or 0),
+                        f"إلغاء بند حجز #{rid}: {reason_text}",
+                        None, r["item_type"], r["school"], r["color"], r["size"],
+                        0.0, self.active_shift_id, refund_payment_method,
+                    ),
+                )
+                self._record_sync_event_or_raise("RESERVATION_CANCELLED", {
+                    "reservation_uuid": r["uuid"] if "uuid" in r.keys() else None,
+                    "reservation_id": rid,
+                    "reason": reason_text,
+                    "refunded_amount": 0.0,
+                    "shift_id": self.active_shift_id,
+                })
+
+            if group_uuid.startswith("legacy-"):
+                remaining_rows = []
+            else:
+                remaining_rows = self.conn.execute(
+                    """
+                    SELECT *
+                      FROM reservations
+                     WHERE reservation_group_uuid=?
+                       AND status NOT IN (?, ?)
+                     ORDER BY id ASC
+                    """,
+                    (group_uuid, RESERVATION_STATUS_DELIVERED, RESERVATION_STATUS_CANCELLED),
+                ).fetchall()
+
+            refund_amount = 0.0
+            if remaining_rows and cancelled_paid > 1e-9:
+                existing_paid = sum(float(r["paid_amount"] or 0.0) for r in remaining_rows)
+                total_paid_to_allocate = round(existing_paid + cancelled_paid, 2)
+                remaining_totals = [float(r["total_amount"] or 0.0) for r in remaining_rows]
+                allocations = _allocate_reservation_down_payments(remaining_totals, total_paid_to_allocate)
+                for r, alloc in zip(remaining_rows, allocations):
+                    self.conn.execute(
+                        "UPDATE reservations SET paid_amount=? WHERE id=?",
+                        (float(alloc), int(r["id"])),
+                    )
+            elif cancelled_paid > 1e-9:
+                refund_amount = cancelled_paid
+                first = active_rows[0]
+                self.conn.execute(
+                    """INSERT INTO movements(ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,unit_price,shift_id,payment_method)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        now_iso(), "RESERVE_REFUND", None, 0,
+                        f"استرداد عربون حجز #{_reservation_bill_id_from_rows([dict(r) for r in active_rows])}: {reason_text}",
+                        None, first["item_type"], first["school"], first["color"], first["size"],
+                        float(refund_amount), self.active_shift_id, refund_payment_method,
+                    ),
+                )
+
+        summary = {
+            "cancelled_items": len(active_rows),
+            "redistributed_amount": 0.0 if refund_amount > 1e-9 else cancelled_paid,
+            "refund_amount": refund_amount,
+            "group_uuid": None if group_uuid.startswith("legacy-") else group_uuid,
+        }
+        self._audit("reservation_items_cancelled", {
+            **summary,
+            "reservation_ids": [int(r["id"]) for r in active_rows],
+            "reason": reason_text,
+            "refund_payment_method": refund_payment_method,
+            "cancelled_paid_amount": cancelled_paid,
+            "items": [
+                {
+                    "reservation_id": int(r["id"]),
+                    "reservation_uuid": r["uuid"] if "uuid" in r.keys() else None,
+                    "customer": r["customer"] if "customer" in r.keys() else None,
+                    "customer_phone": r["customer_phone"] if "customer_phone" in r.keys() else None,
+                    "item_type": r["item_type"],
+                    "school": r["school"],
+                    "color": r["color"],
+                    "size": r["size"],
+                    "qty": int(r["qty"] or 0),
+                    "total_amount": float(r["total_amount"] or 0.0),
+                    "paid_amount": float(r["paid_amount"] or 0.0),
+                }
+                for r in active_rows
+            ],
+        }, actor="manager")
+        return summary
+
     # -------- Shift Management --------
     def start_shift(self) -> int:
         self.assert_clock_sane()
         cur = self.conn.execute("SELECT id FROM shifts WHERE status='OPEN' ORDER BY started_at DESC, id DESC LIMIT 1")
         if cur.fetchone():
             raise ValueError("يوجد وردية مفتوحة بالفعل.")
+        started_at = now_iso()
+        business_day = started_at[:10]
         with self.conn:
             c = self.conn.execute(
                 "INSERT INTO shifts(started_at, status) VALUES(?, 'OPEN')",
-                (now_iso(),)
+                (started_at,)
             )
             shift_id = int(c.lastrowid)
             shift_uuid_row = self.conn.execute(
@@ -5288,8 +8544,19 @@ class SqliteDatabase:
             self._record_sync_event_or_raise("SHIFT_OPENED", {
                 "shift_uuid": shift_uuid_row[0] if shift_uuid_row else None,
                 "shift_id":   shift_id,
-                "started_at": now_iso(),
+                "started_at": started_at,
+                "business_day": business_day,
+                "status": "OPEN",
+                "source_event": "shift_opened",
             })
+            try:
+                self.audit.write("shift_started", {
+                    "shift_id": shift_id,
+                    "shift_uuid": shift_uuid_row[0] if shift_uuid_row else None,
+                }, actor="cashier", shift_id=shift_id)
+            except Exception:
+                import traceback
+                traceback.print_exc()
             return shift_id
 
     def get_open_shift(self) -> Optional[Dict[str, Any]]:
@@ -5299,22 +8566,75 @@ class SqliteDatabase:
 
     def end_shift(self, shift_id: int, summary_json: str = "") -> None:
         self.assert_clock_sane()
+        ended_at = now_iso()
         with self.conn:
+            shift_before = self.conn.execute(
+                "SELECT started_at, uuid FROM shifts WHERE id=? AND status='OPEN'",
+                (int(shift_id),)
+            ).fetchone()
             cur = self.conn.execute(
                 "UPDATE shifts SET ended_at=?, status='CLOSED', summary_json=? WHERE id=? AND status='OPEN'",
-                (now_iso(), summary_json, int(shift_id))
+                (ended_at, summary_json, int(shift_id))
             )
             if cur.rowcount != 1:
                 raise ValueError("Shift is not open or was already closed")
             shift_uuid_row = self.conn.execute(
                 "SELECT uuid FROM shifts WHERE id=?", (int(shift_id),)
             ).fetchone()
+            started_at = str(shift_before["started_at"] if shift_before and "started_at" in shift_before.keys() else "")
             self._record_sync_event_or_raise("SHIFT_CLOSED", {
                 "shift_uuid":  shift_uuid_row[0] if shift_uuid_row else None,
                 "shift_id":    int(shift_id),
-                "ended_at":    now_iso(),
+                "started_at":  started_at,
+                "ended_at":    ended_at,
+                "business_day": (ended_at or started_at)[:10],
+                "status": "CLOSED",
+                "source_event": "shift_closed",
                 "summary_json": summary_json or "",
             })
+            self._audit("shift_ended", {
+                "shift_id": int(shift_id),
+                "shift_uuid": shift_uuid_row[0] if shift_uuid_row else None,
+                "summary_json": summary_json or "",
+            }, actor="cashier")
+
+    def add_expense(self, amount: float, note: str = "") -> int:
+        self._require_shift()
+        amount = float(amount or 0.0)
+        if amount <= 0:
+            raise ValueError("أدخل مبلغ مصروف أكبر من صفر.")
+        sid = int(self.active_shift_id or 0)
+        created_at = now_iso()
+        clean_note = (note or "").strip()
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO expenses(created_at, amount, note, shift_id) VALUES(?,?,?,?)",
+                (created_at, amount, clean_note or None, sid),
+            )
+            expense_id = int(cur.lastrowid)
+            self._audit(
+                "expense_logged",
+                {"expense_id": expense_id, "amount": amount, "note": clean_note, "shift_id": sid},
+                actor="cashier",
+            )
+        return expense_id
+
+    def list_shift_expenses(self, shift_id: int) -> List[Dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT id, created_at, amount, note, shift_id
+            FROM expenses
+            WHERE shift_id=?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (int(shift_id),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_shift_expense_summary(self, shift_id: int) -> Dict[str, Any]:
+        items = self.list_shift_expenses(int(shift_id))
+        total = sum(float(r.get("amount") or 0.0) for r in items)
+        return {"expense_count": len(items), "expense_total": total, "expenses": items}
 
     def get_shift_summary(self, shift_id: int) -> Dict[str, Any]:
         cur = self.conn.execute("SELECT * FROM shifts WHERE id=?", (int(shift_id),))
@@ -5336,6 +8656,7 @@ class SqliteDatabase:
             SELECT COUNT(*) as cnt, COALESCE(SUM(total),0) as total FROM bills
              WHERE {bill_scope}
                AND (bill_type='SALE' OR bill_type IS NULL)
+               AND UPPER(COALESCE(status,'CONFIRMED')) != 'VOID'
             """,
             bill_params,
         )
@@ -5348,6 +8669,7 @@ class SqliteDatabase:
             FROM bills
              WHERE {bill_scope}
                AND (bill_type='SALE' OR bill_type IS NULL)
+               AND UPPER(COALESCE(status,'CONFIRMED')) != 'VOID'
             """,
             bill_params,
         )
@@ -5391,8 +8713,9 @@ class SqliteDatabase:
             SELECT COUNT(*) as cnt, COALESCE(SUM(total_amount),0) as total
             FROM reservations
             WHERE {bill_scope}
+              AND status != ?
             """,
-            bill_params,
+            (*bill_params, RESERVATION_STATUS_CANCELLED),
         )
         reservations = dict(cur.fetchone())
         cur = self.conn.execute(
@@ -5407,6 +8730,18 @@ class SqliteDatabase:
             movement_params,
         )
         reserve_pay = dict(cur.fetchone())
+        cur = self.conn.execute(
+            f"""
+            SELECT
+                COALESCE(SUM(unit_price),0) as total,
+                COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_CASH}' THEN unit_price ELSE 0 END),0) as cash_total,
+                COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_VISA}' THEN unit_price ELSE 0 END),0) as visa_total
+            FROM movements
+            WHERE direction='RESERVE_REFUND' AND {movement_scope}
+            """,
+            movement_params,
+        )
+        reserve_refund = dict(cur.fetchone())
         cur = self.conn.execute(
             f"""
             SELECT
@@ -5429,6 +8764,19 @@ class SqliteDatabase:
             movement_params,
         )
         voids = dict(cur.fetchone())
+        void_method_scope = movement_scope.replace("shift_id", "m.shift_id").replace("ts", "m.ts")
+        cur = self.conn.execute(
+            f"""
+            SELECT
+                COALESCE(SUM(CASE WHEN UPPER(COALESCE(b.payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_CASH}' THEN m.unit_price ELSE 0 END),0) as cash_total,
+                COALESCE(SUM(CASE WHEN UPPER(COALESCE(b.payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_VISA}' THEN m.unit_price ELSE 0 END),0) as visa_total
+            FROM movements m
+            LEFT JOIN bills b ON b.id = m.bill_id
+            WHERE m.direction='VOID_PAY' AND {void_method_scope}
+            """,
+            movement_params,
+        )
+        voids_by_method = dict(cur.fetchone())
         if self._allow_legacy_shift_time_fallback(dict(shift)):
             cur = self.conn.execute(
                 """
@@ -5444,8 +8792,25 @@ class SqliteDatabase:
                 (started, ended),
             )
             legacy_voids = dict(cur.fetchone())
+            cur = self.conn.execute(
+                f"""
+                SELECT
+                    COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_CASH}' THEN total ELSE 0 END),0) as cash_total,
+                    COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_VISA}' THEN total ELSE 0 END),0) as visa_total
+                FROM bills b
+                WHERE UPPER(COALESCE(b.status,'CONFIRMED'))='VOID'
+                  AND b.voided_at >= ? AND b.voided_at <= ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM movements m
+                      WHERE m.direction='VOID_PAY' AND m.bill_id=b.id
+                  )
+                """,
+                (started, ended),
+            )
+            legacy_voids_by_method = dict(cur.fetchone())
         else:
             legacy_voids = {"cnt": 0, "total": 0}
+            legacy_voids_by_method = {"cash_total": 0, "visa_total": 0}
         reservation_cash = float(reserve_pay["cash_total"])
         reservation_visa = float(reserve_pay["visa_total"])
         missing_reserve_pay = self._missing_reservation_payment_totals(dict(shift))
@@ -5455,25 +8820,37 @@ class SqliteDatabase:
         delivery_visa = float(delivery_pay["visa_total"])
         void_count = int(voids["cnt"] or 0) + int(legacy_voids["cnt"] or 0)
         void_total = float(voids["total"]) + float(legacy_voids["total"])
+        void_cash = float(voids_by_method["cash_total"] or 0.0) + float(legacy_voids_by_method["cash_total"] or 0.0)
+        void_visa = float(voids_by_method["visa_total"] or 0.0) + float(legacy_voids_by_method["visa_total"] or 0.0)
         return_cash = float(returns_by_method["cash_total"])
         return_visa = float(returns_by_method["visa_total"])
         exchange_cash = float(exchanges_by_method["cash_total"])
         exchange_visa = float(exchanges_by_method["visa_total"])
+        retail_sales_total = float(sales["total"])
+        money_in_total = retail_sales_total + float(reserve_pay["paid"]) + float(missing_reserve_pay["paid"]) + float(delivery_pay["total"])
+        expense_summary = self.get_shift_expense_summary(sid)
         return {
             "shift_id": shift["id"], "started_at": started, "ended_at": ended,
             "inflow_count": 0, "inflow_total_qty": 0,
             "inflow_items": [],
-            "sales_count": sales["cnt"], "sales_total": float(sales["total"]),
+            "sales_count": sales["cnt"],
+            "retail_sales_total": retail_sales_total,
+            "sales_total": money_in_total,
+            "money_in_total": money_in_total,
             "sales_cash_total": float(sales_by_method["cash_total"]),
             "sales_visa_total": float(sales_by_method["visa_total"]),
             "res_count": reservations["cnt"], "res_total": float(reservations["total"]),
             "res_paid": float(reserve_pay["paid"]) + float(missing_reserve_pay["paid"]),
+            "res_refund": float(reserve_refund["total"]),
             "deliver_count": delivery_pay["cnt"], "deliver_total": float(delivery_pay["total"]),
             "void_count": void_count, "void_total": void_total,
             "return_count": returns["cnt"], "return_total": float(returns["total"]),
             "exchange_count": exchanges["cnt"], "exchange_total": float(exchanges["total"]),
-            "cash_collected": float(sales_by_method["cash_total"]) + reservation_cash + delivery_cash - void_total - return_cash + exchange_cash,
-            "visa_collected": float(sales_by_method["visa_total"]) + reservation_visa + delivery_visa - return_visa + exchange_visa,
+            "expense_count": expense_summary["expense_count"],
+            "expense_total": expense_summary["expense_total"],
+            "expenses": expense_summary["expenses"],
+            "cash_collected": float(sales_by_method["cash_total"]) + reservation_cash + delivery_cash - float(reserve_refund["cash_total"]) - void_cash - return_cash + exchange_cash,
+            "visa_collected": float(sales_by_method["visa_total"]) + reservation_visa + delivery_visa - float(reserve_refund["visa_total"]) - void_visa - return_visa + exchange_visa,
         }
 
     def get_all_shifts(self, date_from: Optional[str] = None, date_to: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -5508,6 +8885,7 @@ class SqliteDatabase:
                 SELECT COUNT(*) as cnt, COALESCE(SUM(total),0) as total FROM bills
                  WHERE {bill_scope}
                    AND (bill_type='SALE' OR bill_type IS NULL)
+                   AND UPPER(COALESCE(status,'CONFIRMED')) != 'VOID'
                 """,
                 bill_params,
             )
@@ -5520,6 +8898,7 @@ class SqliteDatabase:
                 FROM bills
                  WHERE {bill_scope}
                    AND (bill_type='SALE' OR bill_type IS NULL)
+                   AND UPPER(COALESCE(status,'CONFIRMED')) != 'VOID'
                 """,
                 bill_params,
             )
@@ -5561,8 +8940,9 @@ class SqliteDatabase:
                 SELECT COUNT(*) as cnt, COALESCE(SUM(total_amount),0) as total
                 FROM reservations
                 WHERE {bill_scope}
+                  AND status != ?
                 """,
-                bill_params,
+                (*bill_params, RESERVATION_STATUS_CANCELLED),
             )
             reservations = dict(cur.fetchone())
             cur = self.conn.execute(
@@ -5577,6 +8957,18 @@ class SqliteDatabase:
                 movement_params,
             )
             reserve_pay = dict(cur.fetchone())
+            cur = self.conn.execute(
+                f"""
+                SELECT
+                    COALESCE(SUM(unit_price),0) as total,
+                    COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_CASH}' THEN unit_price ELSE 0 END),0) as cash_total,
+                    COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_VISA}' THEN unit_price ELSE 0 END),0) as visa_total
+                FROM movements
+                WHERE direction='RESERVE_REFUND' AND {movement_scope}
+                """,
+                movement_params,
+            )
+            reserve_refund = dict(cur.fetchone())
             cur = self.conn.execute(
                 f"""
                 SELECT
@@ -5599,6 +8991,19 @@ class SqliteDatabase:
                 movement_params,
             )
             voids = dict(cur.fetchone())
+            void_method_scope = movement_scope.replace("shift_id", "m.shift_id").replace("ts", "m.ts")
+            cur = self.conn.execute(
+                f"""
+                SELECT
+                    COALESCE(SUM(CASE WHEN UPPER(COALESCE(b.payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_CASH}' THEN m.unit_price ELSE 0 END),0) as cash_total,
+                    COALESCE(SUM(CASE WHEN UPPER(COALESCE(b.payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_VISA}' THEN m.unit_price ELSE 0 END),0) as visa_total
+                FROM movements m
+                LEFT JOIN bills b ON b.id = m.bill_id
+                WHERE m.direction='VOID_PAY' AND {void_method_scope}
+                """,
+                movement_params,
+            )
+            voids_by_method = dict(cur.fetchone())
             if self._allow_legacy_shift_time_fallback(r):
                 cur = self.conn.execute(
                     """
@@ -5614,8 +9019,25 @@ class SqliteDatabase:
                     (started, ended),
                 )
                 legacy_voids = dict(cur.fetchone())
+                cur = self.conn.execute(
+                    f"""
+                    SELECT
+                        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_CASH}' THEN total ELSE 0 END),0) as cash_total,
+                        COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_VISA}' THEN total ELSE 0 END),0) as visa_total
+                    FROM bills b
+                    WHERE UPPER(COALESCE(b.status,'CONFIRMED'))='VOID'
+                      AND b.voided_at >= ? AND b.voided_at <= ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM movements m
+                          WHERE m.direction='VOID_PAY' AND m.bill_id=b.id
+                      )
+                    """,
+                    (started, ended),
+                )
+                legacy_voids_by_method = dict(cur.fetchone())
             else:
                 legacy_voids = {"cnt": 0, "total": 0}
+                legacy_voids_by_method = {"cash_total": 0, "visa_total": 0}
             reservation_cash = float(reserve_pay["cash_total"])
             reservation_visa = float(reserve_pay["visa_total"])
             missing_reserve_pay = self._missing_reservation_payment_totals(r)
@@ -5625,17 +9047,24 @@ class SqliteDatabase:
             delivery_visa = float(delivery_pay["visa_total"])
             void_count = int(voids["cnt"] or 0) + int(legacy_voids["cnt"] or 0)
             void_total = float(voids["total"]) + float(legacy_voids["total"])
+            void_cash = float(voids_by_method["cash_total"] or 0.0) + float(legacy_voids_by_method["cash_total"] or 0.0)
+            void_visa = float(voids_by_method["visa_total"] or 0.0) + float(legacy_voids_by_method["visa_total"] or 0.0)
             return_cash = float(returns_by_method["cash_total"])
             return_visa = float(returns_by_method["visa_total"])
             exchange_cash = float(exchanges_by_method["cash_total"])
             exchange_visa = float(exchanges_by_method["visa_total"])
+            retail_sales_total = float(sales["total"])
+            money_in_total = retail_sales_total + float(reserve_pay["paid"]) + float(missing_reserve_pay["paid"]) + float(delivery_pay["total"])
             r["sales_count"] = sales["cnt"]
-            r["sales_total"] = float(sales["total"])
+            r["retail_sales_total"] = retail_sales_total
+            r["sales_total"] = money_in_total
+            r["money_in_total"] = money_in_total
             r["sales_cash_total"] = float(sales_by_method["cash_total"])
             r["sales_visa_total"] = float(sales_by_method["visa_total"])
             r["res_count"] = reservations["cnt"]
             r["res_total"] = float(reservations["total"])
             r["res_paid"] = float(reserve_pay["paid"]) + float(missing_reserve_pay["paid"])
+            r["res_refund"] = float(reserve_refund["total"])
             r["deliver_count"] = delivery_pay["cnt"]
             r["deliver_total"] = float(delivery_pay["total"])
             r["void_count"] = void_count
@@ -5646,9 +9075,13 @@ class SqliteDatabase:
             r["return_total"] = float(returns["total"])
             r["exchange_count"] = exchanges["cnt"]
             r["exchange_total"] = float(exchanges["total"])
+            expense_summary = self.get_shift_expense_summary(sid)
+            r["expense_count"] = expense_summary["expense_count"]
+            r["expense_total"] = expense_summary["expense_total"]
+            r["expenses"] = expense_summary["expenses"]
             # Cash summary excludes stock receipts but includes customer money.
-            r["cash_collected"] = r["sales_cash_total"] + reservation_cash + delivery_cash - void_total - return_cash + exchange_cash
-            r["visa_collected"] = r["sales_visa_total"] + reservation_visa + delivery_visa - return_visa + exchange_visa
+            r["cash_collected"] = r["sales_cash_total"] + reservation_cash + delivery_cash - float(reserve_refund["cash_total"]) - void_cash - return_cash + exchange_cash
+            r["visa_collected"] = r["sales_visa_total"] + reservation_visa + delivery_visa - float(reserve_refund["visa_total"]) - void_visa - return_visa + exchange_visa
             results.append(r)
         return results
 
@@ -5890,8 +9323,8 @@ class SqliteDatabase:
         bill_row = dict(cur.fetchone())
 
         # Reservation stats
-        res_where = ["1=1"]
-        res_args = []
+        res_where = ["status != ?"]
+        res_args = [RESERVATION_STATUS_CANCELLED]
         if date_from:
             res_where.append("date(created_at) >= date(?)")
             res_args.append(date_from)
@@ -5964,12 +9397,41 @@ class SqliteDatabase:
         dr = cur.fetchone()
         deliver_cash = float(dr["dt"] if dr and dr["dt"] is not None else 0)
 
+        rwhere = ["direction='RESERVE_REFUND'"]
+        rargs: List[Any] = []
+        if date_from:
+            rwhere.append("date(ts) >= date(?)")
+            rargs.append(date_from)
+        if date_to:
+            rwhere.append("date(ts) <= date(?)")
+            rargs.append(date_to)
+        if school:
+            rwhere.append("LOWER(TRIM(school)) = LOWER(?)")
+            rargs.append(school.strip())
+        if item_type:
+            rwhere.append("LOWER(TRIM(item_type)) = LOWER(?)")
+            rargs.append(item_type.strip())
+        if color:
+            rwhere.append("LOWER(TRIM(color)) = LOWER(?)")
+            rargs.append(color.strip())
+        cur = self.conn.execute(
+            f"SELECT COALESCE(SUM(unit_price), 0) AS rt FROM movements WHERE {' AND '.join(rwhere)}",
+            rargs,
+        )
+        rr = cur.fetchone()
+        reserve_refund = float(rr["rt"] if rr and rr["rt"] is not None else 0)
+
+        retail_sales_total = float(bill_row["total"])
+        money_in_total = retail_sales_total + reserve_cash + deliver_cash
         return {
             "sales_count": bill_row["cnt"],
-            "sales_total": float(bill_row["total"]),
+            "retail_sales_total": retail_sales_total,
+            "sales_total": money_in_total,
+            "money_in_total": money_in_total,
             "res_count": res_row["cnt"], "res_total": float(res_row["total"]),
             "res_paid": reserve_cash,
             "deliver_cash": deliver_cash,
+            "reserve_refund": reserve_refund,
         }
 
     def get_item_movement_stats(self, date_from=None, date_to=None, school=None, item_type=None, color=None):
@@ -6019,11 +9481,18 @@ class SqliteDatabase:
         """Reset all movement records. Keep item definitions intact."""
         if not self.is_manager_feature_enabled("allow_reset_counts"):
             raise PermissionError(_feature_restricted_message("إعادة التعيين غير مسموح بها حالياً من نقطة البيع."))
+        before = {
+            "movements": int(self.conn.execute("SELECT COUNT(*) FROM movements").fetchone()[0] or 0),
+            "reservations": int(self.conn.execute("SELECT COUNT(*) FROM reservations").fetchone()[0] or 0),
+            "bills": int(self.conn.execute("SELECT COUNT(*) FROM bills").fetchone()[0] or 0),
+            "bill_items": int(self.conn.execute("SELECT COUNT(*) FROM bill_items").fetchone()[0] or 0),
+        }
         with self.conn:
             self.conn.execute("DELETE FROM movements")
             self.conn.execute("DELETE FROM reservations")
             self.conn.execute("DELETE FROM bills")
             self.conn.execute("DELETE FROM bill_items")
+        self._audit("movement_counts_reset", {"deleted_counts": before}, actor="manager")
 
     # -------- Bill history APIs --------
     def list_bills(self) -> List[Dict[str, Any]]:
@@ -6057,10 +9526,11 @@ class SqliteDatabase:
                 MIN(created_at) AS created_at,
                 COALESCE(MAX(NULLIF(TRIM(customer), '')), '') AS customer,
                 COALESCE(MAX(NULLIF(TRIM(customer_phone), '')), '') AS customer_phone,
-                COALESCE(SUM(total_amount), 0) AS total,
-                COALESCE(SUM(paid_amount), 0) AS paid_amount,
+                COALESCE(SUM(CASE WHEN status != ? THEN total_amount ELSE 0 END), 0) AS total,
+                COALESCE(SUM(CASE WHEN status != ? THEN paid_amount ELSE 0 END), 0) AS paid_amount,
                 COALESCE(MAX(NULLIF(TRIM(payment_method), '')), ?) AS payment_method,
-                SUM(CASE WHEN status = 'تم التسليم' THEN 0 ELSE 1 END) AS pending_count,
+                SUM(CASE WHEN status NOT IN (?, ?) THEN 1 ELSE 0 END) AS pending_count,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS cancelled_count,
                 COUNT(*) AS item_count
             FROM (
                 SELECT *,
@@ -6069,12 +9539,22 @@ class SqliteDatabase:
             )
             GROUP BY group_key
             """,
-            (PAYMENT_METHOD_CASH,),
+            (
+                RESERVATION_STATUS_CANCELLED,
+                RESERVATION_STATUS_CANCELLED,
+                PAYMENT_METHOD_CASH,
+                RESERVATION_STATUS_DELIVERED,
+                RESERVATION_STATUS_CANCELLED,
+                RESERVATION_STATUS_CANCELLED,
+            ),
         )
         for r in cur.fetchall():
             pending_count = int(r["pending_count"] or 0)
             total_count = int(r["item_count"] or 0)
-            status = "معلق" if pending_count else "تم التسليم"
+            cancelled_count = int(r["cancelled_count"] or 0)
+            status = RESERVATION_STATUS_PENDING if pending_count else RESERVATION_STATUS_DELIVERED
+            if cancelled_count and cancelled_count == total_count:
+                status = RESERVATION_STATUS_CANCELLED
             if pending_count and pending_count < total_count:
                 status = "تسليم جزئي"
             row = dict(r)
@@ -6102,9 +9582,10 @@ class SqliteDatabase:
         with self.conn:
             bill = self.conn.execute(
                 "SELECT id, customer, total, COALESCE(status,'CONFIRMED') AS status, "
-                "COALESCE(bill_type,'SALE') AS bill_type, uuid "
+                "COALESCE(bill_type,'SALE') AS bill_type, "
+                "COALESCE(payment_method, ?) AS payment_method, uuid "
                 "FROM bills WHERE id = ?",
-                (int(bill_id),),
+                (PAYMENT_METHOD_CASH, int(bill_id)),
             ).fetchone()
             if bill is None:
                 raise ValueError("الفاتورة غير موجودة.")
@@ -6150,12 +9631,13 @@ class SqliteDatabase:
 
             self.conn.execute(
                 """INSERT INTO movements
-                   (ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,unit_price,shift_id)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   (ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,unit_price,shift_id,payment_method)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     now_iso(), "VOID_PAY", None, 0, f"Void refund: {reason}",
                     int(bill_id), None, None, None, None, float(bill["total"] or 0.0),
                     self.active_shift_id,
+                    bill["payment_method"] if "payment_method" in bill.keys() else PAYMENT_METHOD_CASH,
                 ),
             )
 
@@ -6169,9 +9651,18 @@ class SqliteDatabase:
                 "bill_id": int(bill_id),
                 "customer": bill["customer"],
                 "total": float(bill["total"] or 0),
+                "payment_method": bill["payment_method"] if "payment_method" in bill.keys() else PAYMENT_METHOD_CASH,
                 "reason": reason,
                 "shift_id": self.active_shift_id,
             })
+            self._audit("sale_voided", {
+                "bill_id": int(bill_id),
+                "bill_uuid": bill["uuid"] if "uuid" in bill.keys() else None,
+                "customer": bill["customer"],
+                "total": float(bill["total"] or 0),
+                "reason": reason,
+                "items": [dict(item) for item in items],
+            }, actor="manager")
 
     def convert_exchange_bill_to_sale(self, bill_id: int, reason: str = "") -> Dict[str, Any]:
         """Admin correction for a bill that was entered as exchange but was really a sale."""
@@ -6340,13 +9831,26 @@ class SqliteDatabase:
                 "shift_id": self.active_shift_id,
             })
 
-            return {
+            summary = {
                 "bill_id": int(bill_id),
                 "new_total": float(new_total),
                 "amount_delta": float(new_total - old_diff),
                 "corrected_return_qty": sum(int(line["qty"] or 0) for line in return_lines),
                 "item_count": len(sale_items),
             }
+            self._audit("bill_type_corrected", {
+                **summary,
+                "bill_uuid": bill["uuid"] if "uuid" in bill.keys() else None,
+                "customer": bill["customer"],
+                "from_bill_type": "EXCHANGE",
+                "to_bill_type": "SALE",
+                "old_diff": old_diff,
+                "old_return_total": float(return_total),
+                "old_take_total": float(take_total),
+                "reason": reason,
+                "items": sale_items,
+            }, actor="manager")
+            return summary
 
     def list_bill_items(self, bill_id: int) -> List[Dict[str, Any]]:
         cur = self.conn.cursor()
@@ -6374,9 +9878,10 @@ class SqliteDatabase:
                 FROM reservations
             )
             WHERE group_key=?
+              AND status != ?
             ORDER BY id ASC
             """,
-            (key,),
+            (key, RESERVATION_STATUS_CANCELLED),
         )
         rows = [dict(r) for r in cur.fetchall()]
         cur.close()
@@ -6426,6 +9931,10 @@ class SqliteDatabase:
 
     def set_manager_feature_enabled(self, feature_key: str, enabled: bool) -> None:
         self.set_app_setting(f"feature:{feature_key}", "1" if enabled else "0")
+        self._audit("manager_feature_changed", {
+            "feature_key": str(feature_key),
+            "enabled": bool(enabled),
+        }, actor="manager")
 
     def verify_admin_password(self, plain: str) -> bool:
         stored = self.get_app_setting("admin_password", ADMIN_PASSWORD_PLAIN) or ADMIN_PASSWORD_PLAIN
@@ -6441,6 +9950,7 @@ class SqliteDatabase:
     def set_admin_password(self, plain: str) -> None:
         digest = hashlib.sha256(str(plain).encode("utf-8")).hexdigest()
         self.set_app_setting("admin_password", f"{ADMIN_PASSWORD_HASH_PREFIX}{digest}")
+        self._audit("admin_password_changed", {}, actor="manager")
 
     def _hidden_definition_sql(self, field: str, column_sql: str) -> str:
         if field not in ("item_type", "school", "color", "size"):
@@ -6464,6 +9974,7 @@ class SqliteDatabase:
                 "INSERT OR REPLACE INTO hidden_definitions(field, value, hidden_at) VALUES(?, ?, ?)",
                 (field, value, now_iso()),
             )
+        self._audit("definition_hidden", {"field": field, "value": value}, actor="manager")
 
     def delete_school_from_ui(self, school: str) -> int:
         if not self.is_manager_feature_enabled("allow_inventory_delete"):
@@ -6506,6 +10017,10 @@ class SqliteDatabase:
                 (school,),
             )
             self.hide_definition("school", school)
+        self._audit("school_deleted_from_ui", {
+            "school": school,
+            "deleted_stock_rows": row_count,
+        }, actor="manager")
         return row_count
 
     def remove_from_stock(self, stock_id: int, qty: Optional[int], note: str = "Admin remove") -> int:
@@ -6545,6 +10060,16 @@ class SqliteDatabase:
                 "size":       s["size"],
                 "unit_price": float(s["unit_price"]),
             })
+            self._audit("stock_removed_manually", {
+                "stock_id": int(stock_id),
+                "qty": int(take),
+                "note": note,
+                "item_type": s["item_type"],
+                "school": s["school"],
+                "color": s["color"],
+                "size": s["size"],
+                "unit_price": float(s["unit_price"]),
+            }, actor="manager")
             return int(take)
 
     def _stock_audit_line_values(self, line: Dict[str, Any]) -> Tuple[Any, ...]:
@@ -6718,6 +10243,17 @@ class SqliteDatabase:
         lines: Sequence[Dict[str, Any]],
         reason: str,
     ) -> Optional[str]:
+        # Warehouse requested-stock reports treat local POS audit deltas as
+        # part of branch income/baseline, so send the audit detail event in
+        # addition to the regular POS stock snapshot.
+        return self._record_pos_stock_audit_applied_legacy(report_id, lines, reason)
+
+    def _record_pos_stock_audit_applied_legacy(
+        self,
+        report_id: Optional[int],
+        lines: Sequence[Dict[str, Any]],
+        reason: str,
+    ) -> Optional[str]:
         diff_lines = [dict(line) for line in lines if int(line.get("diff") or 0) != 0]
         if not report_id or not diff_lines:
             return None
@@ -6761,9 +10297,25 @@ class SqliteDatabase:
             traceback.print_exc()
             return None
 
+    @staticmethod
+    def _parse_stock_id_list(value: Any) -> List[int]:
+        ids: List[int] = []
+        for part in str(value or "").replace(";", ",").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                stock_id = int(part)
+            except Exception:
+                continue
+            if stock_id > 0 and stock_id not in ids:
+                ids.append(stock_id)
+        return ids
+
     def apply_stock_adjustments(self, adjustments: Sequence[Dict[str, Any]], note: str = "Physical count adjustment") -> int:
         self._require_shift()
         applied = 0
+        applied_lines: List[Dict[str, Any]] = []
         with self.conn:
             for adj in adjustments:
                 diff = int(adj.get("diff") or 0)
@@ -6772,23 +10324,23 @@ class SqliteDatabase:
                 if "actual" in adj and int(adj.get("actual") or 0) < 0:
                     raise ValueError("Actual stock count cannot be negative")
                 stock_id = adj.get("stock_id")
+                stock_ids = self._parse_stock_id_list(stock_id)
+                item_type = str(adj.get("item_type") or "").strip()
+                school = str(adj.get("school") or "").strip()
+                color = str(adj.get("color") or "").strip()
+                size = _normalize_size_label(str(adj.get("size") or "").strip())
+                price = float(adj.get("unit_price") or self.get_effective_price(item_type, school, color, size) or 0)
                 row = None
-                if stock_id not in (None, "", 0, "0"):
-                    row = self.conn.execute("SELECT * FROM stocks WHERE id=?", (int(stock_id),)).fetchone()
+                if stock_ids:
+                    row = self.conn.execute("SELECT * FROM stocks WHERE id=?", (int(stock_ids[0]),)).fetchone()
                 if row is None:
-                    item_type = str(adj.get("item_type") or "").strip()
-                    school = str(adj.get("school") or "").strip()
-                    color = str(adj.get("color") or "").strip()
-                    size = _normalize_size_label(str(adj.get("size") or "").strip())
-                    price = float(adj.get("unit_price") or self.get_effective_price(item_type, school, color, size) or 0)
                     row = self.conn.execute(
                         """SELECT * FROM stocks
                            WHERE LOWER(TRIM(item_type))=LOWER(TRIM(?))
                              AND LOWER(TRIM(school))=LOWER(TRIM(?))
                              AND LOWER(TRIM(color))=LOWER(TRIM(?))
                              AND LOWER(TRIM(size))=LOWER(TRIM(?))
-                             AND unit_price=?
-                           ORDER BY id ASC LIMIT 1""",
+                           ORDER BY CASE WHEN unit_price=? THEN 0 ELSE 1 END, id ASC LIMIT 1""",
                         (item_type, school, color, size, price),
                     ).fetchone()
                     if row:
@@ -6808,20 +10360,47 @@ class SqliteDatabase:
                 else:
                     affected_rows = []
                     remaining = int(qty)
-                    candidates = self.conn.execute(
+                    candidates: List[sqlite3.Row] = []
+                    seen_candidate_ids: Set[int] = set()
+                    if stock_ids:
+                        placeholders = ",".join("?" for _ in stock_ids)
+                        preferred = self.conn.execute(
+                            f"""SELECT * FROM stocks
+                                WHERE id IN ({placeholders})
+                                  AND LOWER(TRIM(item_type))=LOWER(TRIM(?))
+                                  AND LOWER(TRIM(school))=LOWER(TRIM(?))
+                                  AND LOWER(TRIM(color))=LOWER(TRIM(?))
+                                  AND LOWER(TRIM(size))=LOWER(TRIM(?))
+                                  AND count > 0
+                                ORDER BY id ASC""",
+                            (*stock_ids, item_type, school, color, size),
+                        ).fetchall()
+                        for candidate in preferred:
+                            candidates.append(candidate)
+                            seen_candidate_ids.add(int(candidate["id"]))
+
+                    fallback = self.conn.execute(
                         """SELECT * FROM stocks
                            WHERE LOWER(TRIM(item_type))=LOWER(TRIM(?))
                              AND LOWER(TRIM(school))=LOWER(TRIM(?))
                              AND LOWER(TRIM(color))=LOWER(TRIM(?))
                              AND LOWER(TRIM(size))=LOWER(TRIM(?))
-                             AND unit_price=?
                              AND count > 0
                            ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END, id ASC""",
                         (
-                            row["item_type"], row["school"], row["color"], row["size"],
-                            float(row["unit_price"]), int(stock_id),
+                            item_type or row["item_type"],
+                            school or row["school"],
+                            color or row["color"],
+                            size or row["size"],
+                            int(row["id"]),
                         ),
                     ).fetchall()
+                    for candidate in fallback:
+                        cid = int(candidate["id"])
+                        if cid not in seen_candidate_ids:
+                            candidates.append(candidate)
+                            seen_candidate_ids.add(cid)
+
                     for candidate in candidates:
                         if remaining <= 0:
                             break
@@ -6855,7 +10434,25 @@ class SqliteDatabase:
                         "size": affected["size"],
                         "unit_price": float(affected["unit_price"]),
                     })
+                    applied_lines.append({
+                        "stock_id": int(affected["id"]),
+                        "direction": "IN" if diff > 0 else "OUT",
+                        "qty": int(take_qty),
+                        "note": note,
+                        "item_type": affected["item_type"],
+                        "school": affected["school"],
+                        "color": affected["color"],
+                        "size": affected["size"],
+                        "unit_price": float(affected["unit_price"]),
+                    })
                 applied += 1
+        if applied:
+            self._audit("stock_adjustment_applied", {
+                "adjustment_count": applied,
+                "movement_count": len(applied_lines),
+                "note": note,
+                "lines": applied_lines,
+            }, actor="manager")
         return applied
 
     def list_movements(self, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -7791,8 +11388,8 @@ class DashboardFrame(ttk.Frame):
         except Exception:
             pass
         try:
-            pending = self.db.list_reservations(status="\u0645\u0639\u0644\u0642")
-            self._pending_reservations.set(str(len(pending)))
+            pending_count = self.db.count_reservations(status="\u0645\u0639\u0644\u0642")
+            self._pending_reservations.set(str(pending_count))
         except Exception:
             pass
         try:
@@ -7806,15 +11403,13 @@ class DashboardFrame(ttk.Frame):
             pass
         try:
             self._alerts_tbl.delete(*self._alerts_tbl.get_children())
-            low_count = 0
-            for r in self.db.current_inventory({}):
+            low_count, low_rows = self.db.low_stock_summary(threshold=5, limit=80)
+            for r in low_rows:
                 cnt = int(r.get("count", 0))
-                if 0 < cnt <= 5:
-                    tag = "critical" if cnt <= 2 else "low"
-                    self._alerts_tbl.insert("", tk.END, values=(
-                        r["item_type"], r["school"], r["color"], r["size"], cnt),
-                        tags=(tag,))
-                    low_count += 1
+                tag = "critical" if cnt <= 2 else "low"
+                self._alerts_tbl.insert("", tk.END, values=(
+                    r["item_type"], r["school"], r["color"], r["size"], cnt),
+                    tags=(tag,))
             self._low_stock_count.set(str(low_count))
         except Exception:
             pass
@@ -8244,16 +11839,18 @@ class IncomeFrame(ttk.Frame):
 class POSFrame(ttk.Frame):
     """
     Multi-bill POS with step-by-step item navigation.
-    Bills 1-3 are regular sales; bill 4 is returns; bill 5 is reservations; bill 6 is exchanges.
+    Bills 1-3 are regular sales; bill 4 is returns; bills 5 and 7 are reservations; bill 6 is exchanges.
     """
+    RESERVATION_BILLS = (5, 7)
+
     def __init__(self, master, db: SqliteDatabase):
         super().__init__(master, padding=6)
         self.db = db
 
         # In-memory bill state
-        self.bills = {1: [], 2: [], 3: [], 4: [], 5: [], 6: []}
-        self.customers = {1: "", 2: "", 3: "", 4: "", 5: "", 6: ""}
-        self.customer_phones = {1: "", 2: "", 3: "", 4: "", 5: "", 6: ""}
+        self.bills = {1: [], 2: [], 3: [], 4: [], 5: [], 6: [], 7: []}
+        self.customers = {1: "", 2: "", 3: "", 4: "", 5: "", 6: "", 7: ""}
+        self.customer_phones = {1: "", 2: "", 3: "", 4: "", 5: "", 6: "", 7: ""}
         self.active_bill = 1
         self._exchange_mode = "return"  # "return" or "take" — for bill 6
 
@@ -8414,15 +12011,15 @@ class POSFrame(ttk.Frame):
                 pass
         vsplit.bind("<Map>", _set_bill_sash, add="+")
 
-        # Bill switcher buttons (1-6)
+        # Bill switcher buttons (1-7)
         switcher = ttk.Frame(right)
         switcher.pack(fill=tk.X, padx=4, pady=(4, 2))
         self._bill_btns: Dict[int, ttk.Button] = {}
         _bill_labels = {
             1: "1", 2: "2", 3: "3",
-            4: "4 (مرتجع)", 5: "5 (حجز)", 6: "6 (استبدال)",
+            4: "4 (مرتجع)", 5: "5 (حجز)", 6: "6 (استبدال)", 7: "7 (حجز)",
         }
-        for n in range(1, 7):
+        for n in range(1, 8):
             btn = ttk.Button(switcher, text=_bill_labels[n], width=9,
                              command=lambda b=n: self._switch_bill(b))
             btn.pack(side=tk.LEFT, padx=2)
@@ -8502,8 +12099,11 @@ class POSFrame(ttk.Frame):
         ttk.Label(tot_row, text="الإجمالي:").pack(side=tk.RIGHT)
         self.total_var = tk.StringVar(value="0")
         ttk.Label(tot_row, textvariable=self.total_var, font=("Segoe UI", 12, "bold")).pack(side=tk.RIGHT, padx=(0, 6))
+        ttk.Label(tot_row, text="عدد القطع:").pack(side=tk.RIGHT, padx=(12, 0))
+        self.total_items_var = tk.StringVar(value="0")
+        ttk.Label(tot_row, textvariable=self.total_items_var, font=("Segoe UI", 12, "bold")).pack(side=tk.RIGHT, padx=(0, 6))
 
-        # Reservation extras (only visible for bill 5)
+        # Reservation extras (visible for reservation bill slots)
         self._res_frame = ttk.LabelFrame(right, text="بيانات الحجز")
         self._res_frame.pack(fill=tk.X, padx=4, pady=(2, 2))
         ttk.Label(self._res_frame, text="المبلغ المدفوع:").grid(row=0, column=0, padx=4, pady=4, sticky="e")
@@ -8563,6 +12163,50 @@ class POSFrame(ttk.Frame):
     # ------------------------------------------------------------------ navigation
     # Flow: Schools -> Items -> Colors -> Sizes
 
+    def _back_to_schools(self):
+        self._sel_school = None
+        self._sel_item = None
+        self._sel_color = None
+        self._sel_size = None
+        self._price_user_edited = False
+        try:
+            self._flt_school.set("")
+            self._flt_item.set("")
+            self._flt_color.set("")
+            self._flt_school.refresh_values()
+            self._flt_item.refresh_values()
+            self._flt_color.refresh_values()
+        except Exception:
+            pass
+        self._render_schools()
+
+    def _back_to_items(self):
+        self._sel_item = None
+        self._sel_color = None
+        self._sel_size = None
+        self._price_user_edited = False
+        try:
+            self._flt_item.set("")
+            self._flt_color.set("")
+            self._flt_item.refresh_values()
+            self._flt_color.refresh_values()
+        except Exception:
+            pass
+        self._render_items()
+
+    def _back_to_colors(self):
+        self._sel_color = None
+        self._sel_size = None
+        self._price_user_edited = False
+        try:
+            self._flt_color.set("")
+            self._flt_color.refresh_values()
+            self._flt_item.refresh_values()
+            self._flt_school.refresh_values()
+        except Exception:
+            pass
+        self._render_colors()
+
     def _render_schools(self):
         """Entry point: show school buttons."""
         self._sel_school = None
@@ -8583,7 +12227,13 @@ class POSFrame(ttk.Frame):
             constraints["color"] = color_f
 
         try:
-            schools = sorted(self.db.get_distinct_filtered("school", constraints))
+            schools = sorted(
+                self.db.get_distinct_filtered(
+                    "school",
+                    constraints,
+                    available_only=False,
+                )
+            )
         except Exception:
             schools = []
 
@@ -8616,7 +12266,11 @@ class POSFrame(ttk.Frame):
             constraints["color"] = self._sel_color
 
         try:
-            items = self.db.get_distinct_filtered("item_type", constraints)
+            items = self.db.get_distinct_filtered(
+                "item_type",
+                constraints,
+                available_only=False,
+            )
         except Exception:
             items = []
 
@@ -8625,7 +12279,7 @@ class POSFrame(ttk.Frame):
             items = [i for i in items if i == item_f]
 
         self._mk_grid_buttons(items, self._select_item, cols=4)
-        ttk.Button(self._grid_host, text="\u25c4 رجوع إلى المدارس", command=self._render_schools)\
+        ttk.Button(self._grid_host, text="\u25c4 رجوع إلى المدارس", command=self._back_to_schools)\
             .pack(anchor="w", padx=4, pady=4)
 
     def _select_item(self, item_type: str):
@@ -8647,7 +12301,11 @@ class POSFrame(ttk.Frame):
         if self._sel_item:
             constraints["item_type"] = self._sel_item
         try:
-            colors = self.db.get_distinct_filtered("color", constraints)
+            colors = self.db.get_distinct_filtered(
+                "color",
+                constraints,
+                available_only=False,
+            )
         except Exception:
             colors = []
 
@@ -8655,7 +12313,7 @@ class POSFrame(ttk.Frame):
             colors = [c for c in colors if c == color_f]
 
         self._mk_grid_buttons(colors, self._select_color, cols=4)
-        ttk.Button(self._grid_host, text="\u25c4 رجوع إلى الأنواع", command=self._render_items)\
+        ttk.Button(self._grid_host, text="\u25c4 رجوع إلى الأنواع", command=self._back_to_items)\
             .pack(anchor="w", padx=4, pady=4)
 
     def _select_color(self, color: str):
@@ -8704,7 +12362,36 @@ class POSFrame(ttk.Frame):
         return total
 
     def _active_add_requires_stock(self) -> bool:
-        return self.active_bill in (1, 2, 3)
+        if self.active_bill in (1, 2, 3):
+            return True
+        return self.active_bill == 6 and self._exchange_mode == "take"
+
+    def _rerender_selector_for_active_mode(self) -> None:
+        """Rebuild the selector after bill mode changes its stock visibility rule."""
+        try:
+            self._flt_school.refresh_values()
+            self._flt_item.refresh_values()
+            self._flt_color.refresh_values()
+        except Exception:
+            pass
+
+        query = ""
+        try:
+            query = (self._search_var.get() or "").strip()
+        except Exception:
+            query = ""
+        if query:
+            self._on_search_changed()
+            return
+
+        if self._sel_school and self._sel_item and self._sel_color:
+            self._render_sizes(preserve_size=self._sel_size)
+        elif self._sel_school and self._sel_item:
+            self._render_colors()
+        elif self._sel_school:
+            self._render_items()
+        else:
+            self._render_schools()
 
     def _available_qty_for_active_add(self, size: str) -> int:
         return self._available_qty_for_specs(
@@ -8796,16 +12483,26 @@ class POSFrame(ttk.Frame):
                 "item_type": self._sel_item,
                 "color": self._sel_color,
             }):
-                sz = str(r.get("size") or "").strip()
+                sz = _normalize_size_label(r.get("size") or "")
                 if not sz:
                     continue
                 stock_rows.setdefault(sz, {"count": 0, "last_price": r.get("unit_price")})
                 stock_rows[sz]["count"] += int(r.get("count") or 0)
+                if r.get("unit_price") not in (None, ""):
+                    stock_rows[sz]["last_price"] = r.get("unit_price")
         except Exception:
             pass
 
         self._sizes_cache = []
+        seen_sizes: Set[str] = set()
         for sz in raw_sizes:
+            sz = _normalize_size_label(sz)
+            if not sz:
+                continue
+            size_key = sz.casefold()
+            if size_key in seen_sizes:
+                continue
+            seen_sizes.add(size_key)
             r = stock_rows.get(sz, {})
             base = int(r.get("count", 0) or 0)
             pending = self._pending_out_qty_for_specs(
@@ -8837,7 +12534,17 @@ class POSFrame(ttk.Frame):
 
             self._size_btns[label] = (btn, cnt == 0)
 
-        ttk.Button(self._grid_host, text="\u25c4 رجوع إلى الأنواع", command=self._render_items)            .pack(anchor="w", padx=4, pady=4)
+        nav_row = ttk.Frame(self._grid_host)
+        nav_row.pack(anchor="w", padx=4, pady=4)
+        ttk.Button(nav_row, text="\u25c4 رجوع إلى الألوان", command=self._back_to_colors).pack(side=tk.LEFT, padx=(0, 6))
+        can_add_any = (not self._active_add_requires_stock()) or any(int(r.get("count") or 0) > 0 for r in self._sizes_cache)
+        add_all_btn = ttk.Button(nav_row, text="Add all to bill", command=self._add_all_visible_sizes_to_bill)
+        add_all_btn.pack(side=tk.LEFT)
+        if not can_add_any:
+            try:
+                add_all_btn.configure(state="disabled")
+            except Exception:
+                pass
 
         if preserve_size:
             psz = str(preserve_size).strip()
@@ -8923,6 +12630,30 @@ class POSFrame(ttk.Frame):
         self._sync_bill_table()
         self._refresh_size_grid_if_current(preserve_size=size)
 
+    def _add_all_visible_sizes_to_bill(self):
+        if not all([self._sel_school, self._sel_item, self._sel_color]):
+            messagebox.showwarning("اختر أولاً", "اختر المدرسة والنوع واللون أولاً.", parent=self)
+            return
+
+        sizes = [str(r.get("size") or "").strip() for r in (self._sizes_cache or []) if str(r.get("size") or "").strip()]
+        if not sizes:
+            messagebox.showwarning("لا توجد مقاسات", "لا توجد مقاسات لإضافتها.", parent=self)
+            return
+
+        if self._active_add_requires_stock():
+            sizes = [sz for sz in sizes if self._available_qty_for_active_add(sz) > 0]
+            if not sizes:
+                messagebox.showwarning(
+                    "لا توجد كميات",
+                    "كل المقاسات المعروضة كميتها صفر، لذلك لا يمكن إضافتها إلى الفاتورة.",
+                    parent=self,
+                )
+                self._refresh_size_grid_if_current()
+                return
+
+        for sz in sizes:
+            self._add_to_active_bill(sz, qty=1)
+
     def _compute_price_for_size(self, target_size: str) -> Optional[float]:
         import math
         try:
@@ -9007,8 +12738,7 @@ class POSFrame(ttk.Frame):
         try:
             rows = self.db.current_inventory({"school": school, "item_type": item, "color": color})
             for r in rows:
-                if int(r.get("count") or 0) > 0:
-                    _add_size(r.get("size"))
+                _add_size(r.get("size"))
         except Exception:
             pass
 
@@ -9198,6 +12928,7 @@ class POSFrame(ttk.Frame):
         # Save current customer
         self.customers[self.active_bill] = self._customer_var.get()
         self.customer_phones[self.active_bill] = _normalize_customer_phone(self._customer_phone_var.get())
+        previous_requires_stock = self._active_add_requires_stock()
         self.active_bill = n
         # Restore customer for this bill
         self._customer_var.set(self.customers[n])
@@ -9205,7 +12936,10 @@ class POSFrame(ttk.Frame):
         self._update_bill_btn_styles()
         self._sync_bill_table()
         self._update_res_frame_visibility()
-        self._refresh_size_grid_if_current(preserve_size=self._sel_size)
+        if previous_requires_stock != self._active_add_requires_stock():
+            self._rerender_selector_for_active_mode()
+        else:
+            self._refresh_size_grid_if_current(preserve_size=self._sel_size)
 
     def _sales_bill_for_next_entry(self) -> int:
         for n in (1, 2, 3):
@@ -9372,7 +13106,7 @@ class POSFrame(ttk.Frame):
         self._res_frame.pack_forget()
         self._return_frame.pack_forget()
         self._exchange_frame.pack_forget()
-        if self.active_bill == 5:
+        if self.active_bill in self.RESERVATION_BILLS:
             self._res_frame.pack(fill=tk.X, padx=4, pady=(2, 2))
         elif self.active_bill == 4:
             self._return_frame.pack(fill=tk.X, padx=4, pady=(2, 2))
@@ -9380,18 +13114,32 @@ class POSFrame(ttk.Frame):
             self._exchange_frame.pack(fill=tk.X, padx=4, pady=(2, 2))
 
     def _on_exchange_mode_changed(self):
+        previous_requires_stock = self._active_add_requires_stock()
         self._exchange_mode = self._exchange_mode_var.get()
+        try:
+            self._flt_school.refresh_values()
+            self._flt_item.refresh_values()
+            self._flt_color.refresh_values()
+        except Exception:
+            pass
+        if previous_requires_stock != self._active_add_requires_stock():
+            self._rerender_selector_for_active_mode()
+        else:
+            self.sync_refresh()
 
     def _sync_bill_table(self):
         self.bill_table.delete(*self.bill_table.get_children())
         total = 0.0
         return_total = 0.0
         take_total = 0.0
+        total_qty = 0
         is_return = self.active_bill == 4
         is_exchange = self.active_bill == 6
 
         for idx, ln in enumerate(self.bills[self.active_bill]):
-            line_total = float(ln["unit_price"]) * int(ln["qty"])
+            qty = int(ln["qty"])
+            line_total = float(ln["unit_price"]) * qty
+            total_qty += qty
             display_type = ln["item_type"]
 
             if is_return:
@@ -9411,9 +13159,10 @@ class POSFrame(ttk.Frame):
             self.bill_table.insert(
                 "", tk.END, iid=str(idx),
                 values=(display_type, ln["school"], ln["color"], ln["size"],
-                        f"{format_money(float(ln['unit_price']))}", ln["qty"], f"{format_money(line_total)}")
+                        f"{format_money(float(ln['unit_price']))}", qty, f"{format_money(line_total)}")
             )
 
+        self.total_items_var.set(str(total_qty))
         if is_exchange:
             diff = take_total - return_total
             if diff > 0:
@@ -9494,7 +13243,7 @@ class POSFrame(ttk.Frame):
         customer = (self.customers[self.active_bill] or "").strip()
         customer_phone = _normalize_customer_phone(self.customer_phones.get(self.active_bill, ""))
         total_qty = sum(int(ln["qty"]) for ln in lines)
-        is_reservation = self.active_bill == 5
+        is_reservation = self.active_bill in self.RESERVATION_BILLS
         is_return = self.active_bill == 4
         is_exchange = self.active_bill == 6
         warehouse_target = _extract_warehouse_target(customer)
@@ -9548,7 +13297,9 @@ class POSFrame(ttk.Frame):
         # Show confirmation overlay
         overlay = tk.Toplevel(self)
         overlay.title(overlay_title)
-        overlay.geometry("450x420" if is_exchange else "420x360")
+        overlay.geometry("640x520" if is_exchange else "600x480")
+        overlay.minsize(520, 380)
+        overlay.resizable(True, True)
         overlay.transient(self.winfo_toplevel())
         overlay.grab_set()
 
@@ -9599,7 +13350,11 @@ class POSFrame(ttk.Frame):
                 spec = f"{prefix}{ln['item_type']} - {ln['school']} ({ln['color']}/{ln['size']})"
                 lt = float(ln['unit_price']) * int(ln['qty'])
                 summary_tree.insert("", tk.END, values=(spec, ln['qty'], f"{format_money(lt)}"))
-        summary_tree.pack(fill=tk.BOTH, expand=True)
+        ysb = ttk.Scrollbar(cols_frm, orient="vertical", command=summary_tree.yview)
+        summary_tree.configure(yscrollcommand=ysb.set)
+        summary_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ysb.pack(side=tk.RIGHT, fill=tk.Y)
+        _bind_mousewheel(summary_tree)
 
         ttk.Label(frm, text=total_label,
                   font=("Segoe UI", 14, "bold")).pack(anchor="center", pady=(8, 12))
@@ -9637,7 +13392,8 @@ class POSFrame(ttk.Frame):
             self._refresh_size_grid_if_current(preserve_size=self._sel_size)
             ToastNotification.show(self.winfo_toplevel(),
                                    f"تم إنشاء فاتورة مرتجع #{bill_id} (استرداد: {format_money(total)})", toast_type="success")
-            self._print_return_bill(bill_id, total)
+            if self._ask_print_receipt():
+                self._print_return_bill(bill_id, total)
             self._reset_to_sales_bill_after_special_finalize()
 
         elif is_exchange:
@@ -9662,7 +13418,8 @@ class POSFrame(ttk.Frame):
             self._refresh_size_grid_if_current(preserve_size=self._sel_size)
             ToastNotification.show(self.winfo_toplevel(),
                                    f"تم إنشاء فاتورة استبدال #{bill_id}", toast_type="success")
-            self._print_exchange_bill(bill_id, lines_copy, total)
+            if self._ask_print_receipt():
+                self._print_exchange_bill(bill_id, lines_copy, total)
             self._reset_to_sales_bill_after_special_finalize()
 
         elif is_reservation:
@@ -9680,12 +13437,13 @@ class POSFrame(ttk.Frame):
                     return
             try:
                 ids = self.db.create_reservation(customer, lines, paid_amount=paid, customer_phone=customer_phone, payment_method=payment_method)
-                self._print_reservation_receipt(ids, lines, customer, paid, total, customer_phone)
+                if self._ask_print_receipt():
+                    self._print_reservation_receipt(ids, lines, customer, paid, total, customer_phone)
                 bill_no = min(int(x) for x in ids) if ids else ""
                 ToastNotification.show(self.winfo_toplevel(),
                                        f"تم إنشاء فاتورة حجز #{bill_no} بنجاح", toast_type="success")
-                self.bills[5].clear()
-                self._clear_customer_for_bill(5)
+                self.bills[self.active_bill].clear()
+                self._clear_customer_for_bill(self.active_bill)
                 self._paid_var.set("0")
                 self._res_note_var.set("")
                 self._sync_bill_table()
@@ -9739,7 +13497,8 @@ class POSFrame(ttk.Frame):
                     toast_type="success",
                 )
 
-            self._direct_print_bill(bill_id)
+            if self._ask_print_receipt():
+                self._direct_print_bill(bill_id)
 
     def _choose_payment_method(self, total: float, title: str = "\u0637\u0631\u064a\u0642\u0629 \u0627\u0644\u062f\u0641\u0639") -> Optional[str]:
         dlg = tk.Toplevel(self)
@@ -9775,6 +13534,14 @@ class POSFrame(ttk.Frame):
 
     def _choose_sale_payment_method(self, total: float) -> Optional[str]:
         return self._choose_payment_method(total)
+
+    def _ask_print_receipt(self) -> bool:
+        return messagebox.askyesno(
+            "طباعة الفاتورة",
+            "تم حفظ الفاتورة بنجاح.\nهل تريد طباعة الفاتورة الآن؟",
+            parent=self,
+        )
+
     def _direct_print_bill(self, bill_id: int, copies: int = 2):
         try:
             bill = next(b for b in self.db.list_bills() if int(b["id"]) == int(bill_id))
@@ -9798,7 +13565,16 @@ class POSFrame(ttk.Frame):
             support_whatsapp=support_whatsapp,
             shift_id=getattr(self.db, "active_shift_id", "") or "",
         )
-        _print_html_auto(html_path, copies=max(1, int(copies)), parent=self)
+        _print_receipt_direct_or_fallback(
+            html_path,
+            bill,
+            items,
+            copies=max(1, int(copies)),
+            parent=self,
+            pos_name=pos_name,
+            support_call=support_call,
+            support_whatsapp=support_whatsapp,
+        )
 
     def _print_reservation_receipt(self, ids, lines, customer, paid, total, customer_phone="", bill_id: Optional[Any] = None):
         """Auto-print a receipt for a newly created reservation."""
@@ -9810,7 +13586,7 @@ class POSFrame(ttk.Frame):
                 pass
         res_num = str(bill_id or (min(clean_ids) if clean_ids else ""))
         customer_phone = _normalize_customer_phone(customer_phone)
-        remaining = total - paid
+        remaining = max(0.0, float(total or 0.0) - float(paid or 0.0))
         path = os.path.join(tempfile.gettempdir(), f"reservation_{res_num}.html")
         pos_name, support_call, support_whatsapp = _lookup_receipt_branding(self.db.conn)
         receipt_items = []
@@ -9826,27 +13602,42 @@ class POSFrame(ttk.Frame):
                 "unit_price": price,
                 "line_total": price * qty,
             })
+        receipt_bill = {
+            "id": res_num,
+            "created_at": now_iso(),
+            "total": float(total),
+            "bill_type": "RESERVATION",
+            "customer": customer,
+            "customer_phone": customer_phone,
+        }
+        extra_rows = [
+            ("المدفوع", paid),
+            ("المتبقي للدفع لاحقاً", remaining),
+        ]
         save_bill_as_html(
             path,
-            {
-                "id": res_num,
-                "created_at": now_iso(),
-                "total": float(total),
-                "bill_type": "RESERVATION",
-                "customer": customer,
-                "customer_phone": customer_phone,
-            },
+            receipt_bill,
             receipt_items,
             pos_name=pos_name,
             support_call=support_call,
             support_whatsapp=support_whatsapp,
-            extra_summary_rows=[("المدفوع", paid), ("المتبقي", remaining)],
+            extra_summary_rows=extra_rows,
         )
-        _print_html_auto(path, copies=2, parent=self)
+        _print_receipt_direct_or_fallback(
+            path,
+            receipt_bill,
+            receipt_items,
+            copies=2,
+            parent=self,
+            pos_name=pos_name,
+            support_call=support_call,
+            support_whatsapp=support_whatsapp,
+            extra_summary_rows=extra_rows,
+        )
 
     def _print_pending_reservation_receipt(self, group_items: Sequence[Dict[str, Any]]):
         """Print a fresh reservation receipt for the still-pending items only."""
-        pending = [dict(r) for r in group_items if str(r.get("status") or "") != "تم التسليم"]
+        pending = [dict(r) for r in group_items if _is_reservation_active(r.get("status"))]
         if not pending:
             return
         bill_id = _reservation_bill_id_from_rows([dict(r) for r in group_items])
@@ -9884,7 +13675,16 @@ class POSFrame(ttk.Frame):
             support_call=support_call,
             support_whatsapp=support_whatsapp,
         )
-        _print_html_auto(path, copies=2, parent=self)
+        _print_receipt_direct_or_fallback(
+            path,
+            bill,
+            items,
+            copies=2,
+            parent=self,
+            pos_name=pos_name,
+            support_call=support_call,
+            support_whatsapp=support_whatsapp,
+        )
 
     def _print_exchange_bill(self, bill_id: int, lines: list, diff: float):
         if diff > 0:
@@ -9936,7 +13736,17 @@ class POSFrame(ttk.Frame):
             support_whatsapp=support_whatsapp,
             extra_summary_rows=[(diff_label, diff_value)],
         )
-        _print_html_auto(path, copies=2, parent=self)
+        _print_receipt_direct_or_fallback(
+            path,
+            bill,
+            receipt_items,
+            copies=2,
+            parent=self,
+            pos_name=pos_name,
+            support_call=support_call,
+            support_whatsapp=support_whatsapp,
+            extra_summary_rows=[(diff_label, diff_value)],
+        )
 
 
 # ------------------- Factory Item Dialog -------------------
@@ -10372,57 +14182,44 @@ class SchoolAccountsFrame(ttk.Frame):
         self.dt.set(today)
         ttk.Button(filters, text="اختيار المدارس", command=self._pick_schools).pack(side=tk.LEFT, padx=8)
         ttk.Button(filters, text="تحديث", command=self._refresh).pack(side=tk.LEFT, padx=8)
+        ttk.Button(filters, text="طباعة الإجمالي", command=self._print_day_total).pack(side=tk.LEFT, padx=8)
         ttk.Button(filters, text="مسح الاختيار", command=self._clear_schools).pack(side=tk.LEFT, padx=8)
 
         self._schools_var = tk.StringVar(value="كل المدارس")
         ttk.Label(self, textvariable=self._schools_var, foreground="#64748b").pack(anchor="w", pady=(0, 8))
 
-        summary = ttk.LabelFrame(self, text="ملخص")
+        summary = ttk.LabelFrame(self, text="ملخص اليوم")
         summary.pack(fill=tk.X, pady=(0, 8))
-        self._sum_school_count = tk.StringVar(value="0")
-        self._sum_qty = tk.StringVar(value="0")
-        self._sum_in = tk.StringVar(value="0")
-        self._sum_out = tk.StringVar(value="0")
-        self._sum_net = tk.StringVar(value="0")
+        self._sum_day = tk.StringVar(value="0")
+        self._sum_cash = tk.StringVar(value="0")
+        self._sum_visa = tk.StringVar(value="0")
         for i, (label, var) in enumerate([
-            ("عدد المدارس:", self._sum_school_count),
-            ("إجمالي الكمية:", self._sum_qty),
-            ("إجمالي داخل:", self._sum_in),
-            ("إجمالي خارج:", self._sum_out),
-            ("الصافي:", self._sum_net),
+            ("إجمالي اليوم:", self._sum_day),
+            ("إجمالي كاش:", self._sum_cash),
+            ("إجمالي فيزا:", self._sum_visa),
         ]):
             ttk.Label(summary, text=label).grid(row=0, column=i * 2, padx=6, pady=8, sticky="e")
             ttk.Label(summary, textvariable=var, font=("Segoe UI", 12, "bold")).grid(
                 row=0, column=i * 2 + 1, padx=(0, 16), pady=8, sticky="w"
             )
 
-        table_wrap = ttk.LabelFrame(self, text="تفاصيل التدفق المالي")
+        table_wrap = ttk.LabelFrame(self, text="فواتير اليوم")
         table_wrap.pack(fill=tk.BOTH, expand=True)
         cols = (
-            "school", "item_type", "color", "size", "qty",
-            "sales_total", "reservation_paid", "reservation_delivered",
-            "exchange_in", "cash_in", "visa_in", "return_total",
-            "void_total", "exchange_out", "cash_out", "visa_out", "net_total",
+            "event_at", "bill_no", "bill_type", "schools", "customer",
+            "payment_method", "cash_total", "visa_total", "total_paid",
         )
         self._tree = ttk.Treeview(table_wrap, columns=cols, show="headings", height=16)
         for col, txt, w in [
-            ("school", "المدرسة", 170),
-            ("item_type", "النوع", 170),
-            ("color", "اللون", 110),
-            ("size", "المقاس", 90),
-            ("qty", "الكمية", 80),
-            ("sales_total", "بيع", 95),
-            ("reservation_paid", "عربون حجز", 105),
-            ("reservation_delivered", "تسليم حجز", 105),
-            ("exchange_in", "استبدال +", 95),
-            ("cash_in", "كاش داخل", 100),
-            ("visa_in", "فيزا داخل", 100),
-            ("return_total", "مرتجع", 95),
-            ("void_total", "إلغاء", 95),
-            ("exchange_out", "استبدال -", 95),
-            ("cash_out", "كاش خارج", 100),
-            ("visa_out", "فيزا خارج", 100),
-            ("net_total", "الصافي", 105),
+            ("event_at", "التاريخ", 150),
+            ("bill_no", "رقم الفاتورة", 160),
+            ("bill_type", "النوع", 130),
+            ("schools", "المدارس", 180),
+            ("customer", "العميل", 170),
+            ("payment_method", "طريقة الدفع", 100),
+            ("cash_total", "كاش", 110),
+            ("visa_total", "فيزا", 110),
+            ("total_paid", "الإجمالي", 120),
         ]:
             self._tree.heading(col, text=txt)
             self._tree.column(col, width=w, anchor="center")
@@ -10457,60 +14254,88 @@ class SchoolAccountsFrame(ttk.Frame):
             date_to = date_from
         elif date_to and not date_from:
             date_from = date_to
-        rows = self.db.get_school_accounts_report(
+        report = self.db.get_school_accounts_day_report(
             self._selected_schools or self.db.list_schools_all(),
             date_from=date_from,
             date_to=date_to,
         )
+        rows = report.get("rows", [])
         self._tree.delete(*self._tree.get_children())
-        total_qty = 0
-        total_in = 0.0
-        total_out = 0.0
-        total_net = 0.0
-        schools_seen = set()
         for row in rows:
-            qty = int(row.get("total_qty") or 0)
-            cash_in = float(row.get("cash_in") or 0.0)
-            visa_in = float(row.get("visa_in") or 0.0)
-            cash_out = float(row.get("cash_out") or 0.0)
-            visa_out = float(row.get("visa_out") or 0.0)
-            net_total = float(row.get("net_total") or 0.0)
-            school = str(row.get("school") or "").strip()
-            schools_seen.add(school)
-            total_qty += qty
-            total_in += cash_in + visa_in
-            total_out += cash_out + visa_out
-            total_net += net_total
             self._tree.insert(
                 "",
                 tk.END,
                 values=(
-                    school,
-                    row.get("item_type") or "",
-                    row.get("color") or "",
-                    row.get("size") or "",
-                    qty,
-                    f"{format_money(float(row.get('sales_total') or 0.0))}",
-                    f"{format_money(float(row.get('reservation_paid') or 0.0))}",
-                    f"{format_money(float(row.get('reservation_delivered') or 0.0))}",
-                    f"{format_money(float(row.get('exchange_in') or 0.0))}",
-                    f"{format_money(cash_in)}",
-                    f"{format_money(visa_in)}",
-                    f"{format_money(float(row.get('return_total') or 0.0))}",
-                    f"{format_money(float(row.get('void_total') or 0.0))}",
-                    f"{format_money(float(row.get('exchange_out') or 0.0))}",
-                    f"{format_money(cash_out)}",
-                    f"{format_money(visa_out)}",
-                    f"{format_money(net_total)}",
+                    fmt_local_ts(row.get("event_at"), ""),
+                    row.get("bill_no") or "",
+                    self._bill_type_label(row.get("bill_type")),
+                    row.get("schools") or "",
+                    row.get("customer") or "",
+                    _payment_method_label(row.get("payment_method")),
+                    f"{format_money(float(row.get('cash_total') or 0.0))}",
+                    f"{format_money(float(row.get('visa_total') or 0.0))}",
+                    f"{format_money(float(row.get('total_paid') or 0.0))}",
                 ),
             )
         _apply_zebra_tags(self._tree)
         self._update_selected_schools_label()
-        self._sum_school_count.set(str(len(schools_seen)))
-        self._sum_qty.set(str(total_qty))
-        self._sum_in.set(f"{format_money(total_in)}")
-        self._sum_out.set(f"{format_money(total_out)}")
-        self._sum_net.set(f"{format_money(total_net)}")
+        self._sum_day.set(f"{format_money(float(report.get('total_day') or 0.0))}")
+        self._sum_cash.set(f"{format_money(float(report.get('total_cash') or 0.0))}")
+        self._sum_visa.set(f"{format_money(float(report.get('total_visa') or 0.0))}")
+
+    @staticmethod
+    def _bill_type_label(value: Any) -> str:
+        code = str(value or "").strip().upper()
+        if code == "VOID":
+            return "إلغاء"
+        if code == "RESERVATION":
+            return "عربون حجز"
+        if code == "RESERVATION_DELIVERY":
+            return "تسليم حجز"
+        if code == "RESERVATION_REFUND":
+            return "استرداد حجز"
+        return _receipt_bill_type_label(code)
+
+    def _print_day_total(self):
+        try:
+            date_from = self.df.get() or None
+            date_to = self.dt.get() or None
+            if date_from and not date_to:
+                date_to = date_from
+            elif date_to and not date_from:
+                date_from = date_to
+            schools = self._selected_schools or self.db.list_schools_all()
+            report = self.db.get_school_accounts_day_report(
+                schools,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            schools_text = " - ".join(schools) if schools else "كل المدارس"
+            range_text = _strip_digit_marks(f"{date_from or '---'} إلى {date_to or '---'}")
+            total = _strip_digit_marks(format_money(float(report.get("total_day") or 0.0)))
+            html = f"""<!DOCTYPE html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>إجمالي حسابات المدارس</title>
+<style>{_receipt_font_face_css()}@page {{ size: 80mm auto; margin: 2mm; }}
+body {{ font-family: {RECEIPT_FONT_STACK}; font-size: 12px; width: 76mm; direction: rtl; margin:0; padding:2mm; }}
+h2 {{ font-size: 15px; text-align: center; margin: 4px 0 6px; }}
+.sep {{ border:none; border-top:1px dashed #000; margin:6px 0; }}
+.row {{ margin: 5px 0; }}
+.label {{ font-weight: bold; }}
+.total {{ font-size: 18px; font-weight: bold; text-align: center; margin-top: 8px; }}
+.amount {{ font-family: Tahoma, Arial, "Segoe UI", sans-serif; direction: ltr; unicode-bidi: isolate; font-weight: bold; }}
+</style></head><body>
+<h2>إجمالي حسابات المدارس</h2>
+<hr class="sep">
+<div class="row"><span class="label">المدارس:</span> {_html(schools_text)}</div>
+<div class="row"><span class="label">الفترة:</span> <span class="amount">{_html(range_text)}</span></div>
+<hr class="sep">
+<div class="total">الإجمالي: <span class="amount">{_html(total)}</span></div>
+</body></html>"""
+            path = os.path.join(tempfile.gettempdir(), "school_accounts_day_total.html")
+            _write_html_file(path, html)
+            _print_html_auto(path, copies=1, parent=self)
+        except Exception as ex:
+            messagebox.showerror("فشل الطباعة", str(ex), parent=self)
 
 
 # ------------------- Shifts Summary Frame -------------------
@@ -10546,15 +14371,16 @@ class ShiftsSummaryFrame(ttk.Frame):
         table_frame = ttk.Frame(self)
         table_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
 
-        cols = ("id", "started", "ended", "status", "sales_count", "sales_total",
-                "return_total", "void_total", "exchange_total", "cash", "visa")
+        cols = ("id", "started", "ended", "status", "day_total",
+                "return_total", "void_total", "exchange_total", "expense_total", "cash", "visa")
         self._tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=10)
         for col, txt, w in [
             ("id", "#", 40), ("started", "البداية", 130), ("ended", "النهاية", 130),
-            ("status", "الحالة", 70), ("sales_count", "فواتير", 60),
-            ("sales_total", "مبيعات", 90), ("return_total", "مرتجعات", 90),
+            ("status", "الحالة", 70), ("day_total", "اجمالي اليوم", 110),
+            ("return_total", "مرتجعات", 90),
             ("void_total", "إلغاء", 80), ("exchange_total", "استبدالات", 90),
-            ("cash", "إجمالي كاش", 100), ("visa", "إجمالي فيزا", 100),
+            ("expense_total", "مصروفات", 90),
+            ("cash", "كاش صافي", 100), ("visa", "فيزا صافي", 100),
         ]:
             self._tree.heading(col, text=txt)
             self._tree.column(col, width=w, anchor="center")
@@ -10592,23 +14418,25 @@ class ShiftsSummaryFrame(ttk.Frame):
         self._det_return_var = tk.StringVar(value="-")
         self._det_void_var = tk.StringVar(value="-")
         self._det_exchange_var = tk.StringVar(value="-")
+        self._det_expense_var = tk.StringVar(value="-")
         self._det_cash_var = tk.StringVar(value="-")
         self._det_visa_var = tk.StringVar(value="-")
 
         for lbl, var in [
-            ("المبيعات:", self._det_sales_var),
+            ("اجمالي اليوم:", self._det_sales_var),
             ("المرتجعات:", self._det_return_var),
             ("الإلغاء:", self._det_void_var),
             ("الاستبدالات:", self._det_exchange_var),
+            ("المصروفات:", self._det_expense_var),
         ]:
             ttk.Label(detail_nums, text=lbl).pack(side=tk.LEFT)
             ttk.Label(detail_nums, textvariable=var, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(4, 16))
 
         cash_row = ttk.Frame(self._detail_frame)
         cash_row.pack(fill=tk.X, padx=8, pady=(0, 4))
-        ttk.Label(cash_row, text="إجمالي الكاش:", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+        ttk.Label(cash_row, text="كاش صافي:", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
         ttk.Label(cash_row, textvariable=self._det_cash_var, font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Label(cash_row, text=" | إجمالي الفيزا:", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Label(cash_row, text=" | فيزا صافي:", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(16, 0))
         ttk.Label(cash_row, textvariable=self._det_visa_var, font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT, padx=(4, 0))
 
         detail_btns = ttk.Frame(self._detail_frame)
@@ -10623,17 +14451,20 @@ class ShiftsSummaryFrame(ttk.Frame):
         totals_row.pack(fill=tk.X, padx=8, pady=4)
 
         self._tot_shifts_var = tk.StringVar(value="0")
-        self._tot_sales_var = tk.StringVar(value="0")
+        self._tot_day_var = tk.StringVar(value="0")
+        self._tot_expense_var = tk.StringVar(value="0")
         self._tot_cash_var = tk.StringVar(value="0")
         self._tot_visa_var = tk.StringVar(value="0")
 
         ttk.Label(totals_row, text="عدد الورديات:").pack(side=tk.LEFT)
         ttk.Label(totals_row, textvariable=self._tot_shifts_var, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(4, 20))
-        ttk.Label(totals_row, text="إجمالي المبيعات:").pack(side=tk.LEFT)
-        ttk.Label(totals_row, textvariable=self._tot_sales_var, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(4, 20))
-        ttk.Label(totals_row, text="إجمالي الكاش:").pack(side=tk.LEFT)
+        ttk.Label(totals_row, text="اجمالي اليوم:").pack(side=tk.LEFT)
+        ttk.Label(totals_row, textvariable=self._tot_day_var, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(4, 20))
+        ttk.Label(totals_row, text="مصروفات:").pack(side=tk.LEFT)
+        ttk.Label(totals_row, textvariable=self._tot_expense_var, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(4, 20))
+        ttk.Label(totals_row, text="كاش صافي:").pack(side=tk.LEFT)
         ttk.Label(totals_row, textvariable=self._tot_cash_var, font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Label(totals_row, text=" | إجمالي الفيزا:").pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Label(totals_row, text=" | فيزا صافي:").pack(side=tk.LEFT, padx=(16, 0))
         ttk.Label(totals_row, textvariable=self._tot_visa_var, font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT, padx=(4, 0))
 
         self._shifts_data: List[Dict[str, Any]] = []
@@ -10648,29 +14479,34 @@ class ShiftsSummaryFrame(ttk.Frame):
             self._shifts_data = []
 
         self._tree.delete(*self._tree.get_children())
-        total_sales = 0.0
+        total_day = 0.0
+        total_expense = 0.0
         total_cash = 0.0
         total_visa = 0.0
         for s in self._shifts_data:
             started = fmt_local_ts(s["started_at"], "")
             ended = fmt_local_ts(s["ended_at"], "") if s["ended_at"] else "-"
             status = "مفتوحة" if s["status"] == "OPEN" else "مغلقة"
+            day_total = float(s.get("cash_collected") or 0.0) + float(s.get("visa_collected") or 0.0)
             self._tree.insert("", tk.END, values=(
                 s["id"], started, ended, status,
-                s["sales_count"], f"{format_money(s['sales_total'])}",
+                f"{format_money(day_total)}",
                 f"{format_money(s.get('return_total', 0.0))}",
                 f"{format_money(s.get('void_total', 0.0))}",
                 f"{format_money(s.get('exchange_total', 0.0))}",
+                f"{format_money(s.get('expense_total', 0.0))}",
                 f"{format_money(s['cash_collected'])}",
                 f"{format_money(s.get('visa_collected', 0.0))}",
             ))
-            total_sales += s["sales_total"]
+            total_day += day_total
+            total_expense += float(s.get("expense_total") or 0.0)
             total_cash += s["cash_collected"]
             total_visa += float(s.get("visa_collected", 0.0))
         _apply_zebra_tags(self._tree)
 
         self._tot_shifts_var.set(str(len(self._shifts_data)))
-        self._tot_sales_var.set(f"{format_money(total_sales)}")
+        self._tot_day_var.set(f"{format_money(total_day)}")
+        self._tot_expense_var.set(f"{format_money(total_expense)}")
         self._tot_cash_var.set(f"{format_money(total_cash)}")
         self._tot_visa_var.set(f"{format_money(total_visa)}")
 
@@ -10682,6 +14518,7 @@ class ShiftsSummaryFrame(ttk.Frame):
         self._det_return_var.set("-")
         self._det_void_var.set("-")
         self._det_exchange_var.set("-")
+        self._det_expense_var.set("-")
         self._det_cash_var.set("-")
         self._det_visa_var.set("-")
 
@@ -10702,10 +14539,12 @@ class ShiftsSummaryFrame(ttk.Frame):
         self._det_id_var.set(f"#{s['id']}")
         self._det_period_var.set(f"{started}  →  {ended}")
         self._det_status_var.set(status)
-        self._det_sales_var.set(f"{s['sales_count']} فاتورة - {format_money(s['sales_total'])}")
+        day_total = float(s.get("cash_collected") or 0.0) + float(s.get("visa_collected") or 0.0)
+        self._det_sales_var.set(f"{format_money(day_total)}")
         self._det_return_var.set(f"{s.get('return_count', 0)} فاتورة - {format_money(s.get('return_total', 0.0))}")
         self._det_void_var.set(f"{s.get('void_count', 0)} فاتورة - {format_money(s.get('void_total', 0.0))}")
         self._det_exchange_var.set(f"{s.get('exchange_count', 0)} فاتورة - صافي {format_money(s.get('exchange_total', 0.0))}")
+        self._det_expense_var.set(f"{s.get('expense_count', 0)} عملية - {format_money(s.get('expense_total', 0.0))}")
         self._det_cash_var.set(f"{format_money(s['cash_collected'])}")
         self._det_visa_var.set(f"{format_money(float(s.get('visa_collected', 0.0)))}")
 
@@ -10742,13 +14581,18 @@ class ShiftsSummaryFrame(ttk.Frame):
                 f'<div>تحصيل تسليم الحجوزات: {_money_html(s.get("deliver_total", 0.0))}</div>\n'
                 f'<hr class="sep">'
             )
+        expense_html = (
+            f'<div><b>مصروفات:</b> {_num_html(s.get("expense_count", 0))} عملية - {_money_html(s.get("expense_total", 0.0))}</div>\n'
+            f'<div>للعرض فقط ولا تدخل في اجمالي اليوم.</div>\n'
+            f'<hr class="sep">'
+        )
         html = f"""<!DOCTYPE html>
 <html lang="ar" dir="ltr"><head><meta charset="utf-8"><title>ملخص وردية</title>
 <style>
 {_receipt_font_face_css()}
 @page {{ size: 80mm auto; margin: 2mm; }}
-body {{ font-family: {RECEIPT_FONT_STACK}; font-size: 11px; width: 76mm; direction: ltr; margin:0; padding:2mm; }}
-.receipt {{ direction: rtl; unicode-bidi: isolate; }}
+body {{ font-family: {RECEIPT_FONT_STACK}; font-size: 11px; width: 76mm; min-height: 0; direction: ltr; margin:0; padding:2mm; }}
+.receipt {{ direction: rtl; unicode-bidi: isolate; min-height: auto; height: auto; max-height: none; overflow: visible; }}
 .digits {{ direction: ltr; unicode-bidi: isolate; font-family: Tahoma, Arial, "Segoe UI", sans-serif; }}
 h2 {{ font-size: 14px; text-align: center; margin: 4px 0; }}
 .sep {{ border:none; border-top:1px dashed #000; margin:4px 0; }}
@@ -10760,13 +14604,13 @@ h2 {{ font-size: 14px; text-align: center; margin: 4px 0; }}
 <div>بداية: {_num_html(started)}</div>
 <div>نهاية: {_num_html(ended)}</div>
 <hr class="sep">
-<div><b>المبيعات:</b> {_num_html(s['sales_count'])} فاتورة - {_money_html(s['sales_total'])}</div>
+<div><b>اجمالي اليوم:</b> {_money_html(float(s.get('cash_collected') or 0.0) + float(s.get('visa_collected') or 0.0))}</div>
 <hr class="sep">
 <div><b>المرتجعات:</b> {_num_html(s.get('return_count', 0))} فاتورة - {_money_html(s.get('return_total', 0.0))}</div>
 {void_html}
 <div><b>الاستبدالات:</b> {_num_html(s.get('exchange_count', 0))} فاتورة - صافي {_money_html(s.get('exchange_total', 0.0))}</div>
 <hr class="sep">
-{customer_money_html}<div class="total">الكاش: {_money_html(s['cash_collected'])} | الفيزا: {_money_html(float(s.get('visa_collected', 0.0)))}</div>
+{customer_money_html}{expense_html}<div class="total">كاش صافي: {_money_html(s['cash_collected'])} | فيزا صافي: {_money_html(float(s.get('visa_collected', 0.0)))}</div>
 </div></body></html>"""
         tmp = os.path.join(tempfile.gettempdir(), f"shift_summary_{s['id']}.html")
         _write_html_file(tmp, html)
@@ -10777,18 +14621,22 @@ h2 {{ font-size: 14px; text-align: center; margin: 4px 0; }}
             messagebox.showinfo("تنبيه", "لا توجد ورديات لطباعتها", parent=self)
             return
         rows_html = ""
-        total_sales = 0.0
+        total_day = 0.0
+        total_expense = 0.0
         total_cash = 0.0
         total_visa = 0.0
         for s in self._shifts_data:
             started = s["started_at"][:16].replace("T", " ")
             ended = s["ended_at"][:16].replace("T", " ") if s["ended_at"] else "-"
             status = "مفتوحة" if s["status"] == "OPEN" else "مغلقة"
+            day_total = float(s.get("cash_collected") or 0.0) + float(s.get("visa_collected") or 0.0)
             rows_html += f"<tr><td>{_num_html(s['id'])}</td><td>{_num_html(started)}</td><td>{_num_html(ended)}</td><td>{_html(status)}</td>"
-            rows_html += f"<td>{_num_html(s['sales_count'])}</td><td>{_money_html(s['sales_total'])}</td>"
+            rows_html += f"<td>{_money_html(day_total)}</td>"
             rows_html += f"<td>{_money_html(s.get('return_total', 0.0))}</td><td>{_money_html(s.get('void_total', 0.0))}</td><td>{_money_html(s.get('exchange_total', 0.0))}</td>"
+            rows_html += f"<td>{_money_html(s.get('expense_total', 0.0))}</td>"
             rows_html += f"<td>{_money_html(s['cash_collected'])}</td><td>{_money_html(float(s.get('visa_collected', 0.0)))}</td></tr>\n"
-            total_sales += s["sales_total"]
+            total_day += day_total
+            total_expense += float(s.get("expense_total") or 0.0)
             total_cash += s["cash_collected"]
             total_visa += float(s.get("visa_collected", 0.0))
         html = f"""<!DOCTYPE html>
@@ -10807,12 +14655,12 @@ td {{ padding: 5px; border-bottom: 1px solid #ccc; text-align: center; }}
 <h2>ملخص جميع الورديات ({_num_html(len(self._shifts_data))} وردية)</h2>
 <table><thead><tr>
 <th>#</th><th>البداية</th><th>النهاية</th><th>الحالة</th>
-<th>فواتير</th><th>مبيعات</th><th>مرتجعات</th><th>إلغاء</th><th>استبدالات</th>
-<th>كاش</th><th>فيزا</th>
+<th>اجمالي اليوم</th><th>مرتجعات</th><th>إلغاء</th><th>استبدالات</th><th>مصروفات</th>
+<th>كاش صافي</th><th>فيزا صافي</th>
 </tr></thead><tbody>
 {rows_html}
 </tbody></table>
-<div class="totals">إجمالي المبيعات: {_money_html(total_sales)} | إجمالي الكاش: {_money_html(total_cash)} | إجمالي الفيزا: {_money_html(total_visa)}</div>
+<div class="totals">اجمالي اليوم: {_money_html(total_day)} | مصروفات: {_money_html(total_expense)} | كاش صافي: {_money_html(total_cash)} | فيزا صافي: {_money_html(total_visa)}</div>
 </div></body></html>"""
         tmp = os.path.join(tempfile.gettempdir(), "all_shifts_summary.html")
         _write_html_file(tmp, html)
@@ -10869,13 +14717,13 @@ class ReservationsFrame(ttk.Frame):
 
         self._res_table = ttk.Treeview(
             tbl_wrap,
-            columns=("bill", "id", "created", "customer", "phone", "item", "school", "color", "size", "qty", "total", "paid", "status"),
+            columns=("bill", "created", "customer", "phone", "item", "school", "color", "size", "qty", "total", "paid", "status"),
             show="headings",
             height=12,
         )
         for col, txt, w in [
             ("bill", "الفاتورة", 88),
-            ("id", "رقم", 40), ("created", "التاريخ", 100), ("customer", "العميل", 100),
+            ("created", "التاريخ", 100), ("customer", "العميل", 100),
             ("phone", "رقم العميل", 110),
             ("item", "النوع", 90), ("school", "المدرسة", 110), ("color", "اللون", 70),
             ("size", "المقاس", 55), ("qty", "الكمية", 55), ("total", "الإجمالي", 80),
@@ -10896,6 +14744,7 @@ class ReservationsFrame(ttk.Frame):
         btns = ttk.Frame(self)
         btns.pack(fill=tk.X, padx=4, pady=4)
         ttk.Button(btns, text="تسليم الحجز", command=self._deliver_reservation_partial).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(btns, text="طباعة اجمالي الحجوزات", command=self._print_reservation_totals).pack(side=tk.RIGHT, padx=(4, 0))
         ttk.Button(btns, text="طباعة القائمة", command=self._print_reservations).pack(side=tk.RIGHT)
 
         self._refresh()
@@ -10947,8 +14796,8 @@ class ReservationsFrame(ttk.Frame):
                     bill_code = _reservation_bill_id_from_rows(group_rows) or str(r["id"])
                 except Exception:
                     bill_code = str(r["id"])
-                self._res_table.insert("", tk.END, values=(
-                    bill_code, r["id"], fmt_local_ts(r["created_at"], "")[:10], r.get("customer", ""),
+                self._res_table.insert("", tk.END, iid=str(r["id"]), values=(
+                    bill_code, fmt_local_ts(r["created_at"], "")[:10], r.get("customer", ""),
                     r.get("customer_phone", "") or "",
                     r["item_type"], r["school"], r["color"], r["size"],
                     r["qty"], f"{format_money(float(r['total_amount']))}",
@@ -10991,13 +14840,13 @@ class ReservationsFrame(ttk.Frame):
             messagebox.showwarning("تنبيه", "اختر حجزاً من الجدول أولاً.", parent=self)
             return
         vals = self._res_table.item(sel[0], "values")
-        res_id = parse_int_text(vals[1])
-        status = vals[12]
+        res_id = parse_int_text(sel[0])
+        status = vals[11]
         if status == "تم التسليم":
             messagebox.showinfo("تنبيه", "تم تسليم هذا الحجز مسبقاً.", parent=self)
             return
-        total = _parse_money_amount(vals[10])
-        paid = _parse_money_amount(vals[11])
+        total = _parse_money_amount(vals[9])
+        paid = _parse_money_amount(vals[10])
         remaining = total - paid
 
         dlg = tk.Toplevel(self)
@@ -11052,8 +14901,8 @@ class ReservationsFrame(ttk.Frame):
             messagebox.showwarning("تنبيه", "اختر حجزاً من الجدول أولاً.", parent=self)
             return
         vals = self._res_table.item(sel[0], "values")
-        res_id = parse_int_text(vals[1])
-        status = vals[12]
+        res_id = parse_int_text(sel[0])
+        status = vals[11]
         if status == "تم التسليم":
             messagebox.showinfo("تنبيه", "هذا السطر تم تسليمه مسبقاً.", parent=self)
             return
@@ -11062,7 +14911,7 @@ class ReservationsFrame(ttk.Frame):
         if not group_items:
             messagebox.showerror("خطأ", "تعذر تحميل عناصر فاتورة الحجز.", parent=self)
             return
-        pending_items = [r for r in group_items if str(r.get("status")) != "تم التسليم"]
+        pending_items = [r for r in group_items if _is_reservation_active(r.get("status"))]
         if not pending_items:
             messagebox.showinfo("تنبيه", "كل عناصر الفاتورة تم تسليمها مسبقاً.", parent=self)
             return
@@ -11117,7 +14966,7 @@ class ReservationsFrame(ttk.Frame):
             total = float(r.get("total_amount") or 0.0)
             paid = float(r.get("paid_amount") or 0.0)
             rem = max(0.0, float(r.get("total_amount") or 0.0) - float(r.get("paid_amount") or 0.0))
-            tv.insert("", tk.END, iid=str(rid), values=("☐", rid, r.get("item_type", ""), r.get("school", ""), r.get("color", ""), r.get("size", ""), int(r.get("qty") or 0), f"{format_money(total)}", f"{format_money(paid)}", f"{format_money(rem)}"))
+            tv.insert("", tk.END, iid=str(rid), values=("☐", group_code, r.get("item_type", ""), r.get("school", ""), r.get("color", ""), r.get("size", ""), int(r.get("qty") or 0), f"{format_money(total)}", f"{format_money(paid)}", f"{format_money(rem)}"))
 
         ttk.Label(frm, text="المبلغ المحصّل الآن:").pack(anchor="w")
         collect_var = tk.StringVar(value="0")
@@ -11127,9 +14976,7 @@ class ReservationsFrame(ttk.Frame):
             selected_rows = [pending_by_id[rid] for rid in sorted(selected_ids) if rid in pending_by_id]
             selected_total = sum(float(r.get("total_amount") or 0.0) for r in selected_rows)
             selected_paid = sum(float(r.get("paid_amount") or 0.0) for r in selected_rows)
-            pending_ids = set(pending_by_id)
-            partial_after_delivery = bool(pending_ids - selected_ids)
-            required = min(selected_total, remaining) if partial_after_delivery else max(0.0, selected_total - selected_paid)
+            required = max(0.0, selected_total - selected_paid)
             return selected_total, required
 
         def _refresh_selected_payment():
@@ -11187,7 +15034,149 @@ class ReservationsFrame(ttk.Frame):
             except Exception as ex:
                 messagebox.showerror("خطأ", str(ex), parent=dlg)
 
-        ttk.Button(frm, text="تأكيد التسليم", command=_confirm).pack(anchor="e")
+        def _cancel_selected():
+            if not selected_ids:
+                messagebox.showwarning("تنبيه", "اختر عنصراً واحداً على الأقل للإلغاء.", parent=dlg)
+                return
+            selected_total, _required = _selected_delivery_required()
+            selected_paid = sum(float(pending_by_id[rid].get("paid_amount") or 0.0) for rid in selected_ids if rid in pending_by_id)
+            remaining_after_cancel = [
+                r for rid, r in pending_by_id.items()
+                if rid not in selected_ids and _is_reservation_active(r.get("status"))
+            ]
+            refund_now = 0.0 if remaining_after_cancel else selected_paid
+            redistributed = selected_paid if remaining_after_cancel else 0.0
+            money_line = (
+                f"المبلغ الذي يجب رده للعميل الآن: {format_money(refund_now)}"
+                if refund_now > 1e-9
+                else f"لا يوجد رد نقدي الآن. سيتم توزيع العربون على باقي العناصر: {format_money(redistributed)}"
+            )
+            if not messagebox.askyesno(
+                "تأكيد إلغاء بند حجز",
+                "سيتم إلغاء العناصر المحددة من فاتورة الحجز.\n"
+                f"إجمالي العناصر: {format_money(selected_total)}\n"
+                f"العربون المخصص لها: {format_money(selected_paid)}\n\n"
+                f"{money_line}\n\n"
+                "هل تريد المتابعة؟",
+                parent=dlg,
+            ):
+                return
+            refund_method = PAYMENT_METHOD_CASH
+            if refund_now > 1e-9:
+                refund_method = self._choose_payment_method(refund_now, f"طريقة رد مبلغ {format_money(refund_now)}")
+                if not refund_method:
+                    return
+            try:
+                summary = self.db.cancel_reservation_items(
+                    sorted(selected_ids),
+                    reason="إلغاء بند من فاتورة الحجز",
+                    refund_payment_method=refund_method,
+                )
+                refreshed_group = self.db.list_reservation_group_items(res_id)
+                self._print_pending_reservation_receipt(refreshed_group)
+                dlg.destroy()
+                msg = f"تم إلغاء {int(summary.get('cancelled_items') or 0)} عنصر."
+                refund_amount = float(summary.get("refund_amount") or 0.0)
+                if refund_amount > 1e-9:
+                    msg += f" المبلغ المطلوب رده للعميل: {format_money(refund_amount)}"
+                else:
+                    msg += f" لا يوجد رد نقدي؛ تم توزيع العربون: {format_money(float(summary.get('redistributed_amount') or 0.0))}"
+                ToastNotification.show(self.winfo_toplevel(), msg, toast_type="success")
+                self._refresh()
+                try:
+                    ac = getattr(self.winfo_toplevel(), "_app_controller", None)
+                    if ac is not None and hasattr(ac, "refresh_dashboard"):
+                        ac.refresh_dashboard()
+                except Exception:
+                    pass
+            except Exception as ex:
+                messagebox.showerror("خطأ", str(ex), parent=dlg)
+
+        action_row = ttk.Frame(frm)
+        action_row.pack(fill=tk.X)
+        ttk.Button(action_row, text="إلغاء العناصر المحددة", command=_cancel_selected).pack(side=tk.LEFT)
+        ttk.Button(action_row, text="تأكيد التسليم", command=_confirm).pack(side=tk.RIGHT)
+
+    def _print_reservation_receipt(self, ids, lines, customer, paid, total, customer_phone="", bill_id: Optional[Any] = None):
+        clean_ids = []
+        for rid in ids or []:
+            try:
+                clean_ids.append(int(rid))
+            except Exception:
+                pass
+        res_num = str(bill_id or (min(clean_ids) if clean_ids else ""))
+        customer_phone = _normalize_customer_phone(customer_phone)
+        remaining = max(0.0, float(total or 0.0) - float(paid or 0.0))
+        path = os.path.join(tempfile.gettempdir(), f"reservation_{res_num}.html")
+        pos_name, support_call, support_whatsapp = _lookup_receipt_branding(self.db.conn)
+        receipt_items = []
+        for ln in lines:
+            qty = int(ln.get("qty") or 0)
+            price = float(ln.get("unit_price") or 0)
+            receipt_items.append({
+                "item_type": ln.get("item_type") or "",
+                "school": ln.get("school") or "",
+                "color": ln.get("color") or "",
+                "size": ln.get("size") or "",
+                "qty": qty,
+                "unit_price": price,
+                "line_total": price * qty,
+            })
+        receipt_bill = {
+            "id": res_num,
+            "created_at": now_iso(),
+            "total": float(total or 0.0),
+            "bill_type": "RESERVATION",
+            "customer": customer,
+            "customer_phone": customer_phone,
+        }
+        extra_rows = [
+            ("المدفوع", paid),
+            ("المتبقي للدفع لاحقاً", remaining),
+        ]
+        save_bill_as_html(
+            path,
+            receipt_bill,
+            receipt_items,
+            pos_name=pos_name,
+            support_call=support_call,
+            support_whatsapp=support_whatsapp,
+            extra_summary_rows=extra_rows,
+        )
+        _print_receipt_direct_or_fallback(
+            path,
+            receipt_bill,
+            receipt_items,
+            copies=2,
+            parent=self,
+            pos_name=pos_name,
+            support_call=support_call,
+            support_whatsapp=support_whatsapp,
+            extra_summary_rows=extra_rows,
+        )
+
+    def _print_pending_reservation_receipt(self, group_items: Sequence[Dict[str, Any]]):
+        pending = [dict(r) for r in group_items if _is_reservation_active(r.get("status"))]
+        if not pending:
+            return
+        bill_id = _reservation_bill_id_from_rows([dict(r) for r in group_items])
+        ids = [int(r.get("id") or 0) for r in pending]
+        customer = str(pending[0].get("customer") or "")
+        customer_phone = _normalize_customer_phone(pending[0].get("customer_phone") or "")
+        total = sum(float(r.get("total_amount") or 0.0) for r in pending)
+        paid = sum(float(r.get("paid_amount") or 0.0) for r in pending)
+        lines = [
+            {
+                "item_type": r.get("item_type") or "",
+                "school": r.get("school") or "",
+                "color": r.get("color") or "",
+                "size": r.get("size") or "",
+                "qty": int(r.get("qty") or 0),
+                "unit_price": float(r.get("unit_price") or 0.0),
+            }
+            for r in pending
+        ]
+        self._print_reservation_receipt(ids, lines, customer, paid, total, customer_phone, bill_id=bill_id)
 
     def _print_reservations(self):
         try:
@@ -11201,7 +15190,7 @@ class ReservationsFrame(ttk.Frame):
 <style>body{{font-family:Tahoma,Arial;margin:20px}} table{{border-collapse:collapse;width:100%}} th,td{{border:1px solid #777;padding:6px;text-align:center}}</style>
 </head><body>
 <h2>الحجوزات</h2>
-<table><thead><tr><th>الفاتورة</th><th>رقم</th><th>التاريخ</th><th>العميل</th><th>رقم العميل</th><th>النوع</th><th>المدرسة</th><th>اللون</th><th>المقاس</th><th>الكمية</th><th>الإجمالي</th><th>المدفوع</th><th>الحالة</th></tr></thead>
+<table><thead><tr><th>الفاتورة</th><th>التاريخ</th><th>العميل</th><th>رقم العميل</th><th>النوع</th><th>المدرسة</th><th>اللون</th><th>المقاس</th><th>الكمية</th><th>الإجمالي</th><th>المدفوع</th><th>الحالة</th></tr></thead>
 <tbody>{rows_html}</tbody></table>
 </body></html>"""
             import tempfile, os
@@ -11210,6 +15199,134 @@ class ReservationsFrame(ttk.Frame):
             _print_html_auto(path, copies=1, parent=self)
         except Exception as ex:
             messagebox.showerror("خطأ", str(ex), parent=self)
+
+    def _print_reservation_totals(self):
+        try:
+            df = self._rf_df.get() or None
+            dt = self._rf_dt.get() or None
+            school = self._rf_school.get() or None
+            item_type = self._rf_item.get() or None
+            color = self._rf_color.get() or None
+            status = self._rf_status.get() or None
+            rows = self.db.list_reservation_totals(
+                status=status,
+                date_from=df,
+                date_to=dt,
+                school=school,
+                item_type=item_type,
+                color=color,
+            )
+        except Exception as ex:
+            messagebox.showerror("خطأ", str(ex), parent=self)
+            return
+        if not rows:
+            messagebox.showinfo("لا توجد بيانات", "لا توجد حجوزات مطابقة للطباعة.", parent=self)
+            return
+
+        from collections import defaultdict, OrderedDict
+
+        groups = OrderedDict()
+        total_qty = 0
+        total_value = 0.0
+        total_paid = 0.0
+        for r in rows:
+            sch = str(r.get("school") or "").strip()
+            clr = str(r.get("color") or "").strip()
+            typ = str(r.get("item_type") or "").strip()
+            groups.setdefault(sch, OrderedDict())
+            groups[sch].setdefault(clr, OrderedDict())
+            groups[sch][clr].setdefault(typ, []).append(r)
+            total_qty += int(r.get("qty") or 0)
+            total_value += float(r.get("total_amount") or 0.0)
+            total_paid += float(r.get("paid_amount") or 0.0)
+
+        def size_tables_for_profile(profile, existing_sizes):
+            numeric_tables = []
+            alpha_labels = []
+            if profile is not None:
+                r1_start, r1_end, r2_start, r2_end, has_alpha = profile
+                merged = merged_numeric_size_labels_from_profile(r1_start, r1_end, r2_start, r2_end)
+                if merged:
+                    numeric_tables.append(merged[:])
+                if has_alpha:
+                    alpha_labels = ALPHA_SIZES[:]
+            if not numeric_tables and not alpha_labels:
+                all_sizes = sorted({_normalize_size_label(str(s or "")) for s in existing_sizes if str(s or "").strip()})
+                numeric = [s for s in all_sizes if s.isdigit()]
+                alpha = [s for s in all_sizes if not s.isdigit()]
+                if numeric:
+                    numeric_tables = [numeric]
+                if alpha:
+                    alpha_labels = alpha
+            return numeric_tables, alpha_labels
+
+        sections = []
+        for sch, color_groups in groups.items():
+            for clr, item_groups in sorted(color_groups.items(), key=lambda kv: kv[0].casefold()):
+                for typ, items in sorted(item_groups.items(), key=lambda kv: item_type_sort_key(kv[0])):
+                    size_counts = defaultdict(int)
+                    group_qty = 0
+                    group_value = 0.0
+                    group_paid = 0.0
+                    for r in items:
+                        size = _normalize_size_label(str(r.get("size") or ""))
+                        qty = int(r.get("qty") or 0)
+                        size_counts[size] += qty
+                        group_qty += qty
+                        group_value += float(r.get("total_amount") or 0.0)
+                        group_paid += float(r.get("paid_amount") or 0.0)
+                    profile = self.db.get_size_profile(typ, sch, clr)
+                    numeric_tables, alpha_labels = size_tables_for_profile(profile, [r.get("size") for r in items])
+
+                    def row_counts(labels):
+                        out = []
+                        for lbl in labels:
+                            v = int(size_counts.get(_normalize_size_label(str(lbl or "")), 0))
+                            out.append("" if v == 0 else str(v))
+                        return out
+
+                    def build_table(labels):
+                        return (
+                            "<table class='grid'><tbody>"
+                            f"<tr>{''.join(f'<th>{_html(str(x))}</th>' for x in labels)}</tr>"
+                            f"<tr>{''.join(f'<td class=num>{_html(v)}</td>' for v in row_counts(labels))}</tr>"
+                            "</tbody></table>"
+                        )
+
+                    tables = []
+                    for labels in numeric_tables:
+                        for i in range(0, len(labels), 15):
+                            tables.append(build_table(labels[i:i + 15]))
+                    if alpha_labels:
+                        tables.append("<div class='subhdr'>المقاسات بالحروف</div>" + build_table(alpha_labels))
+                    header = (
+                        f"<div class='hdr'><span>المدرسة: {_html(sch)}</span>"
+                        f"<span>اللون: {_html(clr)}</span><span>النوع: {_html(typ)}</span></div>"
+                        f"<div class='meta'>الكمية: {_num_html(group_qty)} | الإجمالي: {_money_html(group_value)} | المدفوع: {_money_html(group_paid)}</div>"
+                    )
+                    sections.append(f"<section class='sheet'>{header}{''.join(tables)}</section>")
+
+        title_bits = []
+        if status:
+            title_bits.append(f"الحالة: {_html(status)}")
+        if df or dt:
+            title_bits.append(f"الفترة: {_html(df or '')} - {_html(dt or '')}")
+        filters_html = (" | ".join(title_bits)) if title_bits else "كل الحجوزات المطابقة للفلاتر"
+        html = f"""<!DOCTYPE html>
+<html lang='ar' dir='rtl'><head><meta charset='utf-8'><title>اجمالي الحجوزات</title>
+<style>@page{{size:A4;margin:12mm}}*{{box-sizing:border-box}}body{{font-family:'Segoe UI',Tahoma,Arial,'Noto Sans Arabic',sans-serif;margin:0;direction:rtl;color:#111}}
+h2{{margin:0 0 6px;text-align:center}}.summary{{margin:0 0 10px;text-align:center;font-weight:600}}.sheet{{page-break-inside:avoid;margin-bottom:10mm}}
+.hdr{{display:flex;justify-content:space-between;font-weight:700;margin:6px 2px 4px;gap:8px}}.meta{{margin:0 2px 8px;font-weight:600}}
+.grid{{border-collapse:collapse;width:100%;table-layout:fixed;margin-bottom:6px}}.grid th,.grid td{{border:1px solid #555;padding:6px 4px;text-align:center}}
+.grid th{{background:#eee}}.num{{font-variant-numeric:tabular-nums}}.subhdr{{margin:6px 0 4px;font-weight:700}}</style></head><body>
+<h2>اجمالي الحجوزات</h2>
+<div class='summary'>{filters_html}<br>إجمالي الكمية: {_num_html(total_qty)} | إجمالي القيمة: {_money_html(total_value)} | إجمالي المدفوع: {_money_html(total_paid)}</div>
+{''.join(sections)}
+<script>window.onload=function(){{try{{window.print();}}catch(e){{}}}};</script></body></html>"""
+        import tempfile, os
+        path = os.path.join(tempfile.gettempdir(), f"reservation_totals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html")
+        _write_html_file(path, html)
+        _print_html_auto(path, copies=1, parent=self)
 
 
 # ------------------- Stock Audit Window -------------------
@@ -11346,13 +15463,13 @@ class StockAuditWindow(tk.Toplevel):
         self.table.tag_configure("surplus", background="#dcfce7")
         self.table.tag_configure("deficit", background="#fee2e2")
         self.table.tag_configure("verified", background="#bbf7d0")
-        self.table.tag_configure("current_touched", background="#fef3c7")
+        self.table.tag_configure("current_touched", background="#fed7aa")
         self.table.tag_configure("history_touched", background="#dbeafe")
         self.table.bind("<Double-1>", lambda e: self._edit_actual(), add="+")
 
         bar = ttk.Frame(self)
         bar.pack(fill=tk.X, padx=8, pady=(0, 8))
-        ttk.Label(bar, text="أخضر: تم التأكد من مطابقته").pack(side=tk.RIGHT, padx=8)
+        ttk.Label(bar, text="أخضر: مطابق | برتقالي: تم تعديل العدد | أزرق: تم لمسه سابقاً").pack(side=tk.RIGHT, padx=8)
         ttk.Label(bar, text="الكمية الفعلية للبند المحدد:").pack(side=tk.LEFT)
         self.actual_var = tk.StringVar(value="")
         ttk.Entry(bar, textvariable=self.actual_var, width=10).pack(side=tk.LEFT, padx=6)
@@ -11439,7 +15556,25 @@ class StockAuditWindow(tk.Toplevel):
             size = _normalize_size_label(r.get("size") or "")
             if not size:
                 continue
-            g["rows"][size] = dict(r, size=size)
+            existing = g["rows"].get(size)
+            if existing is None:
+                item = dict(r, size=size)
+                item["stock_ids"] = [int(r.get("id"))] if r.get("id") not in (None, "") else []
+                item["value"] = float(r.get("value") or (float(r.get("unit_price") or 0) * int(r.get("count") or 0)))
+                g["rows"][size] = item
+            else:
+                existing["count"] = int(existing.get("count") or 0) + int(r.get("count") or 0)
+                existing["value"] = float(existing.get("value") or 0) + float(
+                    r.get("value") or (float(r.get("unit_price") or 0) * int(r.get("count") or 0))
+                )
+                if r.get("id") not in (None, ""):
+                    rid = int(r.get("id"))
+                    ids = existing.setdefault("stock_ids", [])
+                    if rid not in ids:
+                        ids.append(rid)
+                existing["id"] = ", ".join(str(x) for x in existing.get("stock_ids") or [])
+                if int(existing.get("count") or 0) > 0:
+                    existing["unit_price"] = round(float(existing.get("value") or 0) / int(existing.get("count") or 1), 2)
             if float(r.get("unit_price") or 0) > 0:
                 g["price"] = float(r.get("unit_price") or 0)
         filters = self._filters()
@@ -11472,6 +15607,7 @@ class StockAuditWindow(tk.Toplevel):
 
     def _refresh(self):
         try:
+            self.db.ensure_branch_catalog_stock_rows_lightweight()
             self._touched_keys = self.db.stock_audit_touched_keys()
             self._rows = self._expanded_rows()
         except Exception as ex:
@@ -11489,16 +15625,17 @@ class StockAuditWindow(tk.Toplevel):
             r["diff_value"] = value
             total_diff += diff
             total_value += value
+            key = _audit_key(r)
             tags = []
-            if diff > 0:
+            if key in self._recent_keys:
+                tags.append("current_touched")
+            elif key in self._verified_keys:
+                tags.append("verified")
+            elif diff > 0:
                 tags.append("surplus")
             elif diff < 0:
                 tags.append("deficit")
-            elif _audit_key(r) in self._verified_keys:
-                tags.append("verified")
-            elif _audit_key(r) in self._recent_keys:
-                tags.append("current_touched")
-            elif _audit_key(r) in self._touched_keys:
+            elif key in self._touched_keys:
                 tags.append("history_touched")
             self.table.insert(
                 "", tk.END, iid=str(idx),
@@ -12768,7 +16905,7 @@ class BillsHistoryWindow(tk.Toplevel):
         bills_wrap.pack(fill=tk.BOTH, expand=False, padx=8, pady=(0, 6))
         self.bills_table = ttk.Treeview(
             bills_wrap,
-            columns=("id", "created_at", "bill_type", "customer", "phone", "total", "status"),
+            columns=("id", "created_at", "bill_type", "customer", "phone", "total", "payment_method", "status"),
             show="headings",
             height=10,
         )
@@ -12779,6 +16916,7 @@ class BillsHistoryWindow(tk.Toplevel):
             ("customer", "العميل", 200),
             ("phone", "رقم العميل", 120),
             ("total", "الإجمالي", 100),
+            ("payment_method", "طريقة الدفع", 100),
             ("status", "الحالة", 100),
         ]:
             self.bills_table.heading(col, text=txt)
@@ -12881,6 +17019,7 @@ class BillsHistoryWindow(tk.Toplevel):
                     b.get("customer") or "",
                     b.get("customer_phone") or "",
                     f"{format_money(float(b['total']))}",
+                    _payment_method_label(str(b.get("payment_method") or PAYMENT_METHOD_CASH)),
                     status_text,
                 ),
             )
@@ -13019,18 +17158,38 @@ class BillsHistoryWindow(tk.Toplevel):
         if bill_id is None:
             messagebox.showwarning("غير مناسب", "اختر فاتورة بيع عادية للإلغاء. الحجوزات تدار من شاشة الحجوزات.", parent=self)
             return
+        try:
+            bill = next(b for b in self.db.list_bills() if int(b["id"]) == int(bill_id))
+        except StopIteration:
+            messagebox.showerror("خطأ", "لم يتم العثور على الفاتورة.", parent=self)
+            return
+        refund_amount = float(bill.get("total") or 0.0)
+        payment_method = _payment_label(str(bill.get("payment_method") or PAYMENT_METHOD_CASH))
         pw = simpledialog.askstring("كلمة مرور المدير", "أدخل كلمة مرور المدير:", show="*", parent=self)
         if not pw:
             return
         if not self.db.verify_admin_password(pw):
             messagebox.showerror("مرفوض", "كلمة المرور غير صحيحة.", parent=self)
             return
+        if not messagebox.askyesno(
+            "تأكيد إلغاء الفاتورة",
+            f"سيتم إلغاء الفاتورة #{bill_id}.\n\n"
+            f"المبلغ الذي يجب رده للعميل: {format_money(refund_amount)}\n"
+            f"طريقة الدفع الأصلية: {payment_method}\n\n"
+            "هذا المبلغ سيتم خصمه من ملخص الوردية. هل تريد المتابعة؟",
+            parent=self,
+        ):
+            return
         reason = simpledialog.askstring("سبب الإلغاء", "أدخل سبب الـ VOID:", parent=self)
         if reason is None:
             return
         try:
             self.db.void_bill(bill_id, reason)
-            ToastNotification.show(self.winfo_toplevel(), f"تم إلغاء الفاتورة #{bill_id} وتوثيق السبب", toast_type="success")
+            ToastNotification.show(
+                self.winfo_toplevel(),
+                f"تم إلغاء الفاتورة #{bill_id}. المبلغ المطلوب رده: {format_money(refund_amount)}",
+                toast_type="success",
+            )
             self._refresh()
         except Exception as ex:
             messagebox.showerror("فشل الإلغاء", str(ex), parent=self)
@@ -13662,6 +17821,64 @@ class AdminWindow(tk.Toplevel):
 
 # ------------------- Shift Summary Dialog -------------------
 
+class ExpenseDialog(tk.Toplevel):
+    """Capture visual-only cashier expenses for the active shift."""
+    def __init__(self, master, db: SqliteDatabase, on_saved=None):
+        super().__init__(master)
+        self.db = db
+        self._on_saved = on_saved
+        self.title("تسجيل مصروف")
+        self.geometry("420x220")
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+        self._build()
+
+    def _build(self):
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frm, text="تسجيل مصروف يومي", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 10))
+
+        row1 = ttk.Frame(frm)
+        row1.pack(fill=tk.X, pady=4)
+        ttk.Label(row1, text="المبلغ:", width=10).pack(side=tk.LEFT)
+        self._amount_var = tk.StringVar()
+        amount_ent = ttk.Entry(row1, textvariable=self._amount_var, width=18)
+        amount_ent.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        row2 = ttk.Frame(frm)
+        row2.pack(fill=tk.X, pady=4)
+        ttk.Label(row2, text="ملاحظة:", width=10).pack(side=tk.LEFT)
+        self._note_var = tk.StringVar()
+        ttk.Entry(row2, textvariable=self._note_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        ttk.Label(
+            frm,
+            text="المصروفات للعرض فقط ولا تغير اجمالي اليوم أو الكاش/الفيزا.",
+            foreground="#6b7280",
+        ).pack(anchor="w", pady=(8, 4))
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(btns, text="إلغاء", command=self.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="حفظ", command=self._save).pack(side=tk.RIGHT, padx=8)
+
+        amount_ent.focus_set()
+        amount_ent.bind("<Return>", lambda _e: self._save())
+
+    def _save(self):
+        try:
+            amount = _parse_money_amount(self._amount_var.get())
+            self.db.add_expense(amount, self._note_var.get())
+            if self._on_saved:
+                self._on_saved()
+            ToastNotification.show(self.master, "تم تسجيل المصروف", toast_type="success")
+            self.destroy()
+        except Exception as ex:
+            messagebox.showerror("خطأ", str(ex), parent=self)
+
+
 class ShiftSummaryDialog(tk.Toplevel):
     """Show shift summary and confirm closure."""
     def __init__(self, master, db: SqliteDatabase, shift_id: int, on_closed=None):
@@ -13749,6 +17966,22 @@ class ShiftSummaryDialog(tk.Toplevel):
             ttk.Label(cm, text=f"عربون الحجوزات: {format_money(summary.get('res_paid', 0.0))}").pack(anchor="w", padx=8, pady=2)
             ttk.Label(cm, text=f"تحصيل تسليم الحجوزات: {format_money(summary.get('deliver_total', 0.0))}").pack(anchor="w", padx=8, pady=2)
 
+        res_refund = float(summary.get("res_refund", 0.0) or 0.0)
+        if res_refund > 1e-9:
+            rr = ttk.LabelFrame(main, text="استرداد حجوزات")
+            rr.pack(fill=tk.X, pady=4)
+            ttk.Label(rr, text=f"مبلغ مردود للعميل: {format_money(res_refund)}").pack(anchor="w", padx=8, pady=2)
+            ttk.Label(rr, text="هذا المبلغ مخصوم من صافي الكاش/الفيزا حسب طريقة الرد.").pack(anchor="w", padx=8, pady=2)
+
+        expense_total = float(summary.get("expense_total", 0.0) or 0.0)
+        expense_count = int(summary.get("expense_count", 0) or 0)
+        if expense_count > 0 or expense_total > 1e-9:
+            ex_fr = ttk.LabelFrame(main, text="المصروفات")
+            ex_fr.pack(fill=tk.X, pady=4)
+            ttk.Label(ex_fr, text=f"عدد المصروفات: {expense_count}").pack(anchor="w", padx=8, pady=2)
+            ttk.Label(ex_fr, text=f"إجمالي المصروفات: {format_money(expense_total)}").pack(anchor="w", padx=8, pady=2)
+            ttk.Label(ex_fr, text="للعرض فقط ولا تدخل في اجمالي اليوم أو صافي الكاش/الفيزا.").pack(anchor="w", padx=8, pady=2)
+
         grand = float(summary.get("cash_collected", 0.0))
         visa_total = float(summary.get("visa_collected", 0.0))
         ttk.Label(main, text=f"إجمالي الكاش: {format_money(grand)} | إجمالي الفيزا: {format_money(visa_total)}", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=8)
@@ -13806,14 +18039,25 @@ class ShiftSummaryDialog(tk.Toplevel):
                 f'<div>تحصيل تسليم الحجوزات: {_money_html(summary.get("deliver_total", 0.0))}</div>\n'
                 f'<hr class="sep">'
             )
+        res_refund_html = ""
+        if float(summary.get("res_refund", 0.0) or 0.0) > 1e-9:
+            res_refund_html = (
+                f'<div><b>استرداد حجوزات:</b> -{_money_html(summary.get("res_refund", 0.0))}</div>\n'
+                f'<hr class="sep">'
+            )
+        expense_html = (
+            f'<div><b>مصروفات:</b> {_num_html(summary.get("expense_count", 0))} عملية - {_money_html(summary.get("expense_total", 0.0))}</div>\n'
+            f'<div>للعرض فقط ولا تدخل في اجمالي اليوم.</div>\n'
+            f'<hr class="sep">'
+        )
 
         html = f"""<!DOCTYPE html>
 <html lang="ar" dir="ltr"><head><meta charset="utf-8"><title>ملخص الوردية</title>
 <style>
 {_receipt_font_face_css()}
 @page {{ size: 80mm auto; margin: 2mm; }}
-body {{ font-family: {RECEIPT_FONT_STACK}; font-size: 11px; width: 76mm; direction: ltr; margin: 0; padding: 2mm; }}
-.receipt {{ direction: rtl; unicode-bidi: isolate; }}
+body {{ font-family: {RECEIPT_FONT_STACK}; font-size: 11px; width: 76mm; min-height: 0; direction: ltr; margin: 0; padding: 2mm; }}
+.receipt {{ direction: rtl; unicode-bidi: isolate; min-height: auto; height: auto; max-height: none; overflow: visible; }}
 .digits {{ direction: ltr; unicode-bidi: isolate; font-family: Tahoma, Arial, "Segoe UI", sans-serif; }}
 h2 {{ font-size: 14px; text-align: center; margin: 4px 0; }}
 .sep {{ border: none; border-top: 1px dashed #000; margin: 4px 0; }}
@@ -13827,9 +18071,9 @@ td {{ padding: 2px; border-bottom: 1px dotted #ccc; }}
 <div>بداية: {_num_html(started)}</div>
 <div>نهاية: الآن</div>
 <hr class="sep">
-<div><b>المبيعات:</b> {_num_html(summary['sales_count'])} فاتورة - {_money_html(summary['sales_total'])}</div>
+<div><b>اجمالي اليوم الصافي:</b> {_money_html(float(summary.get('cash_collected') or 0.0) + float(summary.get('visa_collected') or 0.0))}</div>
 <hr class="sep">
-{return_html}{void_html}{exchange_html}{customer_money_html}<div class="total">الكاش: {_money_html(grand)} | الفيزا: {_money_html(visa_total)}</div>
+{return_html}{void_html}{exchange_html}{customer_money_html}{res_refund_html}{expense_html}<div class="total">كاش صافي: {_money_html(grand)} | فيزا صافي: {_money_html(visa_total)}</div>
 </div></body></html>"""
 
         tmp = os.path.join(tempfile.gettempdir(), f"shift_{summary['shift_id']}.html")
@@ -13945,6 +18189,10 @@ class IncomingShipmentsFrame(ttk.Frame):
         except Exception:
             pass
         self._summary_var.set(f"عدد الشحنات المعلقة: {len(self._rows)} | إجمالي القطع: {total_qty}")
+        try:
+            self.app._update_incoming_shipments_badge(len(self._rows))
+        except Exception:
+            pass
 
 
 # ------------------- Bulk Price Dialog -------------------
@@ -14122,6 +18370,8 @@ class WarehouseApp:
         # Shift button
         self._shift_btn = ttk.Button(self._toolbar, text="\u0628\u062F\u0621 \u0648\u0631\u062F\u064A\u0629", command=self._toggle_shift)
         self._shift_btn.pack(side=tk.LEFT, padx=(16, 2))
+        self._expense_btn = ttk.Button(self._toolbar, text="مصروفات", command=self._open_expense_dialog)
+        self._expense_btn.pack(side=tk.LEFT, padx=2)
 
         # ---- Main notebook ----
         self._nb = ttk.Notebook(self.root)
@@ -14159,7 +18409,9 @@ class WarehouseApp:
 
         # Tab 5: Incoming shipments waiting for manual receipt confirmation
         incoming_ship_tab = ttk.Frame(self._nb)
-        self._nb.add(incoming_ship_tab, text="شحنات غير مؤكدة")
+        self._incoming_ship_tab = incoming_ship_tab
+        self._incoming_shipments_base_tab_text = "شحنات غير مؤكدة"
+        self._nb.add(incoming_ship_tab, text=self._incoming_shipments_base_tab_text)
         self._incoming_shipments_frame = IncomingShipmentsFrame(incoming_ship_tab, self.db, self)
         self._incoming_shipments_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -14201,6 +18453,30 @@ class WarehouseApp:
         except Exception:
             pass
 
+    def _update_incoming_shipments_badge(self, pending_count: Optional[int] = None):
+        try:
+            if pending_count is None:
+                pending_count = len(self.db.list_pending_incoming_shipments())
+            tab_text = self._incoming_shipments_base_tab_text
+            if int(pending_count or 0) > 0:
+                tab_text = f"! {tab_text} ({int(pending_count)})"
+            self._nb.tab(self._incoming_ship_tab, text=tab_text)
+        except Exception:
+            pass
+
+    def _open_expense_dialog(self):
+        if not self._current_shift_id:
+            messagebox.showwarning("تنبيه", "يجب فتح وردية قبل تسجيل المصروفات.", parent=self.root)
+            return
+
+        def _after_saved():
+            try:
+                self._shifts_frame._refresh_all()
+            except Exception:
+                pass
+
+        ExpenseDialog(self.root, self.db, on_saved=_after_saved)
+
     def _update_status(self, msg):
         self._status_var.set(msg)
         self.root.after(5000, lambda: self._status_var.set("\u062C\u0627\u0647\u0632"))
@@ -14239,12 +18515,14 @@ class WarehouseApp:
         try:
             alert = self.db.get_next_incoming_shipment_alert()
             if alert:
+                self._update_incoming_shipments_badge()
                 shipment_uuid = str(alert.get("shipment_uuid") or "").strip()
                 if shipment_uuid not in self._open_incoming_shipments:
                     self.db.mark_incoming_shipment_alert_shown(int(alert["id"]))
                     opened = self._open_incoming_shipment_checklist(alert)
                     if opened is False:
                         self.db.reset_incoming_shipment_alert_shown(int(alert["id"]))
+                self._update_incoming_shipments_badge()
         except Exception:
             pass
         self.root.after(4500, self._poll_incoming_shipment_alerts)
@@ -14259,6 +18537,8 @@ class WarehouseApp:
         dlg = tk.Toplevel(self.root)
         dlg.title("تأكيد استلام شحنة فرع")
         dlg.geometry("920x500")
+        dlg.minsize(760, 420)
+        dlg.resizable(True, True)
         dlg.transient(self.root)
         dlg.grab_set()
         confirmed = False
@@ -14364,6 +18644,48 @@ class WarehouseApp:
         ttk.Button(btn_row, text="تأكيد الاستلام", command=_confirm_receipt).pack(side=tk.RIGHT)
 
         return True
+
+    def _on_sync_completed(self):
+        try:
+            if hasattr(self, "_incoming_shipments_frame"):
+                self._incoming_shipments_frame._refresh()
+            else:
+                self._update_incoming_shipments_badge()
+        except Exception:
+            pass
+        self._repair_reclassification_counts_after_sync()
+        self._on_tab_changed(None)
+
+    def _on_background_sync_completed(self, summary=None):
+        try:
+            if hasattr(self, "_incoming_shipments_frame"):
+                self._incoming_shipments_frame._refresh()
+            else:
+                self._update_incoming_shipments_badge()
+        except Exception:
+            pass
+        self._repair_reclassification_counts_after_sync()
+        self._on_tab_changed(None)
+
+    def _repair_reclassification_counts_after_sync(self):
+        try:
+            result = self.db.repair_missing_branch_reclassification_counts()
+            qty = int(result.get("qty_restored") or 0)
+            if qty > 0:
+                self._update_status(f"تم إصلاح كميات تصنيف الفروع ({qty} قطعة)")
+                try:
+                    ToastNotification.show(
+                        self.root,
+                        f"تم إصلاح كميات تصنيف الفروع ({qty} قطعة).",
+                        toast_type="success",
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            try:
+                logging_setup.log_exception("branch_reclassification_repair.after_sync_failed")  # type: ignore[union-attr]
+            except Exception:
+                pass
 
     def _bind_shortcuts(self):
         self.root.bind("<F5>", lambda e: self._shortcut_refresh())
@@ -14625,6 +18947,11 @@ class WarehouseApp:
         self._shift_status_var.set("لا توجد وردية مفتوحة")
         self._shift_btn.configure(text="بدء وردية")
         self._set_app_enabled(False)
+        try:
+            import sync_ui
+            sync_ui.run_sync_now(self.root, self.db.conn, reason="إغلاق الوردية")
+        except Exception:
+            pass
 
     def _set_app_enabled(self, enabled: bool):
         state = "normal" if enabled else "disabled"
@@ -14647,11 +18974,87 @@ class WarehouseApp:
                 "يوجد وردية مفتوحة.\nهل تريد إنهاء الوردية قبل الإغلاق؟\n\nنعم = إنهاء الوردية ثم إغلاق\nلا = إغلاق بدون إنهاء\nإلغاء = العودة")
             if result is True:
                 ShiftSummaryDialog(self.root, self.db, self._current_shift_id,
-                                   on_closed=lambda: self.root.destroy())
+                                   on_closed=self._sync_after_shift_close_then_destroy)
             elif result is False:
                 self.root.destroy()
         else:
             self.root.destroy()
+
+    def _sync_after_shift_close_then_destroy(self):
+        """Push the final SHIFT_CLOSED event before the POS process exits."""
+        self._current_shift_id = None
+        self.db.active_shift_id = None
+        try:
+            db_path = self.db.conn.execute("PRAGMA database_list").fetchone()[2]
+        except Exception:
+            self.root.destroy()
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("مزامنة إغلاق الوردية")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+        ttk.Label(
+            dlg,
+            text="جارٍ إرسال إغلاق الوردية قبل إغلاق البرنامج...",
+            padding=16,
+        ).pack(fill=tk.X)
+        status_var = tk.StringVar(value="يرجى الانتظار")
+        ttk.Label(dlg, textvariable=status_var, padding=(16, 0, 16, 12)).pack(fill=tk.X)
+        try:
+            dlg.protocol("WM_DELETE_WINDOW", lambda: None)
+            dlg.geometry("+%d+%d" % (self.root.winfo_rootx() + 420, self.root.winfo_rooty() + 260))
+        except Exception:
+            pass
+
+        result: Dict[str, Any] = {"done": False, "error": ""}
+
+        def worker() -> None:
+            try:
+                import sync_client
+                conn = sqlite3.connect(db_path, timeout=8.0, isolation_level=None, check_same_thread=False)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA busy_timeout=8000;")
+                conn.execute("PRAGMA synchronous=NORMAL;")
+                conn.execute("PRAGMA temp_store=MEMORY;")
+                conn.execute("PRAGMA cache_size=-12000;")
+                try:
+                    sync_client.SyncClient(conn).run_cycle(progress=None)
+                finally:
+                    conn.close()
+            except Exception as ex:
+                result["error"] = str(ex)
+            finally:
+                result["done"] = True
+
+        def pump() -> None:
+            if not result.get("done"):
+                try:
+                    self.root.after(120, pump)
+                except Exception:
+                    pass
+                return
+            try:
+                if dlg.winfo_exists():
+                    dlg.destroy()
+            except Exception:
+                pass
+            if result.get("error"):
+                try:
+                    messagebox.showwarning(
+                        "مزامنة إغلاق الوردية",
+                        "تم حفظ إغلاق الوردية محلياً، لكن تعذر إرسالها الآن.\n"
+                        "سيتم إرسالها في أول مزامنة قادمة.\n\n"
+                        f"{result.get('error')}",
+                        parent=self.root,
+                    )
+                except Exception:
+                    pass
+            self.root.destroy()
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(120, pump)
 
 
 # ------------------- Entry Point -------------------

@@ -114,7 +114,8 @@ def apply_sync_migration(conn: sqlite3.Connection) -> None:
             server_seq    INTEGER NOT NULL,
             source_device TEXT,
             payload_json  TEXT NOT NULL,
-            applied_at    TEXT NOT NULL  -- legacy: now means "received_at"
+            applied_at    TEXT NOT NULL, -- legacy: now means "received_at"
+            server_created_at TEXT
         );
         CREATE INDEX IF NOT EXISTS ix_sync_inbox_seq
             ON sync_inbox(server_seq);
@@ -148,6 +149,8 @@ def apply_sync_migration(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS ix_sync_dead_letter_seq
             ON sync_dead_letter(server_seq DESC);
+        CREATE INDEX IF NOT EXISTS ix_sync_dead_letter_source
+            ON sync_dead_letter(source_device);
 
         INSERT OR IGNORE INTO sync_state (channel, last_pulled_seq)
             VALUES ('main', 0);
@@ -158,6 +161,7 @@ def apply_sync_migration(conn: sqlite3.Connection) -> None:
     # NULL apply_status == not yet applied. Pure SQL additions are safe
     # on an existing Phase-1/2 inbox with rows in it.
     for col, ddl in (
+        ("server_created_at", "ALTER TABLE sync_inbox ADD COLUMN server_created_at TEXT"),
         ("apply_status",   "ALTER TABLE sync_inbox ADD COLUMN apply_status TEXT"),
         ("apply_error",    "ALTER TABLE sync_inbox ADD COLUMN apply_error TEXT"),
         ("apply_attempts", "ALTER TABLE sync_inbox ADD COLUMN apply_attempts INTEGER NOT NULL DEFAULT 0"),
@@ -289,6 +293,8 @@ def apply_sync_migration(conn: sqlite3.Connection) -> None:
             ON pos_reservations_mirror(source_device);
         CREATE INDEX IF NOT EXISTS ix_pos_res_m_status
             ON pos_reservations_mirror(status);
+        CREATE INDEX IF NOT EXISTS ix_pos_res_m_device_status
+            ON pos_reservations_mirror(source_device, status);
 
         -- Per-event cashflow rows from POS sync events (warehouse reporting).
         CREATE TABLE IF NOT EXISTS pos_financial_ledger (
@@ -300,6 +306,8 @@ def apply_sync_migration(conn: sqlite3.Connection) -> None:
             amount        REAL NOT NULL,
             gross_amount  REAL,
             cash_amount   REAL,
+            payment_method TEXT,
+            shift_id      INTEGER,
             day           TEXT NOT NULL,
             related_id    INTEGER,
             meta_json     TEXT,
@@ -307,6 +315,10 @@ def apply_sync_migration(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS ix_pos_fin_ledger_dev_day
             ON pos_financial_ledger(source_device, day DESC);
+        CREATE INDEX IF NOT EXISTS ix_pos_fin_ledger_dev_shift
+            ON pos_financial_ledger(source_device, shift_id);
+        CREATE INDEX IF NOT EXISTS ix_pos_fin_ledger_day_dev
+            ON pos_financial_ledger(day, source_device);
 
         -- Latest shift state per POS shift, for warehouse monitoring.
         CREATE TABLE IF NOT EXISTS pos_shifts_mirror (
@@ -324,12 +336,20 @@ def apply_sync_migration(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS ix_pos_shifts_mirror_device_status
             ON pos_shifts_mirror(source_device, status);
+        CREATE INDEX IF NOT EXISTS ix_pos_shifts_mirror_device_shift_status
+            ON pos_shifts_mirror(source_device, shift_id, status);
+        CREATE INDEX IF NOT EXISTS ix_pos_shifts_mirror_device_started
+            ON pos_shifts_mirror(source_device, started_at);
+        CREATE INDEX IF NOT EXISTS ix_pos_shifts_mirror_device_ended
+            ON pos_shifts_mirror(source_device, ended_at);
         """
     )
 
     for col, ddl in (
         ("gross_amount", "ALTER TABLE pos_financial_ledger ADD COLUMN gross_amount REAL"),
         ("cash_amount", "ALTER TABLE pos_financial_ledger ADD COLUMN cash_amount REAL"),
+        ("payment_method", "ALTER TABLE pos_financial_ledger ADD COLUMN payment_method TEXT"),
+        ("shift_id", "ALTER TABLE pos_financial_ledger ADD COLUMN shift_id INTEGER"),
     ):
         if not _column_exists(conn, "pos_financial_ledger", col):
             try:

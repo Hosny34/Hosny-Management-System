@@ -35,8 +35,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timezone, timedelta
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 
 # ----------------------------- helpers -------------------------------- #
@@ -46,13 +47,58 @@ def _now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _record_targeted_event(
+    conn: sqlite3.Connection,
+    event_type: str,
+    target_scope: str,
+    payload: Dict[str, Any],
+) -> str:
+    event_id = str(uuid.uuid4())
+    if _has_column(conn, "sync_outbox", "target_scope"):
+        conn.execute(
+            """
+            INSERT INTO sync_outbox
+                (event_uuid, event_type, payload_json, created_at, status, attempts, target_scope)
+            VALUES (?, ?, ?, ?, 'pending', 0, ?)
+            """,
+            (
+                event_id,
+                event_type,
+                json.dumps(payload, ensure_ascii=False, default=str),
+                _utc_now_iso(),
+                target_scope,
+            ),
+        )
+    else:
+        payload = dict(payload)
+        payload["__target_scope__"] = target_scope
+        conn.execute(
+            """
+            INSERT INTO sync_outbox
+                (event_uuid, event_type, payload_json, created_at, status, attempts)
+            VALUES (?, ?, ?, ?, 'pending', 0)
+            """,
+            (
+                event_id,
+                event_type,
+                json.dumps(payload, ensure_ascii=False, default=str),
+                _utc_now_iso(),
+            ),
+        )
+    return event_id
+
+
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     cur = conn.execute("PRAGMA table_info(%s)" % table)
     return any(r[1] == column for r in cur.fetchall())
 
 
 def _clean(value: Any) -> str:
-    return str(value or "").strip()
+    return str(value or "").replace("\u200e", "").replace("\u200f", "").strip()
 
 
 def _timestamp_sort_value(value: Any) -> str:
@@ -120,8 +166,15 @@ def _upsert_zero_stock_catalog_row(
     color: str,
     size: str,
     unit_price: float,
+    *,
+    respect_tombstone: bool = True,
 ) -> bool:
     """Ensure a POS can select a catalog item even before stock arrives."""
+    if respect_tombstone and _branch_catalog_spec_is_deleted(
+        conn,
+        {"item_type": item_type, "school": school, "color": color, "size": size},
+    ):
+        return False
     row = conn.execute(
         """
         SELECT id, count, unit_price
@@ -157,6 +210,256 @@ def _upsert_zero_stock_catalog_row(
         (item_type, school, color, size, float(unit_price)),
     )
     return True
+
+
+def _mark_branch_catalog_definition(
+    conn: sqlite3.Connection,
+    item_type: str,
+    school: str,
+    color: str,
+    size: str,
+    unit_price: float,
+    event_uuid: str,
+    note: str = "",
+) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS branch_catalog_definitions(
+            item_type TEXT NOT NULL,
+            school TEXT NOT NULL,
+            color TEXT NOT NULL,
+            size TEXT NOT NULL,
+            unit_price REAL NOT NULL DEFAULT 0,
+            source_event_uuid TEXT,
+            note TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(item_type, school, color, size)
+        )
+        """
+    )
+    now = _now_iso()
+    conn.execute(
+        """
+        UPDATE branch_catalog_definitions
+           SET unit_price = ?,
+               source_event_uuid = ?,
+               note = ?,
+               created_at = ?
+         WHERE item_type = ?
+           AND school = ?
+           AND color = ?
+           AND size = ?
+        """,
+        (float(unit_price), str(event_uuid or ""), str(note or ""), now, item_type, school, color, size),
+    )
+    row = conn.execute(
+        """
+        SELECT 1 FROM branch_catalog_definitions
+         WHERE item_type = ? AND school = ? AND color = ? AND size = ?
+         LIMIT 1
+        """,
+        (item_type, school, color, size),
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            """
+            INSERT INTO branch_catalog_definitions
+                (item_type, school, color, size, unit_price, source_event_uuid, note, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (item_type, school, color, size, float(unit_price), str(event_uuid or ""), str(note or ""), now),
+        )
+
+
+def _ensure_branch_catalog_delete_tombstones(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS branch_catalog_delete_tombstones(
+            item_type TEXT,
+            school TEXT,
+            color TEXT,
+            size TEXT,
+            delete_server_seq INTEGER,
+            source_event_uuid TEXT,
+            note TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    try:
+        cols = {
+            str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+            for row in conn.execute("PRAGMA table_info(branch_catalog_delete_tombstones)").fetchall()
+        }
+        if "delete_server_seq" not in cols:
+            conn.execute("ALTER TABLE branch_catalog_delete_tombstones ADD COLUMN delete_server_seq INTEGER")
+    except sqlite3.OperationalError:
+        pass
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_branch_catalog_delete_tombstones_specs
+        ON branch_catalog_delete_tombstones(
+            LOWER(TRIM(COALESCE(item_type, ''))),
+            LOWER(TRIM(COALESCE(school, ''))),
+            LOWER(TRIM(COALESCE(color, ''))),
+            LOWER(TRIM(COALESCE(size, '')))
+        )
+        """
+    )
+
+
+def _branch_catalog_delete_filter_matches(spec: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+    for field in ("item_type", "school", "color", "size"):
+        expected = _clean(filters.get(field))
+        if not expected:
+            continue
+        actual = _clean(spec.get(field))
+        if actual.casefold() != expected.casefold():
+            return False
+    return True
+
+
+def _branch_catalog_spec_is_deleted(conn: sqlite3.Connection, spec: Dict[str, Any]) -> bool:
+    try:
+        _ensure_branch_catalog_delete_tombstones(conn)
+        rows = conn.execute(
+            """
+            SELECT item_type, school, color, size
+              FROM branch_catalog_delete_tombstones
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return False
+    for row in rows:
+        filters = {
+            "item_type": row["item_type"] if isinstance(row, sqlite3.Row) else row[0],
+            "school": row["school"] if isinstance(row, sqlite3.Row) else row[1],
+            "color": row["color"] if isinstance(row, sqlite3.Row) else row[2],
+            "size": row["size"] if isinstance(row, sqlite3.Row) else row[3],
+        }
+        if _branch_catalog_delete_filter_matches(spec, filters):
+            return True
+    return False
+
+
+def apply_branch_catalog_deleted(
+    conn: sqlite3.Connection,
+    payload: Dict[str, Any],
+    event_uuid: str,
+) -> Dict[str, Any]:
+    """Delete branch-visible catalog specs without touching positive stock."""
+    raw_filters = payload.get("filters") or []
+    if isinstance(raw_filters, dict):
+        raw_filters = [raw_filters]
+    if not isinstance(raw_filters, list) or not raw_filters:
+        raise ApplyError("BRANCH_CATALOG_DELETED requires filters")
+
+    cleaned_filters: List[Dict[str, str]] = []
+    for raw in raw_filters:
+        if not isinstance(raw, dict):
+            continue
+        filt = {field: _clean(raw.get(field)) for field in ("item_type", "school", "color", "size")}
+        if not any(filt.values()):
+            continue
+        cleaned_filters.append(filt)
+    if not cleaned_filters:
+        raise ApplyError("BRANCH_CATALOG_DELETED has no usable filters")
+
+    _ensure_branch_catalog_delete_tombstones(conn)
+    now = _now_iso()
+    seq_row = conn.execute(
+        "SELECT server_seq FROM sync_inbox WHERE event_uuid = ? LIMIT 1",
+        (str(event_uuid or ""),),
+    ).fetchone()
+    try:
+        delete_server_seq = int(seq_row["server_seq"] if isinstance(seq_row, sqlite3.Row) else seq_row[0]) if seq_row else None
+    except (TypeError, ValueError):
+        delete_server_seq = None
+    deleted_stock = 0
+    deleted_defs = 0
+    blocked_positive = 0
+    tombstones = 0
+
+    for filt in cleaned_filters:
+        where = []
+        args: List[Any] = []
+        for field in ("item_type", "school", "color", "size"):
+            value = filt.get(field) or ""
+            if not value:
+                continue
+            where.append(f"LOWER(TRIM({field})) = LOWER(TRIM(?))")
+            args.append(value)
+        where_sql = " AND ".join(where) if where else "1=0"
+
+        pos_row = conn.execute(
+            f"SELECT 1 FROM stocks WHERE {where_sql} AND COALESCE(count, 0) > 0 LIMIT 1",
+            args,
+        ).fetchone()
+        if pos_row is not None:
+            blocked_positive += 1
+            continue
+
+        cur = conn.execute(
+            f"DELETE FROM stocks WHERE {where_sql} AND COALESCE(count, 0) = 0",
+            args,
+        )
+        deleted_stock += int(cur.rowcount or 0)
+
+        try:
+            cur = conn.execute(
+                f"""
+                DELETE FROM branch_catalog_definitions
+                 WHERE {where_sql}
+                   AND NOT EXISTS (
+                        SELECT 1
+                          FROM stocks
+                         WHERE LOWER(TRIM(COALESCE(stocks.item_type, ''))) =
+                               LOWER(TRIM(COALESCE(branch_catalog_definitions.item_type, '')))
+                           AND LOWER(TRIM(COALESCE(stocks.school, ''))) =
+                               LOWER(TRIM(COALESCE(branch_catalog_definitions.school, '')))
+                           AND LOWER(TRIM(COALESCE(stocks.color, ''))) =
+                               LOWER(TRIM(COALESCE(branch_catalog_definitions.color, '')))
+                           AND LOWER(TRIM(COALESCE(stocks.size, ''))) =
+                               LOWER(TRIM(COALESCE(branch_catalog_definitions.size, '')))
+                           AND COALESCE(stocks.count, 0) > 0
+                   )
+                """,
+                args,
+            )
+            deleted_defs += int(cur.rowcount or 0)
+        except sqlite3.OperationalError:
+            pass
+
+        conn.execute(
+            """
+            INSERT INTO branch_catalog_delete_tombstones(
+                item_type, school, color, size, delete_server_seq, source_event_uuid, note, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                filt.get("item_type") or "",
+                filt.get("school") or "",
+                filt.get("color") or "",
+                filt.get("size") or "",
+                delete_server_seq,
+                str(event_uuid or ""),
+                _clean(payload.get("note")) or "Warehouse branch catalog delete",
+                now,
+            ),
+        )
+        tombstones += 1
+
+    return {
+        "deleted_stock_rows": deleted_stock,
+        "deleted_catalog_definitions": deleted_defs,
+        "blocked_positive_filters": blocked_positive,
+        "tombstones": tombstones,
+    }
+
+
+def _is_reservation_catalog_note(note: Any) -> bool:
+    text = _clean(note).casefold()
+    return "reservation" in text or "حجز" in text
 
 
 def _apply_size_profile_rows(conn: sqlite3.Connection, profiles: Any) -> int:
@@ -214,6 +517,40 @@ def _apply_size_profile_rows(conn: sqlite3.Connection, profiles: Any) -> int:
     return n
 
 
+def _apply_branch_catalog_rows(conn: sqlite3.Connection, rows: Any, event_uuid: str, note: str = "") -> int:
+    if not isinstance(rows, list) or not rows:
+        return 0
+    n = 0
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        it = _clean(raw.get("item_type"))
+        sc = _clean(raw.get("school"))
+        cl = _clean(raw.get("color"))
+        sz = _clean(raw.get("size"))
+        if not (it and sc and cl and sz):
+            continue
+        try:
+            price = float(raw.get("unit_price") or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        if _upsert_zero_stock_catalog_row(conn, it, sc, cl, sz, price):
+            n += 1
+        _mark_branch_catalog_definition(
+            conn,
+            it,
+            sc,
+            cl,
+            sz,
+            price,
+            event_uuid,
+            note=note or "Branch catalog from reclassification",
+        )
+        _upsert_spec_history(conn, {"item_type": it, "school": sc, "color": cl, "size": sz})
+        _ensure_item_default_price(conn, it, price)
+    return n
+
+
 def _update_item_default_price(
     conn: sqlite3.Connection,
     item_type: str,
@@ -228,6 +565,376 @@ def _update_item_default_price(
             "INSERT OR IGNORE INTO item_defaults(item_type, default_price) VALUES(?, ?)",
             (item_type, float(price)),
         )
+
+
+def _spec_is_branch_defined(conn: sqlite3.Connection, specs: Dict[str, str]) -> bool:
+    """True only when this exact POS spec is defined for the branch.
+
+    Branch definition comes from warehouse anchors and from exact positive
+    stock already present on the POS. The positive-stock fallback prevents an
+    incomplete ownership repair from making real quantities unsellable.
+    """
+    args = (specs["item_type"], specs["school"], specs["color"], specs["size"])
+    checks = (
+        (
+            """
+            SELECT 1
+              FROM stocks
+             WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+               AND COALESCE(count, 0) > 0
+             LIMIT 1
+            """,
+            args,
+        ),
+        (
+            """
+            SELECT 1
+              FROM branch_catalog_definitions
+             WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+             LIMIT 1
+            """,
+            args,
+        ),
+        (
+            """
+            SELECT 1
+              FROM incoming_shipment_items_pending
+             WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+               AND (COALESCE(expected_qty, 0) > 0 OR COALESCE(received_qty, 0) > 0)
+               AND UPPER(COALESCE(status, '')) <> 'CANCELLED'
+             LIMIT 1
+            """,
+            args,
+        ),
+        (
+            """
+            SELECT 1
+              FROM stock_audit_report_lines
+             WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+             LIMIT 1
+            """,
+            args,
+        ),
+    )
+    for sql, sql_args in checks:
+        try:
+            if conn.execute(sql, sql_args).fetchone():
+                return True
+        except sqlite3.OperationalError:
+            pass
+
+    try:
+        inbox_rows = conn.execute(
+            """
+            SELECT event_type, payload_json
+              FROM sync_inbox
+             WHERE event_type IN ('STOCK_TRANSFER_OUT', 'BRANCH_STOCK_RECLASSIFIED')
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        inbox_rows = []
+    cancelled_shipments: Set[str] = set()
+    try:
+        cancel_rows = conn.execute(
+            """
+            SELECT payload_json
+              FROM sync_inbox
+             WHERE event_type = 'STOCK_TRANSFER_CANCELLED'
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        cancel_rows = []
+    for row in cancel_rows:
+        try:
+            payload = json.loads(row[0] or "{}")
+        except Exception:
+            continue
+        shipment_uuid = _clean(payload.get("shipment_uuid") or payload.get("bill_uuid"))
+        if shipment_uuid:
+            cancelled_shipments.add(shipment_uuid.casefold())
+    for row in inbox_rows:
+        try:
+            event_type = str(row["event_type"] if isinstance(row, sqlite3.Row) else row[0] or "")
+            payload_json = row["payload_json"] if isinstance(row, sqlite3.Row) else row[1]
+            payload = json.loads(payload_json or "{}")
+        except Exception:
+            continue
+        if event_type == "BRANCH_STOCK_RECLASSIFIED":
+            to_spec = payload.get("to_spec") or {}
+            if isinstance(to_spec, dict) and all(
+                _clean(to_spec.get(k)).casefold() == specs[k].casefold()
+                for k in ("item_type", "school", "color", "size")
+            ):
+                return True
+            continue
+        shipment_uuid = _clean(payload.get("shipment_uuid"))
+        if shipment_uuid and shipment_uuid.casefold() in cancelled_shipments:
+            continue
+        note_text = _clean(payload.get("note")).casefold()
+        is_reservation_definition = "reservation" in note_text or "حجز" in note_text
+        for item in payload.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                qty = int(float(item.get("qty") or 0))
+            except (TypeError, ValueError):
+                qty = 0
+            catalog_only = bool(item.get("catalog_only"))
+            owns = qty > 0 or (catalog_only and is_reservation_definition)
+            if not owns:
+                continue
+            if all(_clean(item.get(k)).casefold() == specs[k].casefold() for k in ("item_type", "school", "color", "size")):
+                return True
+    return False
+
+
+def _exact_specs_for_filter(conn: sqlite3.Connection, filt: Dict[str, str]) -> List[Dict[str, str]]:
+    where = []
+    args: List[Any] = []
+    for field in ("item_type", "school", "color", "size"):
+        value = _clean(filt.get(field))
+        if value:
+            where.append(f"LOWER(TRIM(COALESCE({field}, ''))) = LOWER(TRIM(?))")
+            args.append(value)
+    if not where:
+        return []
+    specs: Dict[Tuple[str, str, str, str], Dict[str, str]] = {}
+    for table in ("stocks", "branch_catalog_definitions", "incoming_shipment_items_pending", "stock_audit_report_lines"):
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT item_type, school, color, size
+                  FROM {table}
+                 WHERE {" AND ".join(where)}
+                   AND COALESCE(TRIM(item_type), '') <> ''
+                   AND COALESCE(TRIM(school), '') <> ''
+                   AND COALESCE(TRIM(color), '') <> ''
+                   AND COALESCE(TRIM(size), '') <> ''
+                """,
+                args,
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        for row in rows:
+            spec = {
+                "item_type": _clean(row["item_type"] if isinstance(row, sqlite3.Row) else row[0]),
+                "school": _clean(row["school"] if isinstance(row, sqlite3.Row) else row[1]),
+                "color": _clean(row["color"] if isinstance(row, sqlite3.Row) else row[2]),
+                "size": _clean(row["size"] if isinstance(row, sqlite3.Row) else row[3]),
+            }
+            key = tuple(spec[k].casefold() for k in ("item_type", "school", "color", "size"))
+            specs[key] = spec
+    if all(_clean(filt.get(k)) for k in ("item_type", "school", "color", "size")):
+        spec = {k: _clean(filt.get(k)) for k in ("item_type", "school", "color", "size")}
+        key = tuple(spec[k].casefold() for k in ("item_type", "school", "color", "size"))
+        specs.setdefault(key, spec)
+    return list(specs.values())
+
+
+def _filter_has_protected_branch_anchor(conn: sqlite3.Connection, filt: Dict[str, str]) -> bool:
+    return any(_spec_is_branch_defined(conn, spec) for spec in _exact_specs_for_filter(conn, filt))
+
+
+def _spec_has_positive_stock(conn: sqlite3.Connection, specs: Dict[str, str]) -> bool:
+    try:
+        return bool(conn.execute(
+            """
+            SELECT 1
+              FROM stocks
+             WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+               AND COALESCE(count, 0) > 0
+             LIMIT 1
+            """,
+            (specs["item_type"], specs["school"], specs["color"], specs["size"]),
+        ).fetchone())
+    except sqlite3.OperationalError:
+        return False
+
+
+def _spec_has_hard_branch_anchor(conn: sqlite3.Connection, specs: Dict[str, str]) -> bool:
+    """True for anchors that manual cleanup/delete-definition must not hide."""
+    args = (specs["item_type"], specs["school"], specs["color"], specs["size"])
+    checks = (
+        (
+            """
+            SELECT 1
+              FROM stocks
+             WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+               AND COALESCE(count, 0) > 0
+             LIMIT 1
+            """,
+            args,
+        ),
+        (
+            """
+            SELECT 1
+              FROM incoming_shipment_items_pending
+             WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+               AND (COALESCE(expected_qty, 0) > 0 OR COALESCE(received_qty, 0) > 0)
+               AND UPPER(COALESCE(status, '')) <> 'CANCELLED'
+             LIMIT 1
+            """,
+            args,
+        ),
+        (
+            """
+            SELECT 1
+              FROM stock_audit_report_lines
+             WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+             LIMIT 1
+            """,
+            args,
+        ),
+        (
+            """
+            SELECT 1
+              FROM branch_catalog_definitions
+             WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+               AND (
+                    LOWER(COALESCE(note, '')) LIKE '%reservation%'
+                    OR COALESCE(note, '') LIKE '%حجز%'
+                    OR LOWER(COALESCE(note, '')) LIKE '%reclassification%'
+               )
+             LIMIT 1
+            """,
+            args,
+        ),
+    )
+    for sql, sql_args in checks:
+        try:
+            if conn.execute(sql, sql_args).fetchone():
+                return True
+        except sqlite3.OperationalError:
+            pass
+    try:
+        rows = conn.execute(
+            """
+            SELECT event_type, payload_json
+              FROM sync_inbox
+             WHERE event_type IN ('STOCK_TRANSFER_OUT', 'BRANCH_STOCK_RECLASSIFIED')
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    for row in rows:
+        try:
+            event_type = str(row["event_type"] if isinstance(row, sqlite3.Row) else row[0] or "")
+            payload_json = row["payload_json"] if isinstance(row, sqlite3.Row) else row[1]
+            payload = json.loads(payload_json or "{}")
+        except Exception:
+            continue
+        candidates: List[Dict[str, Any]] = []
+        if event_type == "STOCK_TRANSFER_OUT":
+            note_text = _clean(payload.get("note")).casefold()
+            is_reservation_definition = "reservation" in note_text or "حجز" in note_text
+            for item in payload.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    qty = int(float(item.get("qty") or 0))
+                except (TypeError, ValueError):
+                    qty = 0
+                if qty > 0 or (bool(item.get("catalog_only")) and is_reservation_definition):
+                    candidates.append(item)
+        elif event_type == "BRANCH_STOCK_RECLASSIFIED":
+            to_spec = payload.get("to_spec") or {}
+            if isinstance(to_spec, dict):
+                candidates.append(to_spec)
+            catalog_rows = payload.get("catalog_rows") or []
+            if isinstance(catalog_rows, list):
+                candidates.extend([r for r in catalog_rows if isinstance(r, dict)])
+        for raw in candidates:
+            if all(_clean(raw.get(k)).casefold() == specs[k].casefold() for k in ("item_type", "school", "color", "size")):
+                return True
+    return False
+
+
+def _price_update_spec_is_branch_owned(conn: sqlite3.Connection, specs: Dict[str, str]) -> bool:
+    return _spec_is_branch_defined(conn, specs)
+
+
+def _upsert_owned_price_catalog_row(
+    conn: sqlite3.Connection,
+    specs: Dict[str, str],
+    unit_price: float,
+) -> bool:
+    if not _price_update_spec_is_branch_owned(conn, specs):
+        return False
+    _upsert_spec_history(conn, specs)
+    _update_item_default_price(conn, specs["item_type"], float(unit_price))
+    conn.execute(
+        """
+        UPDATE branch_catalog_definitions
+           SET unit_price = ?
+         WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+        """,
+        (
+            float(unit_price),
+            specs["item_type"],
+            specs["school"],
+            specs["color"],
+            specs["size"],
+        ),
+    )
+    existing = conn.execute(
+        """
+        SELECT id
+          FROM stocks
+         WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+         ORDER BY id ASC
+         LIMIT 1
+        """,
+        (specs["item_type"], specs["school"], specs["color"], specs["size"]),
+    ).fetchone()
+    if existing:
+        return False
+    conn.execute(
+        """
+        INSERT INTO stocks(item_type, school, color, size, unit_price, count)
+        VALUES (?, ?, ?, ?, ?, 0)
+        """,
+        (
+            specs["item_type"],
+            specs["school"],
+            specs["color"],
+            specs["size"],
+            float(unit_price),
+        ),
+    )
+    return True
 
 
 def _upsert_pos_stock_snapshot_meta(
@@ -319,6 +1026,8 @@ def _delete_old_spec_history_if_unused(
 
 def _apply_spec_value_renames(conn: sqlite3.Connection, payload: Dict[str, Any]) -> int:
     """Apply broad value-level spec renames carried with SPEC_RENAMED events."""
+    if not bool(payload.get("allow_global_value_renames")):
+        return 0
     fields = {"item_type", "school", "color", "size"}
     renames = payload.get("value_renames") or []
     if not isinstance(renames, list):
@@ -339,6 +1048,8 @@ def _apply_spec_value_renames(conn: sqlite3.Connection, payload: Dict[str, Any])
             "reservations",
             "reservation_alerts",
             "incoming_shipment_items_pending",
+            "branch_catalog_definitions",
+            "stock_audit_report_lines",
             "pos_stocks_mirror",
         ):
             try:
@@ -375,10 +1086,17 @@ def apply_spec_renamed(
     new_spec = {fld: _clean(new_spec_raw.get(fld)) for fld in fields}
     if not all(old_spec.values()) or not all(new_spec.values()):
         raise ApplyError("SPEC_RENAMED requires complete old/new specs")
+
+    if not _spec_is_branch_defined(conn, old_spec):
+        return {
+            "skipped": True,
+            "reason": "spec is not defined for this branch",
+            "old_spec": old_spec,
+            "new_spec": new_spec,
+            "event_uuid": str(event_uuid),
+        }
+
     if old_spec == new_spec:
-        value_updates = _apply_spec_value_renames(conn, payload)
-        if value_updates:
-            return {"updated_rows": int(value_updates), "old_spec": old_spec, "new_spec": new_spec, "event_uuid": str(event_uuid)}
         return {"skipped": True, "reason": "old and new specs are identical"}
 
     set_sql = ", ".join(f"{fld}=?" for fld in fields)
@@ -394,6 +1112,8 @@ def apply_spec_renamed(
         "reservations",
         "reservation_alerts",
         "incoming_shipment_items_pending",
+        "branch_catalog_definitions",
+        "stock_audit_report_lines",
     ):
         try:
             cur = conn.execute(
@@ -461,8 +1181,6 @@ def apply_spec_renamed(
         if old_spec[fld] != new_spec[fld]:
             _delete_old_spec_history_if_unused(conn, fld, old_spec[fld])
 
-    updated_tables += _apply_spec_value_renames(conn, payload)
-
     return {
         "updated_rows": int(updated_tables),
         "old_spec": old_spec,
@@ -510,18 +1228,31 @@ def apply_stock_transfer_out(
     short_ship = (shipment_uuid[:8] if shipment_uuid else event_uuid[:8])
     note_base = f"شحنة من {from_dev} #{short_ship}"
 
-    # Idempotency guard by shipment UUID.
+    duplicate = False
+    # Idempotency guard by shipment UUID. Even when the shipment was seen by
+    # an older build, keep walking the payload so missing pending/catalog rows
+    # can be healed from the bill-shipment anchor.
     if shipment_uuid:
         dup = conn.execute(
-            "SELECT id FROM incoming_shipment_alerts WHERE shipment_uuid=? LIMIT 1",
-            (shipment_uuid,),
+            """
+            SELECT 1
+              FROM incoming_shipment_alerts
+             WHERE shipment_uuid = ?
+            UNION ALL
+            SELECT 1
+              FROM incoming_shipment_items_pending
+             WHERE shipment_uuid = ?
+            LIMIT 1
+            """,
+            (shipment_uuid, shipment_uuid),
         ).fetchone()
         if dup:
-            return {"queued": True, "duplicate": True, "shipment": shipment_uuid}
+            duplicate = True
 
     queued_rows = 0
     total_qty = 0
     catalog_rows = 0
+    pending_line_index = 0
 
     for item in items:
         it = _clean(item.get("item_type"))
@@ -541,11 +1272,38 @@ def apply_stock_transfer_out(
             raise ApplyError(f"incomplete shipment line specs: {item}")
         _upsert_spec_history(conn, {"item_type": it, "school": sc, "color": cl, "size": sz})
         _ensure_item_default_price(conn, it, price)
+        catalog_note = _clean(payload.get("note")) or "Catalog-only sync for POS reservations"
+        is_reservation_definition = bool(item.get("catalog_only")) and _is_reservation_catalog_note(catalog_note)
 
         if qty <= 0:
-            if _upsert_zero_stock_catalog_row(conn, it, sc, cl, sz, price):
+            if _upsert_zero_stock_catalog_row(
+                conn,
+                it,
+                sc,
+                cl,
+                sz,
+                price,
+                respect_tombstone=True,
+            ):
                 catalog_rows += 1
+            if is_reservation_definition and not _branch_catalog_spec_is_deleted(
+                conn,
+                {"item_type": it, "school": sc, "color": cl, "size": sz},
+            ):
+                _mark_branch_catalog_definition(
+                    conn,
+                    it,
+                    sc,
+                    cl,
+                    sz,
+                    price,
+                    event_uuid,
+                    note=catalog_note,
+                )
             continue
+
+        if _upsert_zero_stock_catalog_row(conn, it, sc, cl, sz, price, respect_tombstone=False):
+            catalog_rows += 1
 
         conn.execute(
             """
@@ -554,8 +1312,9 @@ def apply_stock_transfer_out(
                 unit_price, expected_qty, received_qty, status
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'PENDING')
             """,
-            (shipment_uuid or event_uuid, queued_rows, it, sc, cl, sz, price, qty),
+            (shipment_uuid or event_uuid, pending_line_index, it, sc, cl, sz, price, qty),
         )
+        pending_line_index += 1
         queued_rows += 1
         total_qty += qty
 
@@ -576,14 +1335,477 @@ def apply_stock_transfer_out(
                 _now_iso(),
             ),
         )
+        return {
+            "queued_rows": queued_rows,
+            "auto_received_rows": 0,
+            "catalog_rows": catalog_rows,
+            "total_qty": total_qty,
+            "shipment": shipment_uuid or None,
+            "needs_verification": True,
+            "size_profiles_applied": profile_rows,
+            "duplicate": duplicate,
+        }
 
     return {
         "queued_rows": queued_rows,
+        "auto_received_rows": 0,
         "catalog_rows": catalog_rows,
         "total_qty":  total_qty,
         "shipment":   shipment_uuid or None,
         "needs_verification": queued_rows > 0,
         "size_profiles_applied": profile_rows,
+        "duplicate": duplicate,
+    }
+
+
+def _consume_stock_for_shipment_cancel(
+    conn: sqlite3.Connection,
+    item_type: str,
+    school: str,
+    color: str,
+    size: str,
+    unit_price: float,
+    qty: int,
+    note: str,
+    direction: str = "SHIPMENT_CANCEL",
+) -> Tuple[int, int]:
+    remaining = max(0, int(qty or 0))
+    removed = 0
+    if remaining <= 0:
+        return 0, 0
+    rows = conn.execute(
+        """
+        SELECT id, COALESCE(count, 0) AS count, unit_price
+          FROM stocks
+         WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+           AND COALESCE(count, 0) > 0
+         ORDER BY id DESC
+        """,
+        (item_type, school, color, size),
+    ).fetchall()
+    for row in rows:
+        if remaining <= 0:
+            break
+        stock_id = int(row["id"])
+        available = int(row["count"] or 0)
+        take = min(available, remaining)
+        if take <= 0:
+            continue
+        conn.execute("UPDATE stocks SET count = count - ? WHERE id = ?", (take, stock_id))
+        conn.execute(
+            """
+            INSERT INTO movements
+                (ts, direction, stock_id, qty, note, bill_id,
+                 item_type, school, color, size, unit_price)
+            VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+            """,
+            (
+                _now_iso(),
+                str(direction or "SHIPMENT_CANCEL"),
+                stock_id,
+                take,
+                note,
+                item_type,
+                school,
+                color,
+                size,
+                float(row["unit_price"] if row["unit_price"] is not None else unit_price),
+            ),
+        )
+        removed += take
+        remaining -= take
+    return removed, remaining
+
+
+def _delete_unanchored_cancelled_zero_rows(
+    conn: sqlite3.Connection,
+    specs: Set[Tuple[str, str, str, str]],
+) -> int:
+    deleted = 0
+    for it, sc, cl, sz in specs:
+        has_catalog = False
+        try:
+            has_catalog = bool(conn.execute(
+                """
+                SELECT 1
+                  FROM branch_catalog_definitions
+                 WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+                 LIMIT 1
+                """,
+                (it, sc, cl, sz),
+            ).fetchone())
+        except sqlite3.OperationalError:
+            has_catalog = False
+        if has_catalog:
+            continue
+        has_active_shipment = bool(conn.execute(
+            """
+            SELECT 1
+              FROM incoming_shipment_items_pending
+             WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+               AND UPPER(COALESCE(status, '')) <> 'CANCELLED'
+               AND (COALESCE(expected_qty, 0) > 0 OR COALESCE(received_qty, 0) > 0)
+             LIMIT 1
+            """,
+            (it, sc, cl, sz),
+        ).fetchone())
+        if has_active_shipment:
+            continue
+        cur = conn.execute(
+            """
+            DELETE FROM stocks
+             WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+               AND COALESCE(count, 0) <= 0
+            """,
+            (it, sc, cl, sz),
+        )
+        deleted += int(cur.rowcount or 0)
+    return deleted
+
+
+def apply_stock_transfer_cancelled(
+    conn: sqlite3.Connection,
+    payload: Dict[str, Any],
+    event_uuid: str,
+) -> Dict[str, Any]:
+    """Cancel a warehouse -> POS shipment without corrupting counts.
+
+    Pending shipments are removed from the cashier checklist. Confirmed
+    shipments are reversed only when this POS still has rows for that exact
+    shipment UUID. If the original shipment is unknown locally, do not fall
+    back to subtracting by item spec because that can consume a later resent
+    bill for the same items.
+    """
+    shipment_uuid = _clean(payload.get("shipment_uuid") or payload.get("bill_uuid"))
+    if not shipment_uuid:
+        raise ApplyError("STOCK_TRANSFER_CANCELLED requires shipment_uuid")
+
+    rows = conn.execute(
+        """
+        SELECT *
+          FROM incoming_shipment_items_pending
+         WHERE shipment_uuid = ?
+         ORDER BY line_index ASC
+        """,
+        (shipment_uuid,),
+    ).fetchall()
+    if rows and all(str(r["status"] or "").upper() == "CANCELLED" for r in rows):
+        return {"shipment": shipment_uuid, "already_cancelled": True}
+
+    removed_qty = 0
+    shortage_qty = 0
+    pending_rows = 0
+    confirmed_rows = 0
+    note = _clean(payload.get("note")) or f"Shipment cancelled #{shipment_uuid[:8]}"
+    cancel_specs: Set[Tuple[str, str, str, str]] = set()
+
+    for row in rows:
+        it = _clean(row["item_type"])
+        sc = _clean(row["school"])
+        cl = _clean(row["color"])
+        sz = _clean(row["size"])
+        if it and sc and cl and sz:
+            cancel_specs.add((it, sc, cl, sz))
+        status = str(row["status"] or "").upper()
+        if status == "PENDING":
+            pending_rows += 1
+            continue
+        received = row["received_qty"]
+        try:
+            qty_to_reverse = int(received if received is not None else row["expected_qty"] or 0)
+        except (TypeError, ValueError):
+            qty_to_reverse = 0
+        if qty_to_reverse <= 0:
+            continue
+        confirmed_rows += 1
+        removed, shortage = _consume_stock_for_shipment_cancel(
+            conn,
+            it,
+            sc,
+            cl,
+            sz,
+            float(row["unit_price"] or 0.0),
+            qty_to_reverse,
+            note,
+        )
+        removed_qty += removed
+        shortage_qty += shortage
+
+    if not rows:
+        for item in payload.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            it = _clean(item.get("item_type"))
+            sc = _clean(item.get("school"))
+            cl = _clean(item.get("color"))
+            sz = _clean(item.get("size"))
+            if not (it and sc and cl and sz):
+                continue
+            cancel_specs.add((it, sc, cl, sz))
+            try:
+                qty = int(item.get("received_qty") if item.get("received_qty") is not None else item.get("qty") or 0)
+            except (TypeError, ValueError):
+                qty = 0
+            # Unknown local shipment: never subtract by spec-only payload.
+            # A resent branch bill may already own the same specs/quantities.
+            if qty > 0:
+                shortage_qty += qty
+
+    conn.execute(
+        """
+        UPDATE incoming_shipment_items_pending
+           SET status = 'CANCELLED',
+               received_qty = COALESCE(received_qty, 0)
+         WHERE shipment_uuid = ?
+        """,
+        (shipment_uuid,),
+    )
+    conn.execute(
+        """
+        UPDATE incoming_shipment_alerts
+           SET shown_at = COALESCE(shown_at, ?),
+               note = CASE
+                    WHEN COALESCE(note, '') = '' THEN ?
+                    ELSE note || ' | ' || ?
+               END
+         WHERE shipment_uuid = ?
+        """,
+        (_now_iso(), note, note, shipment_uuid),
+    )
+    deleted_zero_rows = _delete_unanchored_cancelled_zero_rows(conn, cancel_specs)
+    return {
+        "shipment": shipment_uuid,
+        "pending_rows_cancelled": pending_rows,
+        "confirmed_rows_cancelled": confirmed_rows,
+        "removed_qty": removed_qty,
+        "shortage_qty": shortage_qty,
+        "quantity_mode": "exact_shipment_only",
+        "deleted_zero_rows": deleted_zero_rows,
+    }
+
+
+def _stock_sum_for_spec(conn: sqlite3.Connection, spec: Dict[str, str]) -> int:
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(count), 0)
+          FROM stocks
+         WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+        """,
+        (spec["item_type"], spec["school"], spec["color"], spec["size"]),
+    ).fetchone()
+    return int((row[0] if row else 0) or 0)
+
+
+def _add_reclassified_stock(
+    conn: sqlite3.Connection,
+    spec: Dict[str, str],
+    qty: int,
+    unit_price: float,
+    note: str,
+) -> int:
+    row = conn.execute(
+        """
+        SELECT id
+          FROM stocks
+         WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+           AND ABS(COALESCE(unit_price, 0) - ?) < 0.001
+         ORDER BY id ASC
+         LIMIT 1
+        """,
+        (spec["item_type"], spec["school"], spec["color"], spec["size"], float(unit_price)),
+    ).fetchone()
+    if row:
+        stock_id = int(row["id"] if isinstance(row, sqlite3.Row) else row[0])
+        conn.execute("UPDATE stocks SET count = COALESCE(count, 0) + ?, unit_price = ? WHERE id = ?", (int(qty), float(unit_price), stock_id))
+    else:
+        cur = conn.execute(
+            """
+            INSERT INTO stocks(item_type, school, color, size, unit_price, count)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (spec["item_type"], spec["school"], spec["color"], spec["size"], float(unit_price), int(qty)),
+        )
+        stock_id = int(cur.lastrowid)
+    conn.execute(
+        """
+        INSERT INTO movements
+            (ts, direction, stock_id, qty, note, bill_id,
+             item_type, school, color, size, unit_price)
+        VALUES (?, 'RECLASS_IN', ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+        """,
+        (
+            _now_iso(),
+            stock_id,
+            int(qty),
+            note,
+            spec["item_type"],
+            spec["school"],
+            spec["color"],
+            spec["size"],
+            float(unit_price),
+        ),
+    )
+    return stock_id
+
+
+def apply_branch_stock_reclassified(
+    conn: sqlite3.Connection,
+    payload: Dict[str, Any],
+    event_uuid: str,
+) -> Dict[str, Any]:
+    from_raw = payload.get("from_spec") or {}
+    to_raw = payload.get("to_spec") or {}
+    if not isinstance(from_raw, dict) or not isinstance(to_raw, dict):
+        raise ApplyError("BRANCH_STOCK_RECLASSIFIED requires from_spec/to_spec")
+
+    def _spec(raw: Dict[str, Any]) -> Dict[str, str]:
+        spec = {
+            "item_type": _clean(raw.get("item_type")),
+            "school": _clean(raw.get("school")),
+            "color": _clean(raw.get("color")),
+            "size": _clean(raw.get("size")),
+        }
+        if not all(spec.values()):
+            raise ApplyError("BRANCH_STOCK_RECLASSIFIED has incomplete spec")
+        return spec
+
+    src = _spec(from_raw)
+    dst = _spec(to_raw)
+    if src == dst:
+        return {"skipped": True, "reason": "source and target specs are identical"}
+    try:
+        qty = int(payload.get("qty") or 0)
+    except (TypeError, ValueError):
+        raise ApplyError("BRANCH_STOCK_RECLASSIFIED invalid qty")
+    if qty <= 0:
+        raise ApplyError("BRANCH_STOCK_RECLASSIFIED qty must be positive")
+    try:
+        target_price = float(to_raw.get("unit_price") or from_raw.get("unit_price") or 0.0)
+    except (TypeError, ValueError):
+        target_price = 0.0
+    profile_rows = _apply_size_profile_rows(conn, payload.get("size_profiles"))
+    catalog_rows = _apply_branch_catalog_rows(
+        conn,
+        payload.get("catalog_rows"),
+        event_uuid,
+        note=_clean(payload.get("note")) or "Branch stock reclassification",
+    )
+    already = conn.execute(
+        """
+        SELECT 1
+          FROM movements
+         WHERE direction = 'RECLASS_IN'
+           AND note LIKE ?
+         LIMIT 1
+        """,
+        ("%" + str(event_uuid) + "%",),
+    ).fetchone()
+    if already:
+        return {
+            "already_applied": True,
+            "event_uuid": str(event_uuid),
+            "size_profiles_applied": profile_rows,
+            "catalog_rows": catalog_rows,
+        }
+    available = _stock_sum_for_spec(conn, src)
+    if available < qty:
+        target_existing = _stock_sum_for_spec(conn, dst)
+        missing_qty = max(0, qty - target_existing)
+        if missing_qty <= 0:
+            return {
+                "repaired": True,
+                "reason": "source missing but target quantity already exists",
+                "available": available,
+                "requested": qty,
+                "target_existing": target_existing,
+                "size_profiles_applied": profile_rows,
+                "catalog_rows": catalog_rows,
+            }
+        note = _clean(payload.get("note")) or "Branch stock reclassified"
+        note = f"{note} repair #{event_uuid}"
+        _upsert_spec_history(conn, dst)
+        _ensure_item_default_price(conn, dst["item_type"], target_price)
+        stock_id = _add_reclassified_stock(conn, dst, missing_qty, target_price, note)
+        _mark_branch_catalog_definition(
+            conn,
+            dst["item_type"],
+            dst["school"],
+            dst["color"],
+            dst["size"],
+            target_price,
+            event_uuid,
+            note="Branch stock reclassification",
+        )
+        return {
+            "repaired": True,
+            "reason": "source quantity missing; restored target quantity",
+            "from_spec": src,
+            "to_spec": dst,
+            "qty": missing_qty,
+            "requested": qty,
+            "available": available,
+            "target_existing_before": target_existing,
+            "target_stock_id": stock_id,
+            "target_became_branch_defined": True,
+            "size_profiles_applied": profile_rows,
+            "catalog_rows": catalog_rows,
+        }
+
+    note = _clean(payload.get("note")) or "Branch stock reclassified"
+    note = f"{note} #{event_uuid}"
+    removed, shortage = _consume_stock_for_shipment_cancel(
+        conn,
+        src["item_type"],
+        src["school"],
+        src["color"],
+        src["size"],
+        float(from_raw.get("unit_price") or 0.0),
+        qty,
+        note,
+        direction="RECLASS_OUT",
+    )
+    if shortage or removed != qty:
+        raise ApplyError("BRANCH_STOCK_RECLASSIFIED could not subtract full source quantity")
+
+    _upsert_spec_history(conn, dst)
+    _ensure_item_default_price(conn, dst["item_type"], target_price)
+    stock_id = _add_reclassified_stock(conn, dst, qty, target_price, note)
+    _mark_branch_catalog_definition(
+        conn,
+        dst["item_type"],
+        dst["school"],
+        dst["color"],
+        dst["size"],
+        target_price,
+        event_uuid,
+        note="Branch stock reclassification",
+    )
+    return {
+        "from_spec": src,
+        "to_spec": dst,
+        "qty": qty,
+        "target_stock_id": stock_id,
+        "target_became_branch_defined": True,
+        "size_profiles_applied": profile_rows,
+        "catalog_rows": catalog_rows,
     }
 
 
@@ -621,16 +1843,50 @@ def apply_price_update(
     if not isinstance(filters, dict):
         raise ApplyError("filters must be an object")
 
-    where_parts = []
-    args = []
-    for k in ("item_type", "school", "color", "size"):
-        v = _clean(filters.get(k))
-        if v:
-            where_parts.append(f"LOWER(TRIM({k})) = LOWER(?)")
-            args.append(v)
+    cleaned_filters = {k: _clean(filters.get(k)) for k in ("item_type", "school", "color", "size")}
+    if not all(cleaned_filters.values()):
+        return {"skipped": True, "reason": "refusing non-exact price update"}
 
-    if not where_parts:
-        return {"skipped": True, "reason": "refusing unfiltered price update"}
+    allow_catalog_definition = bool(
+        payload.get("allow_catalog_definition")
+        or payload.get("catalog_definition")
+        or payload.get("catalog_only")
+    )
+    note_text = _clean(payload.get("note")) or "Warehouse price profile sync"
+    if (
+        allow_catalog_definition
+        and _branch_catalog_spec_is_deleted(conn, cleaned_filters)
+        and not _spec_has_positive_stock(conn, cleaned_filters)
+    ):
+        return {
+            "skipped": True,
+            "reason": "manual delete-definition tombstone",
+            "updated": 0,
+            "catalog_rows": 0,
+        }
+    if allow_catalog_definition:
+        _mark_branch_catalog_definition(
+            conn,
+            cleaned_filters["item_type"],
+            cleaned_filters["school"],
+            cleaned_filters["color"],
+            cleaned_filters["size"],
+            float(new_price),
+            event_uuid,
+            note=note_text,
+        )
+        _upsert_spec_history(conn, cleaned_filters)
+
+    if not allow_catalog_definition and not _price_update_spec_is_branch_owned(conn, cleaned_filters):
+        return {
+            "skipped": True,
+            "reason": "spec is not defined for this branch",
+            "updated": 0,
+            "catalog_rows": 0,
+        }
+
+    where_parts = [f"LOWER(TRIM({k})) = LOWER(?)" for k in ("item_type", "school", "color", "size")]
+    args = [cleaned_filters[k] for k in ("item_type", "school", "color", "size")]
 
     rows = conn.execute(
         "SELECT id, item_type, school, color, size FROM stocks WHERE "
@@ -638,13 +1894,35 @@ def apply_price_update(
         args,
     ).fetchall()
     if not rows:
-        return {"updated": 0}
+        catalog_inserted = False
+        if all(cleaned_filters.values()):
+            if allow_catalog_definition:
+                catalog_inserted = _upsert_zero_stock_catalog_row(
+                    conn,
+                    cleaned_filters["item_type"],
+                    cleaned_filters["school"],
+                    cleaned_filters["color"],
+                    cleaned_filters["size"],
+                    float(new_price),
+                )
+                _update_item_default_price(conn, cleaned_filters["item_type"], float(new_price))
+            else:
+                catalog_inserted = _upsert_owned_price_catalog_row(conn, cleaned_filters, float(new_price))
+        return {"updated": 0, "catalog_rows": 1 if catalog_inserted else 0}
 
     conn.execute(
         "UPDATE stocks SET unit_price = ? WHERE "
         + " AND ".join(where_parts),
         (new_price, *args),
     )
+    try:
+        conn.execute(
+            "UPDATE branch_catalog_definitions SET unit_price = ? WHERE "
+            + " AND ".join(where_parts),
+            (new_price, *args),
+        )
+    except sqlite3.OperationalError:
+        pass
 
     ts = _now_iso()
     note = f"تعديل سعر من المخزن (#{event_uuid[:8]})"
@@ -663,10 +1941,12 @@ def apply_price_update(
     # Also refresh item_defaults so fresh catalog lookups get the new
     # price when the item has no stock left later.
     item_types = {r[1] for r in rows}
+    if cleaned_filters.get("item_type"):
+        item_types.add(cleaned_filters["item_type"])
     for it in item_types:
         _update_item_default_price(conn, it, new_price)
 
-    return {"updated": len(rows)}
+    return {"updated": len(rows), "catalog_rows": 0}
 
 
 def apply_pos_stock_snapshot(
@@ -701,12 +1981,46 @@ def apply_pos_stock_snapshot(
     if not isinstance(rows, list):
         raise ApplyError("snapshot rows must be a list")
 
+    inbound_seq = 0
+    try:
+        seq_row = conn.execute(
+            "SELECT COALESCE(server_seq, 0) FROM sync_inbox WHERE event_uuid = ?",
+            (event_uuid,),
+        ).fetchone()
+        inbound_seq = int((seq_row[0] if seq_row else 0) or 0)
+    except (sqlite3.OperationalError, TypeError, ValueError):
+        inbound_seq = 0
+    try:
+        if not _has_column(conn, "pos_stocks_snapshot_meta", "last_server_seq"):
+            conn.execute("ALTER TABLE pos_stocks_snapshot_meta ADD COLUMN last_server_seq INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
     current = conn.execute(
-        "SELECT snapshot_at FROM pos_stocks_snapshot_meta WHERE source_device = ?",
+        "SELECT snapshot_at, COALESCE(last_server_seq, 0) AS last_server_seq FROM pos_stocks_snapshot_meta WHERE source_device = ?",
         (source_name,),
     ).fetchone()
     current_snapshot_at = _clean(current[0] if current else "")
-    if _timestamp_is_older(snapshot_at, current_snapshot_at):
+    current_seq = 0
+    try:
+        current_seq = int((current["last_server_seq"] if isinstance(current, sqlite3.Row) else current[1]) if current else 0)
+    except (TypeError, ValueError, IndexError):
+        current_seq = 0
+    if (
+        inbound_seq
+        and current_seq
+        and inbound_seq < current_seq
+        and _timestamp_is_older(snapshot_at, current_snapshot_at)
+    ):
+        return {
+            "skipped": True,
+            "reason": "stale stock snapshot",
+            "current_server_seq": current_seq,
+            "server_seq": inbound_seq,
+            "current_snapshot_at": current_snapshot_at,
+            "snapshot_at": snapshot_at,
+        }
+    if not inbound_seq and _timestamp_is_older(snapshot_at, current_snapshot_at):
         return {
             "skipped": True,
             "reason": "stale stock snapshot",
@@ -732,7 +2046,7 @@ def apply_pos_stock_snapshot(
             count = int(r.get("count") or 0)
         except (TypeError, ValueError):
             continue
-        if not (it and sc and cl and sz) or count <= 0:
+        if not (it and sc and cl and sz) or count < 0:
             continue
         conn.execute(
             """INSERT INTO pos_stocks_mirror
@@ -745,6 +2059,13 @@ def apply_pos_stock_snapshot(
         total_value += price * count
 
     _upsert_pos_stock_snapshot_meta(conn, source_name, snapshot_at, inserted, total_value, app_version)
+    try:
+        conn.execute(
+            "UPDATE pos_stocks_snapshot_meta SET last_server_seq = ? WHERE source_device = ?",
+            (inbound_seq, source_name),
+        )
+    except sqlite3.OperationalError:
+        pass
 
     return {"mirrored_rows": inserted, "total_value": total_value}
 
@@ -768,15 +2089,26 @@ def _refresh_pos_stock_snapshot_meta(
     total_value = float((row[1] if row else 0.0) or 0.0)
     if update_snapshot_at:
         conn.execute(
-            """INSERT INTO pos_stocks_snapshot_meta
-                   (source_device, snapshot_at, row_count, total_value)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(source_device) DO UPDATE SET
-                   snapshot_at = excluded.snapshot_at,
-                   row_count   = excluded.row_count,
-                   total_value = excluded.total_value""",
-            (source_name, snapshot_at, row_count, total_value),
+            """
+            UPDATE pos_stocks_snapshot_meta
+               SET snapshot_at = ?,
+                   row_count = ?,
+                   total_value = ?
+             WHERE source_device = ?
+            """,
+            (snapshot_at, row_count, total_value, source_name),
         )
+        row = conn.execute(
+            "SELECT 1 FROM pos_stocks_snapshot_meta WHERE source_device = ? LIMIT 1",
+            (source_name,),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """INSERT INTO pos_stocks_snapshot_meta
+                       (source_device, snapshot_at, row_count, total_value)
+                   VALUES (?, ?, ?, ?)""",
+                (source_name, snapshot_at, row_count, total_value),
+            )
     else:
         current = conn.execute(
             "SELECT snapshot_at FROM pos_stocks_snapshot_meta WHERE source_device = ?",
@@ -784,14 +2116,25 @@ def _refresh_pos_stock_snapshot_meta(
         ).fetchone()
         preserved_snapshot_at = _clean(current[0] if current else "") or snapshot_at
         conn.execute(
-            """INSERT INTO pos_stocks_snapshot_meta
-                   (source_device, snapshot_at, row_count, total_value)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(source_device) DO UPDATE SET
-                   row_count   = excluded.row_count,
-                   total_value = excluded.total_value""",
-            (source_name, preserved_snapshot_at, row_count, total_value),
+            """
+            UPDATE pos_stocks_snapshot_meta
+               SET row_count = ?,
+                   total_value = ?
+             WHERE source_device = ?
+            """,
+            (row_count, total_value, source_name),
         )
+        row = conn.execute(
+            "SELECT 1 FROM pos_stocks_snapshot_meta WHERE source_device = ? LIMIT 1",
+            (source_name,),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """INSERT INTO pos_stocks_snapshot_meta
+                       (source_device, snapshot_at, row_count, total_value)
+                   VALUES (?, ?, ?, ?)""",
+                (source_name, preserved_snapshot_at, row_count, total_value),
+            )
 
 
 def apply_pos_stock_audit_applied(
@@ -1003,69 +2346,348 @@ def apply_catalog_upsert(
     payload: Dict[str, Any],
     event_uuid: str,
 ) -> Dict[str, Any]:
-    """Seed catalog entries (item_defaults + spec_history + size_profile)
-    from a warehouse broadcast.
+    """Ignore generic catalog broadcasts on POS branches.
 
-    Phase 3 uses this as a safety net so new catalog items pre-seed a
-    POS device before any sale touches them. Not strictly required:
-    `apply_stock_transfer_out` also self-heals the same tables. Kept
-    separate so the warehouse can push catalog changes without
-    attaching them to a shipment.
-
-    Payload shape:
-        {
-          "items": [
-            {"item_type":"...", "default_price": 150.0},
-            ...
-          ],
-          "size_profiles": [
-            {"item_type":"...", "school":"...", "color":"...",
-             "num_start_1": 0, "num_end_1": 9, "has_alpha": 0}
-          ],
-          "spec_history": [
-            {"field":"item_type", "value":"..."}
-          ]
-        }
+    Branches should learn sellable/reservable definitions only from stock
+    they actually receive, or from the explicit targeted reservation-definition
+    flow (`send_catalog_rows_to_pos`, applied as STOCK_TRANSFER_OUT with qty 0).
+    Older all-POS CATALOG_UPSERT broadcasts are intentionally harmless here.
     """
-    items = payload.get("items") or []
-    profiles = payload.get("size_profiles") or []
-    history = payload.get("spec_history") or []
+    return {
+        "skipped": True,
+        "reason": "generic catalog broadcasts are ignored by POS branches",
+    }
 
-    seeded_items = 0
-    for item in items:
-        it = _clean(item.get("item_type"))
-        if not it:
+
+def apply_pos_ownership_snapshot(
+    conn: sqlite3.Connection,
+    payload: Dict[str, Any],
+    event_uuid: str,
+) -> Dict[str, Any]:
+    """Replace this POS branch's allowed stock/catalog specs from Warehouse.
+
+    Warehouse is the source of truth for which specs belong to a branch:
+    confirmed bill shipments plus explicit reservation-definition rows. This
+    removes bad schools/specs that entered a branch through old broad syncs.
+
+    Important: the snapshot is an ownership/catalog snapshot, not a quantity
+    snapshot. Existing positive `stocks.count` values are always preserved,
+    even when Warehouse sends an incomplete ownership list. Only zero-stock
+    unowned catalog rows are removed, and missing allowed specs are created as
+    zero-stock catalog rows.
+    """
+    rows = payload.get("specs") or []
+    if not isinstance(rows, list):
+        raise ApplyError("POS_OWNERSHIP_SNAPSHOT specs must be a list")
+
+    allowed: Set[Tuple[str, str, str, str]] = set()
+    kept = 0
+    skipped = 0
+    prices_updated = 0
+    catalog_created = 0
+    tombstone_skipped = 0
+
+    conn.execute("DROP TABLE IF EXISTS _pos_allowed_specs")
+    conn.execute(
+        """
+        CREATE TEMP TABLE _pos_allowed_specs(
+            item_type TEXT NOT NULL,
+            school TEXT NOT NULL,
+            color TEXT NOT NULL,
+            size TEXT NOT NULL,
+            PRIMARY KEY(item_type, school, color, size)
+        )
+        """
+    )
+    conn.execute("DROP TABLE IF EXISTS _pos_protected_specs")
+    conn.execute(
+        """
+        CREATE TEMP TABLE _pos_protected_specs(
+            item_type TEXT NOT NULL,
+            school TEXT NOT NULL,
+            color TEXT NOT NULL,
+            size TEXT NOT NULL,
+            PRIMARY KEY(item_type, school, color, size)
+        )
+        """
+    )
+
+    for raw in rows:
+        if not isinstance(raw, dict):
+            skipped += 1
             continue
-        price = item.get("default_price")
-        if price is None:
+        it = _clean(raw.get("item_type"))
+        sc = _clean(raw.get("school"))
+        cl = _clean(raw.get("color"))
+        sz = _clean(raw.get("size"))
+        if not (it and sc and cl and sz):
+            skipped += 1
+            continue
+        key = (it.casefold(), sc.casefold(), cl.casefold(), sz.casefold())
+        if key in allowed:
+            continue
+        allowed.add(key)
+        try:
+            price = float(raw.get("unit_price") or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        spec = {"item_type": it, "school": sc, "color": cl, "size": sz}
+        if _branch_catalog_spec_is_deleted(conn, spec) and not _spec_has_positive_stock(conn, spec):
+            tombstone_skipped += 1
+            continue
+
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO _pos_allowed_specs(item_type, school, color, size)
+            VALUES (LOWER(TRIM(?)), LOWER(TRIM(?)), LOWER(TRIM(?)), LOWER(TRIM(?)))
+            """,
+            (it, sc, cl, sz),
+        )
+        _upsert_spec_history(conn, spec)
+        _ensure_item_default_price(conn, it, price)
+        _mark_branch_catalog_definition(
+            conn,
+            it,
+            sc,
+            cl,
+            sz,
+            price,
+            event_uuid,
+            note="POS ownership source-of-truth",
+        )
+        if _upsert_zero_stock_catalog_row(conn, it, sc, cl, sz, price):
+            catalog_created += 1
+        cur = conn.execute(
+            """
+            UPDATE stocks
+               SET unit_price = ?
+             WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+            """,
+            (price, it, sc, cl, sz),
+        )
+        prices_updated += int(cur.rowcount or 0)
+        kept += 1
+
+    for table_name, where_sql in (
+        ("stocks", "COALESCE(count, 0) > 0"),
+        ("incoming_shipment_items_pending", "(COALESCE(expected_qty, 0) > 0 OR COALESCE(received_qty, 0) > 0) AND UPPER(COALESCE(status, '')) <> 'CANCELLED'"),
+        ("stock_audit_report_lines", "1=1"),
+        ("branch_catalog_definitions", "LOWER(COALESCE(note, '')) LIKE '%reservation%' OR COALESCE(note, '') LIKE '%حجز%' OR LOWER(COALESCE(note, '')) LIKE '%reclassification%'"),
+    ):
+        try:
+            conn.execute(
+                f"""
+                INSERT OR IGNORE INTO _pos_protected_specs(item_type, school, color, size)
+                SELECT LOWER(TRIM(COALESCE(item_type, ''))),
+                       LOWER(TRIM(COALESCE(school, ''))),
+                       LOWER(TRIM(COALESCE(color, ''))),
+                       LOWER(TRIM(COALESCE(size, '')))
+                  FROM {table_name}
+                 WHERE {where_sql}
+                   AND COALESCE(TRIM(item_type), '') <> ''
+                   AND COALESCE(TRIM(school), '') <> ''
+                   AND COALESCE(TRIM(color), '') <> ''
+                   AND COALESCE(TRIM(size), '') <> ''
+                """
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    try:
+        inbox_rows = conn.execute(
+            """
+            SELECT event_type, payload_json
+              FROM sync_inbox
+             WHERE event_type IN ('STOCK_TRANSFER_OUT', 'BRANCH_STOCK_RECLASSIFIED')
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        inbox_rows = []
+    for row in inbox_rows:
+        try:
+            event_type = str(row["event_type"] if isinstance(row, sqlite3.Row) else row[0] or "")
+            payload_json = row["payload_json"] if isinstance(row, sqlite3.Row) else row[1]
+            payload_obj = json.loads(payload_json or "{}")
+        except Exception:
+            continue
+        protected_rows: List[Dict[str, Any]] = []
+        if event_type == "STOCK_TRANSFER_OUT":
+            note_text = _clean(payload_obj.get("note")).casefold()
+            is_reservation_definition = "reservation" in note_text or "حجز" in note_text
+            for item in payload_obj.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    qty = int(float(item.get("qty") or 0))
+                except (TypeError, ValueError):
+                    qty = 0
+                if qty > 0 or (bool(item.get("catalog_only")) and is_reservation_definition):
+                    protected_rows.append(item)
+        elif event_type == "BRANCH_STOCK_RECLASSIFIED":
+            to_spec = payload_obj.get("to_spec") or {}
+            if isinstance(to_spec, dict):
+                protected_rows.append(to_spec)
+            catalog_rows = payload_obj.get("catalog_rows") or []
+            if isinstance(catalog_rows, list):
+                protected_rows.extend([r for r in catalog_rows if isinstance(r, dict)])
+        for raw in protected_rows:
+            it = _clean(raw.get("item_type"))
+            sc = _clean(raw.get("school"))
+            cl = _clean(raw.get("color"))
+            sz = _clean(raw.get("size"))
+            if not (it and sc and cl and sz):
+                continue
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO _pos_protected_specs(item_type, school, color, size)
+                VALUES (LOWER(TRIM(?)), LOWER(TRIM(?)), LOWER(TRIM(?)), LOWER(TRIM(?)))
+                """,
+                (it, sc, cl, sz),
+            )
+
+    preserved_positive = 0
+    for row in conn.execute(
+        """
+        SELECT item_type, school, color, size, unit_price, SUM(COALESCE(count, 0)) AS qty
+          FROM stocks
+         WHERE COALESCE(count, 0) > 0
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM _pos_allowed_specs
+                 WHERE _pos_allowed_specs.item_type = LOWER(TRIM(COALESCE(stocks.item_type, '')))
+                   AND _pos_allowed_specs.school = LOWER(TRIM(COALESCE(stocks.school, '')))
+                   AND _pos_allowed_specs.color = LOWER(TRIM(COALESCE(stocks.color, '')))
+                   AND _pos_allowed_specs.size = LOWER(TRIM(COALESCE(stocks.size, '')))
+           )
+         GROUP BY item_type, school, color, size, unit_price
+        """
+    ).fetchall():
+        it = _clean(row["item_type"])
+        sc = _clean(row["school"])
+        cl = _clean(row["color"])
+        sz = _clean(row["size"])
+        if not (it and sc and cl and sz):
             continue
         try:
-            price = float(price)
+            price = float(row["unit_price"] or 0)
         except (TypeError, ValueError):
-            continue
-        conn.execute(
-            "INSERT OR IGNORE INTO item_defaults(item_type, default_price) VALUES(?, ?)",
-            (it, price),
+            price = 0.0
+        _upsert_spec_history(conn, {"item_type": it, "school": sc, "color": cl, "size": sz})
+        _ensure_item_default_price(conn, it, price)
+        _mark_branch_catalog_definition(
+            conn,
+            it,
+            sc,
+            cl,
+            sz,
+            price,
+            event_uuid,
+            note="Preserved positive stock outside ownership snapshot",
         )
-        seeded_items += 1
+        preserved_positive += int(row["qty"] or 0)
 
-    seeded_profiles = _apply_size_profile_rows(conn, profiles)
+    deleted_stock = conn.execute(
+        """
+        DELETE FROM stocks
+         WHERE NOT EXISTS (
+                SELECT 1
+                  FROM _pos_allowed_specs
+                 WHERE _pos_allowed_specs.item_type = LOWER(TRIM(COALESCE(stocks.item_type, '')))
+                   AND _pos_allowed_specs.school = LOWER(TRIM(COALESCE(stocks.school, '')))
+                   AND _pos_allowed_specs.color = LOWER(TRIM(COALESCE(stocks.color, '')))
+                   AND _pos_allowed_specs.size = LOWER(TRIM(COALESCE(stocks.size, '')))
+           )
+           AND COALESCE(count, 0) <= 0
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM _pos_protected_specs
+                 WHERE _pos_protected_specs.item_type = LOWER(TRIM(COALESCE(stocks.item_type, '')))
+                   AND _pos_protected_specs.school = LOWER(TRIM(COALESCE(stocks.school, '')))
+                   AND _pos_protected_specs.color = LOWER(TRIM(COALESCE(stocks.color, '')))
+                   AND _pos_protected_specs.size = LOWER(TRIM(COALESCE(stocks.size, '')))
+           )
+        """
+    ).rowcount
+    deleted_profiles = conn.execute(
+        """
+        DELETE FROM size_profiles
+         WHERE NOT EXISTS (
+                SELECT 1
+                  FROM _pos_allowed_specs
+                 WHERE _pos_allowed_specs.item_type = LOWER(TRIM(COALESCE(size_profiles.item_type, '')))
+                   AND _pos_allowed_specs.school = LOWER(TRIM(COALESCE(size_profiles.school, '')))
+                   AND _pos_allowed_specs.color = LOWER(TRIM(COALESCE(size_profiles.color, '')))
+           )
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM stocks
+                 WHERE LOWER(TRIM(COALESCE(stocks.item_type, ''))) = LOWER(TRIM(COALESCE(size_profiles.item_type, '')))
+                   AND LOWER(TRIM(COALESCE(stocks.school, ''))) = LOWER(TRIM(COALESCE(size_profiles.school, '')))
+                   AND LOWER(TRIM(COALESCE(stocks.color, ''))) = LOWER(TRIM(COALESCE(size_profiles.color, '')))
+                   AND COALESCE(stocks.count, 0) > 0
+           )
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM _pos_protected_specs
+                 WHERE _pos_protected_specs.item_type = LOWER(TRIM(COALESCE(size_profiles.item_type, '')))
+                   AND _pos_protected_specs.school = LOWER(TRIM(COALESCE(size_profiles.school, '')))
+                   AND _pos_protected_specs.color = LOWER(TRIM(COALESCE(size_profiles.color, '')))
+           )
+        """
+    ).rowcount
+    try:
+        deleted_catalog = conn.execute(
+            """
+            DELETE FROM branch_catalog_definitions
+             WHERE NOT EXISTS (
+                    SELECT 1
+                      FROM _pos_allowed_specs
+                     WHERE _pos_allowed_specs.item_type = LOWER(TRIM(COALESCE(branch_catalog_definitions.item_type, '')))
+                       AND _pos_allowed_specs.school = LOWER(TRIM(COALESCE(branch_catalog_definitions.school, '')))
+                       AND _pos_allowed_specs.color = LOWER(TRIM(COALESCE(branch_catalog_definitions.color, '')))
+                       AND _pos_allowed_specs.size = LOWER(TRIM(COALESCE(branch_catalog_definitions.size, '')))
+               )
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM stocks
+                     WHERE LOWER(TRIM(COALESCE(stocks.item_type, ''))) = LOWER(TRIM(COALESCE(branch_catalog_definitions.item_type, '')))
+                       AND LOWER(TRIM(COALESCE(stocks.school, ''))) = LOWER(TRIM(COALESCE(branch_catalog_definitions.school, '')))
+                       AND LOWER(TRIM(COALESCE(stocks.color, ''))) = LOWER(TRIM(COALESCE(branch_catalog_definitions.color, '')))
+                       AND LOWER(TRIM(COALESCE(stocks.size, ''))) = LOWER(TRIM(COALESCE(branch_catalog_definitions.size, '')))
+                       AND COALESCE(stocks.count, 0) > 0
+               )
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM _pos_protected_specs
+                     WHERE _pos_protected_specs.item_type = LOWER(TRIM(COALESCE(branch_catalog_definitions.item_type, '')))
+                       AND _pos_protected_specs.school = LOWER(TRIM(COALESCE(branch_catalog_definitions.school, '')))
+                       AND _pos_protected_specs.color = LOWER(TRIM(COALESCE(branch_catalog_definitions.color, '')))
+                       AND _pos_protected_specs.size = LOWER(TRIM(COALESCE(branch_catalog_definitions.size, '')))
+               )
+            """
+        ).rowcount
+    except sqlite3.OperationalError:
+        deleted_catalog = 0
 
-    seeded_history = 0
-    for h in history:
-        field = _clean(h.get("field"))
-        value = _clean(h.get("value"))
-        if field in ("item_type", "school", "color", "size") and value:
-            conn.execute(
-                "INSERT OR IGNORE INTO spec_history(field, value) VALUES(?, ?)",
-                (field, value),
-            )
-            seeded_history += 1
+    profile_rows = _apply_size_profile_rows(conn, payload.get("size_profiles"))
+    conn.execute("DROP TABLE IF EXISTS _pos_allowed_specs")
+    conn.execute("DROP TABLE IF EXISTS _pos_protected_specs")
 
     return {
-        "items":   seeded_items,
-        "profiles": seeded_profiles,
-        "history":  seeded_history,
+        "kept_specs": kept,
+        "skipped_specs": skipped,
+        "tombstone_skipped_specs": tombstone_skipped,
+        "catalog_created": catalog_created,
+        "prices_updated": prices_updated,
+        "deleted_stock": int(deleted_stock or 0),
+        "deleted_size_profiles": int(deleted_profiles or 0),
+        "deleted_catalog_definitions": int(deleted_catalog or 0),
+        "preserved_positive_qty": preserved_positive,
+        "size_profiles_applied": profile_rows,
+        "quantity_mode": "preserve_all_positive_counts",
     }
 
 
@@ -1658,8 +3280,12 @@ ApplierFn = Callable[[sqlite3.Connection, Dict[str, Any], str], Dict[str, Any]]
 
 _POS_REGISTRY: Dict[str, ApplierFn] = {
     "STOCK_TRANSFER_OUT": apply_stock_transfer_out,
+    "STOCK_TRANSFER_CANCELLED": apply_stock_transfer_cancelled,
+    "BRANCH_STOCK_RECLASSIFIED": apply_branch_stock_reclassified,
+    "BRANCH_CATALOG_DELETED": apply_branch_catalog_deleted,
     "PRICE_UPDATE":       apply_price_update,
     "CATALOG_UPSERT":     apply_catalog_upsert,
+    "POS_OWNERSHIP_SNAPSHOT": apply_pos_ownership_snapshot,
     "SPEC_RENAMED":       apply_spec_renamed,
     "REMOTE_RESERVATION_REQUEST": apply_remote_reservation_request,
 }
@@ -1667,7 +3293,6 @@ _POS_REGISTRY: Dict[str, ApplierFn] = {
 
 _WAREHOUSE_REGISTRY: Dict[str, ApplierFn] = {
     "POS_STOCK_SNAPSHOT": apply_pos_stock_snapshot,
-    "POS_STOCK_AUDIT_APPLIED": apply_pos_stock_audit_applied,
     "STOCK_RETURN_TO_WAREHOUSE": apply_stock_return_to_warehouse,
     "POS_TRANSFER_VIA_WAREHOUSE": apply_pos_transfer_via_warehouse,
     "RESERVATION_CREATED": apply_wh_pos_reservation_created,

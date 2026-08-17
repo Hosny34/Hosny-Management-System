@@ -20,11 +20,36 @@ from typing import Any, Dict, Optional
 
 import sync_client
 
+try:
+    import logging_setup
+except Exception:
+    logging_setup = None  # type: ignore
+
 # 10-minute base interval for all clients.
 DEFAULT_BASE_MS = 10 * 60 * 1000
 FIRST_DELAY_BASE_MS = 8_000
 OFFSET_STEP_MS = 12_000
 OFFSET_SLOT_COUNT = 20
+
+
+def _compact_summary(summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    data = dict(summary or {})
+    for key in ("applied_events", "error_events", "skipped_events"):
+        value = data.get(key)
+        if isinstance(value, list):
+            data[f"{key}_count"] = len(value)
+            data.pop(key, None)
+    return data
+
+
+def _open_conn(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, timeout=8.0, isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=8000;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    conn.execute("PRAGMA cache_size=-12000;")
+    return conn
 
 
 class PeriodicSyncController:
@@ -38,9 +63,16 @@ class PeriodicSyncController:
         self._thr: Optional[threading.Thread] = None
         self._wait_thr: Optional[threading.Thread] = None
         self._last_nudge_at = 0.0
+        self._last_wait_log_at = 0.0
 
     def start(self) -> None:
-        self._schedule_after(self._startup_delay_ms())
+        delay = self._startup_delay_ms()
+        try:
+            if logging_setup is not None:  # type: ignore[name-defined]
+                logging_setup.log_event("sync.periodic.start", db_path=self.db_path, first_delay_ms=delay)  # type: ignore[union-attr]
+        except Exception:
+            pass
+        self._schedule_after(delay)
         self._pump_queue()
         self._start_waiter()
 
@@ -48,11 +80,8 @@ class PeriodicSyncController:
         """Stagger first sync attempts to reduce overlap across apps/devices."""
         seed = self.db_path
         try:
-            conn = sqlite3.connect(self.db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA busy_timeout=30000;")
+            conn = _open_conn(self.db_path)
             try:
-                conn.execute("PRAGMA busy_timeout=8000;")
                 cfg = sync_client.load_sync_config(conn)
                 if (cfg or {}).get("device_name"):
                     seed = str(cfg.get("device_name"))
@@ -84,7 +113,7 @@ class PeriodicSyncController:
                     try:
                         import sync_ui
 
-                        sync_ui._notify_host_synced(self.root)
+                        sync_ui._notify_host_synced(self.root, background=True, summary=msg[1] if len(msg) > 1 else {})
                     except Exception:
                         pass
         except queue.Empty:
@@ -97,15 +126,17 @@ class PeriodicSyncController:
     def _tick(self) -> None:
         self._after_id = None
         if self._thr is not None and self._thr.is_alive():
+            try:
+                if logging_setup is not None:  # type: ignore[name-defined]
+                    logging_setup.log_event("sync.periodic.skip_already_running", db_path=self.db_path)  # type: ignore[union-attr]
+            except Exception:
+                pass
             self._schedule_after(60_000)
             return
 
         try:
-            conn = sqlite3.connect(self.db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA busy_timeout=30000;")
+            conn = _open_conn(self.db_path)
             try:
-                conn.execute("PRAGMA busy_timeout=8000;")
                 cfg = sync_client.load_sync_config(conn)
             finally:
                 conn.close()
@@ -113,6 +144,11 @@ class PeriodicSyncController:
             cfg = {}
 
         if not (cfg or {}).get("server_url") or not (cfg or {}).get("device_name"):
+            try:
+                if logging_setup is not None:  # type: ignore[name-defined]
+                    logging_setup.log_event("sync.periodic.skip_not_configured", db_path=self.db_path)  # type: ignore[union-attr]
+            except Exception:
+                pass
             self._schedule_after(self._next_interval_ms())
             return
 
@@ -124,12 +160,15 @@ class PeriodicSyncController:
         def worker() -> None:
             summary: Optional[Dict[str, Any]] = None
             err: Optional[str] = None
+            started = time.time()
             try:
-                conn2 = sqlite3.connect(self.db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
-                conn2.row_factory = sqlite3.Row
-                conn2.execute("PRAGMA busy_timeout=30000;")
+                if logging_setup is not None:  # type: ignore[name-defined]
+                    logging_setup.log_event("sync.periodic.worker.start", device_name=(cfg or {}).get("device_name"), server_url=(cfg or {}).get("server_url"))  # type: ignore[union-attr]
+            except Exception:
+                pass
+            try:
+                conn2 = _open_conn(self.db_path)
                 try:
-                    conn2.execute("PRAGMA busy_timeout=8000;")
                     client = sync_client.SyncClient(conn2, verify_tls=self.verify_tls)
                     summary = client.run_cycle(progress=None)
                 finally:
@@ -138,6 +177,14 @@ class PeriodicSyncController:
                 err = str(e)
             except Exception as e:
                 err = f"unexpected: {e}"
+            try:
+                if logging_setup is not None:  # type: ignore[name-defined]
+                    if err:
+                        logging_setup.log_event("sync.periodic.worker.failed", error=err, elapsed_ms=int((time.time() - started) * 1000))  # type: ignore[union-attr]
+                    else:
+                        logging_setup.log_event("sync.periodic.worker.done", elapsed_ms=int((time.time() - started) * 1000), summary=_compact_summary(summary))  # type: ignore[union-attr]
+            except Exception:
+                pass
 
             def post() -> None:
                 try:
@@ -169,11 +216,8 @@ class PeriodicSyncController:
         def waiter() -> None:
             while True:
                 try:
-                    conn = sqlite3.connect(self.db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
-                    conn.row_factory = sqlite3.Row
-                    conn.execute("PRAGMA busy_timeout=30000;")
+                    conn = _open_conn(self.db_path)
                     try:
-                        conn.execute("PRAGMA busy_timeout=8000;")
                         cfg = sync_client.load_sync_config(conn)
                         if not (cfg or {}).get("server_url") or not (cfg or {}).get("device_name"):
                             time.sleep(10.0)
@@ -188,10 +232,18 @@ class PeriodicSyncController:
 
                 if not bool((res or {}).get("has_updates")):
                     continue
+                try:
+                    if logging_setup is not None:  # type: ignore[name-defined]
+                        now = time.monotonic()
+                        if now - self._last_wait_log_at >= 60.0:
+                            self._last_wait_log_at = now
+                            logging_setup.log_event("sync.periodic.wait_updates", result=res or {})  # type: ignore[union-attr]
+                except Exception:
+                    pass
 
                 def _wake() -> None:
                     now = time.monotonic()
-                    if now - self._last_nudge_at < 2.0:
+                    if now - self._last_nudge_at < 60.0:
                         return
                     self._last_nudge_at = now
                     if self._thr is not None and self._thr.is_alive():
@@ -202,6 +254,7 @@ class PeriodicSyncController:
                     self.root.after(0, _wake)
                 except Exception:
                     return
+                time.sleep(20.0)
 
         self._wait_thr = threading.Thread(target=waiter, daemon=True)
         self._wait_thr.start()

@@ -37,6 +37,11 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+try:
+    import logging_setup
+except Exception:
+    logging_setup = None  # type: ignore
+
 
 DEFAULT_TIMEOUT = 15.0  # seconds per HTTP request
 PUSH_BATCH_SIZE = 200   # events per /sync/push call
@@ -44,6 +49,8 @@ PULL_BATCH_SIZE = 500   # events per /sync/pull call
 HTTP_RETRY_ATTEMPTS = 3
 APP_VERSION = ""
 DEAD_LETTER_MAX_ATTEMPTS = 5
+ACKED_OUTBOX_KEEP_ROWS = 5000
+ACKED_OUTBOX_PRUNE_BATCH = 5000
 
 
 def format_inbound_event_brief(event_type: str, payload: Any) -> str:
@@ -446,28 +453,63 @@ class SyncClient:
             if progress is not None:
                 progress(msg)
 
+        def log_phase(phase: str, phase_started: float, **extra: Any) -> None:
+            try:
+                if logging_setup is not None:  # type: ignore[name-defined]
+                    logging_setup.log_event(  # type: ignore[union-attr]
+                        "sync.phase.done",
+                        cycle_id=cycle_id,
+                        phase=phase,
+                        elapsed_ms=int((time.time() - phase_started) * 1000),
+                        **extra,
+                    )
+            except Exception:
+                pass
+
         cfg = load_sync_config(self.conn)
         cycle_id = "c" + _utc_now_iso().replace("-", "").replace(":", "").replace(".", "")
         if not cfg.get("server_url") or not cfg.get("device_name"):
             raise SyncError("sync is not configured yet — open Setup first")
+        started = time.time()
+        try:
+            if logging_setup is not None:  # type: ignore[name-defined]
+                logging_setup.log_event(  # type: ignore[union-attr]
+                    "sync.cycle.start",
+                    cycle_id=cycle_id,
+                    device_name=cfg.get("device_name"),
+                    device_role=cfg.get("device_role"),
+                    last_pulled_seq=cfg.get("last_pulled_seq"),
+                    server_url=cfg.get("server_url"),
+                )
+        except Exception:
+            pass
 
         note(f"[{cycle_id}] تسجيل الدخول...")
+        phase_started = time.time()
         token = self._fetch_jwt(cfg)
+        log_phase("login", phase_started)
 
         # Phase 3: POS emits a full stock snapshot before pushing, so
         # the warehouse always has a fresh mirror after the round-trip.
         if (cfg.get("device_role") or "").lower() == "pos":
             try:
                 note(f"[{cycle_id}] تحديث لقطة المخزون...")
+                phase_started = time.time()
                 self.emit_stock_snapshot_event(cfg)
+                log_phase("emit_stock_snapshot", phase_started)
             except Exception as e:
+                log_phase("emit_stock_snapshot", phase_started, error=str(e)[:200])
                 note(f"تعذّر إنشاء لقطة المخزون: {e}")
 
         note(f"[{cycle_id}] جارٍ رفع الأحداث...")
+        phase_started = time.time()
         push_stats = self._push_loop(cfg, token, note)
+        log_phase("push", phase_started, pushed=push_stats.get("pushed", 0), duplicates=push_stats.get("duplicates", 0))
 
         note(f"[{cycle_id}] جارٍ تنزيل الأحداث...")
+        phase_started = time.time()
         pull_stats = self._pull_loop(cfg, token, note)
+        log_phase("pull", phase_started, pulled=pull_stats.get("pulled", 0), next_seq=pull_stats.get("next_seq", 0))
 
         # Phase 3: warehouse refreshes its known-device cache from the
         # server's status endpoint so the bill dialog can offer POS
@@ -475,13 +517,29 @@ class SyncClient:
         if (cfg.get("device_role") or "").lower() == "warehouse":
             try:
                 note(f"[{cycle_id}] تحديث قائمة الفروع...")
+                phase_started = time.time()
                 self.refresh_device_list(cfg, token)
+                log_phase("refresh_device_list", phase_started)
             except Exception as e:
+                log_phase("refresh_device_list", phase_started, error=str(e)[:200])
                 note(f"تعذّر تحديث قائمة الفروع: {e}")
 
         note(f"[{cycle_id}] جارٍ تطبيق الأحداث الواردة...")
+        phase_started = time.time()
         apply_stats = self.apply_inbox(cfg, note)
+        log_phase(
+            "apply_inbox",
+            phase_started,
+            applied=apply_stats.get("applied", 0),
+            skipped=apply_stats.get("skipped", 0),
+            errors=apply_stats.get("errors", 0),
+        )
+        phase_started = time.time()
+        prune_stats = self.prune_acked_outbox()
+        log_phase("prune_acked_outbox", phase_started, deleted=prune_stats.get("deleted", 0))
+        phase_started = time.time()
         _checkpoint_wal_if_large(self.conn)
+        log_phase("checkpoint_wal", phase_started)
 
         summary = {
             "pushed":     push_stats["pushed"],
@@ -495,6 +553,7 @@ class SyncClient:
             "skipped_events":  apply_stats.get("skipped_events") or [],
             "error_events":    apply_stats.get("error_events") or [],
             "dead_lettered": apply_stats.get("dead_lettered", 0),
+            "pruned_acked_outbox": prune_stats.get("deleted", 0),
             "cycle_id": cycle_id,
         }
         note(
@@ -503,7 +562,67 @@ class SyncClient:
             + (f" • فشل {summary['apply_errors']}" if summary["apply_errors"] else "")
             + (f" • DLQ {summary['dead_lettered']}" if summary["dead_lettered"] else "")
         )
+        try:
+            if logging_setup is not None:  # type: ignore[name-defined]
+                logging_setup.log_event("sync.cycle.done", elapsed_ms=int((time.time() - started) * 1000), **summary)  # type: ignore[union-attr]
+        except Exception:
+            pass
         return summary
+
+    def prune_acked_outbox(self) -> Dict[str, int]:
+        """Trim old acknowledged outbox rows.
+
+        Only rows already marked `acked` are removed. Pending/error rows,
+        event ordering, server cursor state, and business tables are not
+        touched. Keeping a recent tail preserves useful diagnostics while
+        preventing the local DB from growing forever.
+        """
+        try:
+            row = self.conn.execute(
+                """
+                SELECT local_seq
+                  FROM sync_outbox
+                 WHERE status = 'acked'
+                 ORDER BY local_seq DESC
+                 LIMIT 1 OFFSET ?
+                """,
+                (ACKED_OUTBOX_KEEP_ROWS,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return {"deleted": 0}
+        if not row:
+            return {"deleted": 0}
+        cutoff = int(row[0] or 0)
+        deleted = 0
+        while True:
+            with self.conn:
+                cur = self.conn.execute(
+                    """
+                    DELETE FROM sync_outbox
+                     WHERE status = 'acked'
+                       AND local_seq <= ?
+                       AND local_seq IN (
+                           SELECT local_seq
+                             FROM sync_outbox
+                            WHERE status = 'acked'
+                              AND local_seq <= ?
+                            ORDER BY local_seq ASC
+                            LIMIT ?
+                       )
+                    """,
+                    (cutoff, cutoff, ACKED_OUTBOX_PRUNE_BATCH),
+                )
+            n = int(cur.rowcount or 0)
+            deleted += n
+            if n < ACKED_OUTBOX_PRUNE_BATCH:
+                break
+        if deleted:
+            try:
+                if logging_setup is not None:  # type: ignore[name-defined]
+                    logging_setup.log_event("sync.outbox.pruned", deleted=deleted, kept_recent=ACKED_OUTBOX_KEEP_ROWS)  # type: ignore[union-attr]
+            except Exception:
+                pass
+        return {"deleted": deleted}
 
     # ---- apply (Phase 3) ----
 
@@ -521,9 +640,9 @@ class SyncClient:
               because appliers are idempotent).
             - Successful applies mark the row with apply_status='ok' and
               apply_at = now.
-            - Unknown event types get apply_status='skipped'. They stay in
-              the inbox; Phase 4 will register appliers for them and
-              re-drain in the next cycle.
+            - Unknown event types get apply_status='deferred'. They stay
+              recoverable; when a later version registers an applier, the
+              same row is picked up again without a cleanup script.
             - An applier that raises ApplyError gets apply_status='error'
               + apply_error filled in; the transaction is rolled back so
               no partial domain mutation lands.
@@ -551,7 +670,7 @@ class SyncClient:
                    COALESCE(apply_attempts, 0), source_device
               FROM sync_inbox
              WHERE apply_status IS NULL
-                OR apply_status = 'error'
+                OR apply_status IN ('error', 'deferred')
              ORDER BY server_seq ASC
             """
         ).fetchall()
@@ -618,23 +737,31 @@ class SyncClient:
                         "summary": str(event_type),
                     })
 
+        total_rows = len(rows) - len(superseded_snapshots)
+        processed_rows = 0
+        note_every = 50
+
         for r in rows:
             event_uuid, event_type, server_seq, payload_json, attempts, source_dev = \
                 r[0], r[1], int(r[2]), r[3], int(r[4] or 0), r[5]
             if event_uuid in superseded_snapshots:
                 continue
+            processed_rows += 1
 
             applier = registry.get(event_type)
             if applier is None:
-                # Leave the event in the inbox but record that we looked
-                # at it. When a later phase adds a handler, bump the
-                # migration to reset `apply_status` to NULL for these
-                # rows so they get picked up again.
+                # Leave the event recoverable for future app versions.
                 with self.conn:
                     self.conn.execute(
-                        "UPDATE sync_inbox SET apply_status = 'skipped' "
-                        "WHERE event_uuid = ?",
-                        (event_uuid,),
+                        """
+                        UPDATE sync_inbox
+                           SET apply_status = 'deferred',
+                               apply_at = ?,
+                               apply_error = 'no applier for this device role',
+                               apply_attempts = ?
+                         WHERE event_uuid = ?
+                        """,
+                        (now, attempts + 1, event_uuid),
                     )
                 skipped += 1
                 skipped_events.append({
@@ -652,7 +779,8 @@ class SyncClient:
             except Exception:
                 payload = {}
 
-            note(f"تطبيق {event_type} (seq={server_seq})...")
+            if processed_rows == 1 or processed_rows % note_every == 0 or processed_rows == total_rows:
+                note(f"تطبيق الأحداث الواردة {processed_rows}/{total_rows} • {event_type} (seq={server_seq})...")
             try:
                 # Each apply runs in its own transaction so a failure on
                 # one event doesn't corrupt a later event's work.
@@ -924,6 +1052,8 @@ class SyncClient:
                 and int(srv_max) < cursor
             ):
                 recovery_attempted = True
+                _sync_meta_set(self.conn, "server_reset_detected_at", _utc_now_iso())
+                _sync_meta_set(self.conn, "server_reset_source_truth_requeued_at", "")
                 note("اكتشاف إعادة ضبط للسيرفر — إعادة ضبط المؤشر وإعادة التنزيل…")
                 cursor = 0
                 continue
@@ -941,10 +1071,10 @@ class SyncClient:
                             payload_obj["__source_device__"] = sd
                         self.conn.execute(
                             """
-                            INSERT INTO sync_inbox
+                            INSERT OR IGNORE INTO sync_inbox
                                 (event_uuid, event_type, server_seq,
-                                 source_device, payload_json, applied_at)
-                            VALUES (?, ?, ?, ?, ?, ?)
+                                 source_device, payload_json, applied_at, server_created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 ev["event_uuid"],
@@ -953,6 +1083,7 @@ class SyncClient:
                                 ev.get("source_device"),
                                 json.dumps(payload_obj, ensure_ascii=False, default=str),
                                 now,
+                                ev.get("created_at"),
                             ),
                         )
                     except sqlite3.IntegrityError:
@@ -989,9 +1120,8 @@ class SyncClient:
         STOCK_SNAPSHOT outbox event targeted at 'warehouse'.
 
         Called at the start of every POS sync cycle so the warehouse
-        always has a fresh mirror. Deduplication across cycles is a
-        Phase-5 optimisation; for now a snapshot is emitted every time
-        even if stocks haven't changed.
+        always has a fresh mirror. If the stock hash did not change
+        since the last emitted snapshot, no new event is added.
 
         Returns the event_uuid, or None on soft failure (e.g. no
         stocks table). Never raises on domain issues — the cycle
@@ -1008,7 +1138,6 @@ class SyncClient:
                 """
                 SELECT item_type, school, color, size, unit_price, SUM(count) AS total
                   FROM stocks
-                 WHERE count > 0
                  GROUP BY item_type, school, color, size, unit_price
                  ORDER BY item_type, school, color, size, unit_price
                 """
@@ -1036,9 +1165,14 @@ class SyncClient:
             "source_device_name": device_name,
             "snapshot_at":        snapshot_at,
             "app_version":        APP_VERSION,
+            "includes_zero_rows":  True,
             "snapshot_hash":      snapshot_hash,
             "rows":               snapshot_rows,
         }
+
+        previous_hash = _sync_meta_get(self.conn, meta_key)
+        if previous_hash == snapshot_hash:
+            return None
 
         # Append directly to sync_outbox with scope = 'warehouse' so
         # the server routes it only to the single WH device.

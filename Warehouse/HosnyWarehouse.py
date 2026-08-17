@@ -5,7 +5,7 @@ try:
     import logging_setup
     logging_setup.install_crash_logging("HosnyWarehouse")
 except Exception:
-    pass
+    logging_setup = None  # type: ignore
 
 import json
 import os
@@ -17,16 +17,17 @@ import tempfile
 import unicodedata
 import webbrowser
 import re
+import threading
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from dataclasses import dataclass
 from datetime import datetime, date   # +date for calendar
 import calendar                       # ADD
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 
-APP_VERSION = "2026.8.2.11"
+APP_VERSION = "2026.8.2.40"
 APP_TITLE = "إدارة المخازن"
 
 _DIGIT_TRANSLATION = str.maketrans({
@@ -48,6 +49,22 @@ _NUMBER_RUN_RE = re.compile(r"(?<!\u200e)([0-9](?:[0-9.,:/\\\- ]*[0-9])?)(?!\u20
 
 def _strip_digit_marks(value: Any) -> str:
     return western_digits(value).replace(_LTR_MARK, "").replace(_RTL_MARK, "")
+
+
+def _summarize_sync_payload_for_ui(event_type: str, payload: Dict[str, Any]) -> str:
+    try:
+        parts = []
+        for key in ("bill_id", "reservation_id", "shipment_uuid", "target_device", "source_device", "customer", "total", "payment_method"):
+            value = (payload or {}).get(key)
+            if value not in (None, ""):
+                parts.append(f"{key}={value}")
+        for list_key in ("items", "lines", "reservations", "return_lines", "take_lines"):
+            value = (payload or {}).get(list_key)
+            if isinstance(value, list):
+                parts.append(f"{list_key}={len(value)}")
+        return ", ".join(parts) or str(event_type or "")
+    except Exception:
+        return str(event_type or "")
 
 
 def western_digits_for_display(value: Any) -> str:
@@ -175,6 +192,13 @@ def _runtime_base_dir() -> str:
 APP_BASE_DIR = _runtime_base_dir()
 DB_PATH = os.path.join(APP_BASE_DIR, "warehouse_data.sqlite3")
 LEGACY_JSON_PATH = os.path.join(APP_BASE_DIR, "warehouse_data.json")
+
+try:
+    if logging_setup is not None:  # type: ignore[name-defined]
+        logging_setup.configure_context(app="WAREHOUSE", version=APP_VERSION, db_path=DB_PATH)  # type: ignore[union-attr]
+except Exception:
+    pass
+
 ADMIN_PASSWORD_PLAIN = "112233"
 ADMIN_PASSWORD_HASH_PREFIX = "sha256$"
 
@@ -186,6 +210,9 @@ DEFAULT_BRANCH_POS_NAMES = [
     "POS-BAH",
     "POS-CEN",
 ]
+TEST_POS_DEVICE_NAMES = {
+    "POS-TEST",
+}
 BRANCH_UI_NAME_BY_DEVICE = {
     "POS-ZAY": "فرع زايد",
     "POS-OCT": "فرع اكتوبر",
@@ -193,17 +220,19 @@ BRANCH_UI_NAME_BY_DEVICE = {
     "POS-CEN": "فرع السنتر",
     "POS-OBO": "فرع العبور",
     "POS-GESR": "فرع جسر السويس",
+    "POS-TEST": "فرع الاختبار",
 }
 BRANCH_DEVICE_BY_UI_NAME = {v: k for k, v in BRANCH_UI_NAME_BY_DEVICE.items()}
-WAREHOUSE_NUMBER_VALUES = ["1", "2", "3", "4", "5", "6", "7"]
+WAREHOUSE_NUMBER_VALUES = ["1", "2", "3", "4", "5", "6", "7", "8"]
 WAREHOUSE_NUMBER_LABELS = {
-    "1": "مخزن 1",
-    "2": "مخزن 2",
-    "3": "مخزن 3",
-    "4": "مخزن 4",
+    "1": "مخزن بهتيم",
+    "2": "مخزن السنتر",
+    "3": "مخزن جسر السويس",
+    "4": "المخزن القديم",
     "5": "مخزن زايد",
     "6": "مخزن اكتوبر",
     "7": "مخزن العبور",
+    "8": "المخزن الاساسي",
 }
 WAREHOUSE_NUMBER_DISPLAY_VALUES = [WAREHOUSE_NUMBER_LABELS[v] for v in WAREHOUSE_NUMBER_VALUES]
 
@@ -217,6 +246,22 @@ def normalize_branch_customer_name(value: Any) -> Optional[str]:
     if raw in DEFAULT_BRANCH_POS_NAMES:
         return raw
     return BRANCH_DEVICE_BY_UI_NAME.get(raw)
+
+
+def normalize_test_pos_device_name(value: Any) -> Optional[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("فرع:"):
+        raw = raw.split(":", 1)[1].strip()
+    mapped = BRANCH_DEVICE_BY_UI_NAME.get(raw, raw)
+    if mapped in TEST_POS_DEVICE_NAMES:
+        return mapped
+    if "(" in raw and ")" in raw:
+        inside = raw.rsplit("(", 1)[1].split(")", 1)[0].strip()
+        if inside in TEST_POS_DEVICE_NAMES:
+            return inside
+    return None
 
 
 def canonical_branch_device_name(value: Any, known_devices: Optional[Sequence[str]] = None) -> Optional[str]:
@@ -337,7 +382,7 @@ def _branch_customer_label_variants(devices: Sequence[str]) -> List[str]:
 def branch_customer_exclusion_sql(alias: str = "b") -> Tuple[List[str], List[Any]]:
     prefix = f"{alias}." if alias else ""
     col = f"COALESCE({prefix}customer,'')"
-    labels = _branch_customer_label_variants(DEFAULT_BRANCH_POS_NAMES)
+    labels = _branch_customer_label_variants([*DEFAULT_BRANCH_POS_NAMES, *sorted(TEST_POS_DEVICE_NAMES)])
     placeholders = ",".join("?" for _ in labels)
     clauses = [
         f"LOWER(TRIM({col})) NOT LIKE LOWER(TRIM('فرع:%'))",
@@ -439,7 +484,7 @@ ALLOWED_NUMERIC_RANGES = {
     (14, 28): [str(i) for i in range(14, 30, 2)],
     (18, 30): [str(i) for i in range(18, 32, 2)],
     (0, 9):  [str(i) for i in range(0, 10, 1)],
-    (32, 62): [str(i) for i in range(32, 63,2)],
+    (30, 62): [str(i) for i in range(30, 63, 2)],
 
 }
 NUMERIC_RANGE_LABELS = [
@@ -901,20 +946,95 @@ def apply_focus_highlight(widget, color="#19E72A"):
 class SqliteDatabase:
     """SQLite persistence with package-centric controls."""
 
-    def __init__(self, path: str = DB_PATH, legacy_json: str = LEGACY_JSON_PATH) -> None:
+    def __init__(
+        self,
+        path: str = DB_PATH,
+        legacy_json: str = LEGACY_JSON_PATH,
+        *,
+        run_startup_maintenance: bool = True,
+    ) -> None:
         self.path = path
+        try:
+            logging_setup.log_event(  # type: ignore[union-attr]
+                "db.open.start",
+                db_path=os.path.abspath(self.path),
+                exists=os.path.exists(self.path),
+                size_bytes=(os.path.getsize(self.path) if os.path.exists(self.path) else 0),
+            )
+        except Exception:
+            pass
         self.conn = sqlite3.connect(self.path, timeout=30.0, isolation_level=None, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout=30000;")
 
+        started = time.time()
         self._apply_pragmas()
         self._init_schema()
         self._migrate_from_json_if_empty(legacy_json)
-        self.repair_stock_integrity()
+        normalized_ranges = 0
+        catalog_rows = 0
+        if run_startup_maintenance:
+            normalized_ranges = self._normalize_legacy_size_profile_ranges()
+            self.repair_stock_integrity()
+            self.repair_pos_stock_mirror_duplicates()
+            try:
+                from sync_appliers import ensure_warehouse_catalog_from_pos_mirror
+                mirror_catalog = ensure_warehouse_catalog_from_pos_mirror(self.conn)
+                try:
+                    logging_setup.log_event(  # type: ignore[union-attr]
+                        "db.pos_mirror_catalog_import.done",
+                        **{k: int(v or 0) for k, v in (mirror_catalog or {}).items()},
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                try:
+                    logging_setup.log_exception("db.pos_mirror_catalog_import.failed")  # type: ignore[union-attr]
+                except Exception:
+                    pass
+            try:
+                catalog_rows = self.ensure_all_size_profile_catalog_rows()
+            except Exception:
+                try:
+                    logging_setup.log_exception("db.ensure_size_catalog.failed")  # type: ignore[union-attr]
+                except Exception:
+                    pass
         try:
-            self.ensure_all_size_profile_catalog_rows()
+            logging_setup.log_event(  # type: ignore[union-attr]
+                "db.open.done",
+                elapsed_ms=int((time.time() - started) * 1000),
+                normalized_size_ranges=normalized_ranges,
+                ensured_size_catalog_rows=catalog_rows,
+                startup_maintenance=bool(run_startup_maintenance),
+            )
         except Exception:
             pass
+
+    def _normalize_legacy_size_profile_ranges(self) -> int:
+        """Move saved 32-62 size ranges to the current 30-62 range."""
+        try:
+            with self.conn:
+                c1 = self.conn.execute(
+                    """
+                    UPDATE size_profiles
+                       SET num_start_1 = 30,
+                           updated_at = datetime('now')
+                     WHERE num_start_1 = 32
+                       AND num_end_1 = 62
+                    """
+                ).rowcount
+                c2 = self.conn.execute(
+                    """
+                    UPDATE size_profiles
+                       SET num_start_2 = 30,
+                           updated_at = datetime('now')
+                     WHERE num_start_2 = 32
+                       AND num_end_2 = 62
+                    """
+                ).rowcount
+            return int(c1 or 0) + int(c2 or 0)
+        except Exception:
+            return 0
 
 
     def repair_stock_integrity(self) -> Dict[str, int]:
@@ -1047,6 +1167,9 @@ class SqliteDatabase:
         cur.execute("PRAGMA journal_mode=WAL;")
         cur.execute("PRAGMA synchronous=NORMAL;")
         cur.execute("PRAGMA foreign_keys=ON;")
+        cur.execute("PRAGMA busy_timeout=30000;")
+        cur.execute("PRAGMA temp_store=MEMORY;")
+        cur.execute("PRAGMA cache_size=-30000;")
         cur.close()
 
     def _record_sync_event(
@@ -1135,6 +1258,16 @@ class SqliteDatabase:
         event_uuid = self._record_sync_event(event_type, payload, target_scope=target_scope)
         if not event_uuid:
             raise RuntimeError(f"Failed to record required sync event: {event_type}")
+        try:
+            logging_setup.log_event(  # type: ignore[union-attr]
+                "sync.outbox.recorded",
+                event_type=event_type,
+                event_uuid=event_uuid,
+                target_scope=target_scope,
+                payload_summary=_summarize_sync_payload_for_ui(event_type, payload),
+            )
+        except Exception:
+            pass
         return str(event_uuid)
 
     def _init_schema(self) -> None:
@@ -1568,12 +1701,32 @@ class SqliteDatabase:
             self.conn.executescript("""
                 CREATE INDEX IF NOT EXISTS idx_stocks_specs_norm
                     ON stocks(LOWER(TRIM(item_type)), LOWER(TRIM(school)), LOWER(TRIM(color)), LOWER(TRIM(size)));
+                CREATE INDEX IF NOT EXISTS idx_stocks_specs_loc_price_count
+                    ON stocks(item_type, school, color, size, warehouse_no, package_no, unit_price, count);
+                CREATE INDEX IF NOT EXISTS idx_stocks_loc_count
+                    ON stocks(warehouse_no, package_no, count);
                 CREATE INDEX IF NOT EXISTS idx_bills_customer_norm
                     ON bills(LOWER(TRIM(customer)));
+                CREATE INDEX IF NOT EXISTS idx_bills_status_created
+                    ON bills(status, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_bills_type_created
+                    ON bills(bill_type, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_movements_bill_id
                     ON movements(bill_id);
+                CREATE INDEX IF NOT EXISTS idx_movements_dir_ts_specs
+                    ON movements(direction, ts, school, item_type, color);
                 CREATE INDEX IF NOT EXISTS idx_bill_items_specs
                     ON bill_items(item_type, school, color, size);
+                CREATE INDEX IF NOT EXISTS idx_bill_items_bill_specs
+                    ON bill_items(bill_id, item_type, school, color, size);
+                CREATE INDEX IF NOT EXISTS idx_branch_inventory_queue_status_created
+                    ON branch_inventory_queue(status, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_branch_inventory_queue_source_status
+                    ON branch_inventory_queue(source_device, status, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_shipment_receipt_reviews_status_created
+                    ON shipment_receipt_reviews(status, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_branch_cash_receipts_date_branch
+                    ON branch_cash_receipts(received_at DESC, branch_device);
                 CREATE INDEX IF NOT EXISTS idx_sync_outbox_status_seq
                     ON sync_outbox(status, local_seq);
                 CREATE INDEX IF NOT EXISTS idx_sync_inbox_status_seq
@@ -1816,11 +1969,29 @@ class SqliteDatabase:
                         if (
                             price > 0
                             and all(int(r["count"] or 0) == 0 for r in existing)
-                            and abs(float(existing[0]["unit_price"] or 0.0) - float(price)) >= 0.000001
+                            and any(abs(float(r["unit_price"] or 0.0) - float(price)) >= 0.000001 for r in existing)
                         ):
                             self.conn.execute(
-                                "UPDATE stocks SET unit_price=? WHERE id=?",
-                                (float(price), int(existing[0]["id"])),
+                                """
+                                UPDATE stocks
+                                   SET unit_price=?
+                                 WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                                   AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                                   AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                                   AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+                                   AND warehouse_no = ?
+                                   AND package_no = ?
+                                   AND COALESCE(count, 0) = 0
+                                """,
+                                (
+                                    float(price),
+                                    item,
+                                    school_txt,
+                                    color_txt,
+                                    norm_size or size_txt,
+                                    int(wh),
+                                    int(pkg),
+                                ),
                             )
                         continue
 
@@ -2247,23 +2418,52 @@ class SqliteDatabase:
         targets: Sequence[Tuple[str, str, str]],
         note: str = "Price profile catalog sync",
     ) -> int:
-        rows = self.price_profile_catalog_rows_for_targets(int(profile_id), targets)
-        if not rows:
-            return 0
-        try:
-            devices = self.list_known_pos_device_names() or []
-        except Exception:
-            devices = []
-        sent_total = 0
-        for dev in devices:
-            target = str(dev or "").strip()
-            if not target:
-                continue
-            try:
-                sent_total += int(self.send_catalog_rows_to_pos(target, rows, note=note) or 0)
-            except Exception:
-                continue
-        return sent_total
+        sent = 0
+        for row in self.price_profile_catalog_rows_for_targets(int(profile_id), targets):
+            event_uuids = self.emit_price_update_sync_events(
+                filters={
+                    "item_type": row.get("item_type"),
+                    "school": row.get("school"),
+                    "color": row.get("color"),
+                    "size": row.get("size"),
+                },
+                new_price=float(row.get("unit_price") or 0),
+                note=note,
+                sync_mode="related-pos",
+                audit_mode="price-profile-catalog",
+                allow_catalog_definition=True,
+            )
+            sent += len(event_uuids)
+        return int(sent)
+
+    def send_price_profile_catalog_to_pos(
+        self,
+        profile_id: int,
+        targets: Sequence[Tuple[str, str, str]],
+        pos_device: str,
+        note: str = "Price profile catalog sync",
+    ) -> int:
+        device = str(pos_device or "").strip()
+        if not device:
+            raise ValueError("اختر فرع POS أولاً.")
+        sent = 0
+        for row in self.price_profile_catalog_rows_for_targets(int(profile_id), targets):
+            event_uuids = self.emit_price_update_sync_events(
+                filters={
+                    "item_type": row.get("item_type"),
+                    "school": row.get("school"),
+                    "color": row.get("color"),
+                    "size": row.get("size"),
+                },
+                new_price=float(row.get("unit_price") or 0),
+                note=note,
+                sync_mode="selected-pos",
+                sync_pos_devices=[device],
+                audit_mode="branch-inventory-price-profile",
+                allow_catalog_definition=True,
+            )
+            sent += len(event_uuids)
+        return int(sent)
 
     def list_items_missing_price_profile(self, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         filters = filters or {}
@@ -2329,6 +2529,7 @@ class SqliteDatabase:
         *,
         stock_ids: Optional[Sequence[int]] = None,
         note: str = "Price profile applied",
+        price_sync_mode: str = "related-pos",
     ) -> Dict[str, int]:
         clean_targets = [
             (str(item or "").strip(), str(school or "").strip(), str(color or "").strip())
@@ -2373,6 +2574,7 @@ class SqliteDatabase:
         rows = [dict(r) for r in cur.fetchall()]
         updated = 0
         skipped = 0
+        selected_id_mode = bool(ids)
         for row in rows:
             price = self.get_price_profile_price(profile_id, row.get("item_type"), row.get("size"))
             if price is None:
@@ -2384,13 +2586,26 @@ class SqliteDatabase:
                 old_price = None
             if old_price is not None and abs(old_price - float(price)) < 0.000001:
                 skipped += 1
-                continue
-            updated += self.update_prices(
-                {"id": int(row["id"])},
-                float(price),
-                note=note,
-                price_sync_mode="all-pos",
-            )
+            else:
+                updated += self.update_prices(
+                    {"id": int(row["id"])},
+                    float(price),
+                    note=note,
+                    price_sync_mode="none" if selected_id_mode else str(price_sync_mode or "related-pos"),
+                )
+            if selected_id_mode:
+                self.emit_price_update_sync_events(
+                    filters={
+                        "item_type": row.get("item_type"),
+                        "school": row.get("school"),
+                        "color": row.get("color"),
+                        "size": row.get("size"),
+                    },
+                    new_price=float(price),
+                    note=note,
+                    sync_mode=str(price_sync_mode or "related-pos"),
+                    audit_mode="price-profile-selected-row",
+                )
         return {"updated": int(updated), "skipped": int(skipped), "checked": len(rows)}
 
     def apply_price_profile_item_to_assigned_stock(
@@ -3073,13 +3288,6 @@ class SqliteDatabase:
             old_cl = row["color"]     if isinstance(row, sqlite3.Row) else row[2]
             old_sz = row["size"]      if isinstance(row, sqlite3.Row) else row[3]
 
-            still = self.conn.execute(
-                "SELECT 1 FROM stocks WHERE item_type=? AND school=? AND color=? AND size=? LIMIT 1",
-                (old_it, old_sc, old_cl, old_sz),
-            ).fetchone()
-            if still:
-                continue
-
             where_sql = "item_type=? AND school=? AND color=? AND size=?"
             where_args = (old_it, old_sc, old_cl, old_sz)
 
@@ -3128,7 +3336,10 @@ class SqliteDatabase:
                     continue
                 if old_spec == new_spec:
                     continue
-                self._record_sync_event("SPEC_RENAMED", dict(payload), target_scope="all-pos")
+                safe_payload = dict(payload)
+                safe_payload.pop("value_renames", None)
+                safe_payload.pop("allow_global_value_renames", None)
+                self._record_sync_event("SPEC_RENAMED", safe_payload, target_scope="all-pos")
             except Exception:
                 pass
 
@@ -3319,6 +3530,534 @@ class SqliteDatabase:
             import traceback
             traceback.print_exc()
 
+    def _payload_item_matches_specs(self, item: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+        for key in ("item_type", "school", "color", "size"):
+            expected = str(filters.get(key) or "").strip()
+            if not expected:
+                continue
+            actual = str((item or {}).get(key) or "").strip()
+            if key == "size":
+                expected = _normalize_size_label(_strip_digit_marks(expected)) or expected
+                actual = _normalize_size_label(_strip_digit_marks(actual)) or actual
+            if actual.casefold() != expected.casefold():
+                return False
+        return True
+
+    def related_pos_devices_for_price_update(self, filters: Dict[str, Any]) -> List[str]:
+        """POS branches that own the exact item via source-of-truth anchors."""
+        cleaned = self._price_update_filters_for_sync(filters or {})
+        if not all(str(cleaned.get(k) or "").strip() for k in ("item_type", "school", "color", "size")):
+            return []
+        wanted = tuple(str(cleaned[k]).strip().casefold() for k in ("item_type", "school", "color", "size"))
+        devices: Dict[str, str] = {}
+        for dev, specs in self._owned_branch_specs_for_source_of_truth().items():
+            if wanted in specs:
+                devices.setdefault(dev.casefold(), dev)
+        return sorted(devices.values(), key=lambda x: branch_display_name(x).casefold())
+
+    def _owned_branch_specs_for_source_of_truth(
+        self,
+        branch_devices: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Dict[Tuple[str, str, str, str], Dict[str, str]]]:
+        selected = {
+            (configured_branch_device_name(d) or str(d or "").strip()).casefold()
+            for d in (branch_devices or [])
+            if str(d or "").strip()
+        }
+        owned: Dict[str, Dict[Tuple[str, str, str, str], Dict[str, str]]] = {}
+
+        def _accept_device(raw: Any) -> Optional[str]:
+            text = str(raw or "").strip()
+            if not text:
+                return None
+            dev = configured_branch_device_name(text) or text
+            if selected and dev.casefold() not in selected:
+                return None
+            return dev
+
+        def _add(raw_device: Any, item_type: Any, school: Any, color: Any, size: Any) -> None:
+            dev = _accept_device(raw_device)
+            spec = {
+                "item_type": str(item_type or "").strip(),
+                "school": str(school or "").strip(),
+                "color": str(color or "").strip(),
+                "size": str(size or "").strip(),
+            }
+            if not dev or not all(spec.values()):
+                return
+            key = tuple(spec[k].casefold() for k in ("item_type", "school", "color", "size"))
+            owned.setdefault(dev, {}).setdefault(key, spec)
+
+        try:
+            bills = self.list_bills()
+        except Exception:
+            bills = []
+        for bill in bills:
+            if (bill.get("status") or "CONFIRMED") != "CONFIRMED":
+                continue
+            branch_dev = normalize_branch_customer_name(bill.get("customer"))
+            if not branch_dev:
+                continue
+            try:
+                lines = self.list_bill_items(int(bill.get("id") or 0))
+            except Exception:
+                lines = []
+            for item in lines:
+                _add(
+                    branch_dev,
+                    item.get("item_type"),
+                    item.get("school"),
+                    item.get("color"),
+                    item.get("size"),
+                )
+
+        try:
+            outbox_rows = self.conn.execute(
+                """
+                SELECT event_type, target_scope, payload_json
+                  FROM sync_outbox
+                 WHERE event_type IN ('STOCK_TRANSFER_OUT', 'STOCK_TRANSFER_CANCELLED', 'BRANCH_STOCK_RECLASSIFIED')
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            outbox_rows = []
+        cancelled_shipments: set = set()
+        for row in outbox_rows:
+            if str(row["event_type"] or "") != "STOCK_TRANSFER_CANCELLED":
+                continue
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except Exception:
+                continue
+            shipment_uuid = str(payload.get("shipment_uuid") or payload.get("bill_uuid") or "").strip()
+            if shipment_uuid:
+                cancelled_shipments.add(shipment_uuid.casefold())
+        for row in outbox_rows:
+            if str(row["event_type"] or "") == "BRANCH_STOCK_RECLASSIFIED":
+                try:
+                    payload = json.loads(row["payload_json"] or "{}")
+                except Exception:
+                    continue
+                scope = str(row["target_scope"] or payload.get("__target_scope__") or "").strip()
+                target = scope[4:].strip() if scope.lower().startswith("pos:") else str(payload.get("branch_device") or "").strip()
+                to_spec = payload.get("to_spec") or {}
+                if isinstance(to_spec, dict):
+                    _add(
+                        target,
+                        to_spec.get("item_type"),
+                        to_spec.get("school"),
+                        to_spec.get("color"),
+                        to_spec.get("size"),
+                    )
+                continue
+            if str(row["event_type"] or "") != "STOCK_TRANSFER_OUT":
+                continue
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except Exception:
+                continue
+            shipment_uuid = str(payload.get("shipment_uuid") or "").strip()
+            if shipment_uuid and shipment_uuid.casefold() in cancelled_shipments:
+                continue
+            scope = str(row["target_scope"] or payload.get("__target_scope__") or "").strip()
+            target = scope[4:].strip() if scope.lower().startswith("pos:") else ""
+            if not target:
+                continue
+            note = str(payload.get("note") or "").casefold()
+            is_reservation_definition = "reservation" in note or "حجز" in note
+            for item in payload.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    qty = int(float(item.get("qty") or 0))
+                except (TypeError, ValueError):
+                    qty = 0
+                catalog_only = bool(item.get("catalog_only"))
+                if qty == 0 and not (catalog_only and is_reservation_definition):
+                    continue
+                _add(
+                    target,
+                    item.get("item_type"),
+                    item.get("school"),
+                    item.get("color"),
+                    item.get("size"),
+                )
+
+        return owned
+
+    def _spec_rename_history_for_source_of_truth(self) -> List[Tuple[Dict[str, str], Dict[str, str], List[Dict[str, str]]]]:
+        try:
+            rows = self.conn.execute(
+                """
+                SELECT payload_json
+                  FROM sync_outbox
+                 WHERE event_type='SPEC_RENAMED'
+                 ORDER BY local_seq ASC
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+
+        history: List[Tuple[Dict[str, str], Dict[str, str], List[Dict[str, str]]]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except Exception:
+                continue
+            old_spec_raw = payload.get("old_spec") or {}
+            new_spec_raw = payload.get("new_spec") or {}
+            if not isinstance(old_spec_raw, dict) or not isinstance(new_spec_raw, dict):
+                continue
+            old_spec = {
+                k: str(old_spec_raw.get(k) or "").strip()
+                for k in ("item_type", "school", "color", "size")
+            }
+            new_spec = {
+                k: str(new_spec_raw.get(k) or old_spec.get(k) or "").strip()
+                for k in ("item_type", "school", "color", "size")
+            }
+            renames = [
+                {
+                    "field": str(v.get("field") or "").strip(),
+                    "old_value": str(v.get("old_value") or "").strip(),
+                    "new_value": str(v.get("new_value") or "").strip(),
+                }
+                for v in (payload.get("value_renames") or [])
+                if isinstance(v, dict)
+            ] if bool(payload.get("allow_global_value_renames")) else []
+            if old_spec == new_spec and not renames:
+                continue
+            history.append((old_spec, new_spec, renames))
+        return history
+
+    def _apply_spec_rename_history(
+        self,
+        spec: Dict[str, str],
+        history: Sequence[Tuple[Dict[str, str], Dict[str, str], List[Dict[str, str]]]],
+    ) -> Dict[str, str]:
+        current = {k: str(spec.get(k) or "").strip() for k in ("item_type", "school", "color", "size")}
+        for old_spec, new_spec, value_renames in history:
+            if all(
+                current.get(k, "").casefold() == str(old_spec.get(k) or "").strip().casefold()
+                for k in ("item_type", "school", "color", "size")
+            ):
+                current = {k: str(new_spec.get(k) or current.get(k) or "").strip() for k in current}
+            for rename in value_renames:
+                field = rename.get("field")
+                if field not in current:
+                    continue
+                old_value = str(rename.get("old_value") or "").strip()
+                new_value = str(rename.get("new_value") or "").strip()
+                if old_value and new_value and current[field].casefold() == old_value.casefold():
+                    current[field] = new_value
+        return current
+
+    def _warehouse_source_price_for_spec(self, spec: Dict[str, str]) -> Optional[float]:
+        item_type = str(spec.get("item_type") or "").strip()
+        school = str(spec.get("school") or "").strip()
+        color = str(spec.get("color") or "").strip()
+        size = str(spec.get("size") or "").strip()
+        if not (item_type and school and color and size):
+            return None
+
+        profile_id = self.resolve_price_profile_id(item_type, school, color)
+        if profile_id:
+            profile_price = self.get_price_profile_price(profile_id, item_type, size)
+            if profile_price is not None:
+                return float(profile_price)
+
+        size_norm = _normalize_size_label(_strip_digit_marks(size)) or size
+        if size_norm and size_norm.casefold() != size.casefold():
+            row = self.conn.execute(
+                """
+                SELECT unit_price
+                  FROM stocks
+                 WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                   AND (LOWER(TRIM(size)) = LOWER(TRIM(?)) OR LOWER(TRIM(size)) = LOWER(TRIM(?)))
+                 ORDER BY id DESC
+                 LIMIT 1
+                """,
+                (item_type, school, color, size, size_norm),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                """
+                SELECT unit_price
+                  FROM stocks
+                 WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                   AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+                 ORDER BY id DESC
+                 LIMIT 1
+                """,
+                (item_type, school, color, size),
+            ).fetchone()
+        if row is None or row["unit_price"] is None:
+            return None
+        try:
+            return float(row["unit_price"])
+        except (TypeError, ValueError):
+            return None
+
+    def _expanded_source_truth_specs_for_branch(
+        self,
+        specs: Dict[Tuple[str, str, str, str], Dict[str, str]],
+        rename_history: Sequence[Tuple[Dict[str, str], Dict[str, str], List[Dict[str, str]]]],
+    ) -> List[Dict[str, str]]:
+        """Owned branch specs plus the full configured size/price profile range.
+
+        The ownership anchor is still only shipments/reservation definitions. Once a
+        branch owns an item_type/school/color group, zero-count rows in that group's
+        configured profiles also need to receive price corrections.
+        """
+        expanded: List[Dict[str, str]] = []
+        seen_specs = set()
+        owned_groups = set()
+
+        def _add(spec: Dict[str, Any]) -> None:
+            clean = {
+                "item_type": str(spec.get("item_type") or "").strip(),
+                "school": str(spec.get("school") or "").strip(),
+                "color": str(spec.get("color") or "").strip(),
+                "size": _normalize_size_label(_strip_digit_marks(spec.get("size"))),
+            }
+            if not all(clean.values()):
+                return
+            key = tuple(clean[k].casefold() for k in ("item_type", "school", "color", "size"))
+            if key in seen_specs:
+                return
+            seen_specs.add(key)
+            expanded.append(clean)
+
+        for branch_spec in specs.values():
+            truth_spec = self._apply_spec_rename_history(branch_spec, rename_history)
+            if not all(str(truth_spec.get(k) or "").strip() for k in ("item_type", "school", "color", "size")):
+                continue
+            _add(truth_spec)
+            owned_groups.add(tuple(str(truth_spec[k]).strip() for k in ("item_type", "school", "color")))
+
+        for item_type, school, color in sorted(owned_groups, key=lambda x: tuple(str(v).casefold() for v in x)):
+            profile = self.get_size_profile(item_type, school, color)
+            for label in size_labels_from_profile_tuple(profile):
+                _add({"item_type": item_type, "school": school, "color": color, "size": label})
+            try:
+                assignment = self.get_price_profile_assignment(item_type, school, color) or {}
+                profile_id = assignment.get("profile_id")
+            except Exception:
+                profile_id = None
+            if profile_id:
+                for row in self.price_profile_catalog_rows_for_targets(
+                    int(profile_id),
+                    [(item_type, school, color)],
+                ):
+                    _add(row)
+
+        expanded.sort(key=lambda r: (
+            str(r.get("school") or "").casefold(),
+            warehouse_item_sort_key(r.get("item_type"), r.get("color")),
+            warehouse_size_sort_key(r.get("size")),
+        ))
+        return expanded
+
+    def force_pos_source_of_truth_sync(
+        self,
+        branch_devices: Optional[Sequence[str]] = None,
+    ) -> Dict[str, int]:
+        """Resend Warehouse spec names and prices to POS branches that own them."""
+        selected = [
+            configured_branch_device_name(d) or str(d or "").strip()
+            for d in (branch_devices or [])
+            if str(d or "").strip()
+        ]
+        seen_selected = set()
+        selected = [
+            d for d in selected
+            if not (d.casefold() in seen_selected or seen_selected.add(d.casefold()))
+        ]
+        owned = self._owned_branch_specs_for_source_of_truth(selected or None)
+        rename_history = self._spec_rename_history_for_source_of_truth()
+
+        rename_events = 0
+        ownership_events = 0
+        price_events = 0
+        skipped_missing_price = 0
+        truth_specs_seen = set()
+        emitted_prices = set()
+        emitted_renames = set()
+
+        with self.conn:
+            try:
+                rows = self.conn.execute(
+                    """
+                    SELECT payload_json, target_scope
+                      FROM sync_outbox
+                     WHERE event_type='SPEC_RENAMED'
+                     ORDER BY local_seq ASC
+                    """
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            for row in rows:
+                try:
+                    payload = json.loads(row["payload_json"] or "{}")
+                except Exception:
+                    continue
+                scope = str(row["target_scope"] or payload.get("__target_scope__") or "all-pos").strip() or "all-pos"
+                old_spec = payload.get("old_spec") or {}
+                new_spec = payload.get("new_spec") or {}
+                value_renames = payload.get("value_renames") or []
+                if not isinstance(old_spec, dict) or not isinstance(new_spec, dict):
+                    continue
+                if old_spec == new_spec and not value_renames:
+                    continue
+
+                targets: List[str]
+                if selected:
+                    if scope.lower().startswith("pos:"):
+                        original = configured_branch_device_name(scope[4:]) or scope[4:].strip()
+                        if original.casefold() not in {d.casefold() for d in selected}:
+                            continue
+                        targets = [original]
+                    else:
+                        targets = selected
+                elif scope.lower().startswith("pos:"):
+                    target = configured_branch_device_name(scope[4:]) or scope[4:].strip()
+                    targets = [target] if target else []
+                else:
+                    targets = ["all-pos"]
+
+                replay_payload = dict(payload)
+                replay_payload.pop("__target_scope__", None)
+                if not bool(replay_payload.get("allow_global_value_renames")):
+                    replay_payload.pop("value_renames", None)
+                key_payload = json.dumps(replay_payload, ensure_ascii=False, sort_keys=True, default=str)
+                for target in targets:
+                    replay_scope = "all-pos" if target == "all-pos" else f"pos:{target}"
+                    replay_key = (replay_scope, key_payload)
+                    if replay_key in emitted_renames:
+                        continue
+                    emitted_renames.add(replay_key)
+                    if self._record_sync_event("SPEC_RENAMED", replay_payload, target_scope=replay_scope):
+                        rename_events += 1
+
+            for branch_device, specs in owned.items():
+                snapshot_specs: List[Dict[str, Any]] = []
+                expanded_specs = self._expanded_source_truth_specs_for_branch(specs, rename_history)
+                for truth_spec in expanded_specs:
+                    price = self._warehouse_source_price_for_spec(truth_spec)
+                    snapshot_specs.append({
+                        **truth_spec,
+                        "unit_price": float(price or 0.0),
+                    })
+                if not snapshot_specs:
+                    continue
+                snapshot_payload = {
+                    "branch_device": branch_device,
+                    "mode": "replace",
+                    "specs": snapshot_specs,
+                    "size_profiles": self._branch_shipment_size_profiles(snapshot_specs),
+                }
+                if self._record_sync_event(
+                    "POS_OWNERSHIP_SNAPSHOT",
+                    snapshot_payload,
+                    target_scope=f"pos:{branch_device}",
+                ):
+                    ownership_events += 1
+
+            for branch_device, specs in owned.items():
+                expanded_specs = self._expanded_source_truth_specs_for_branch(specs, rename_history)
+                for truth_spec in expanded_specs:
+                    truth_key = (
+                        truth_spec["item_type"].casefold(),
+                        truth_spec["school"].casefold(),
+                        truth_spec["color"].casefold(),
+                        truth_spec["size"].casefold(),
+                    )
+                    truth_specs_seen.add(truth_key)
+                    price = self._warehouse_source_price_for_spec(truth_spec)
+                    if price is None:
+                        skipped_missing_price += 1
+                        continue
+                    event_key = (branch_device.casefold(), truth_key, round(float(price), 4))
+                    if event_key in emitted_prices:
+                        continue
+                    emitted_prices.add(event_key)
+                    uuids = self.emit_price_update_sync_events(
+                        filters=truth_spec,
+                        new_price=float(price),
+                        note="Force warehouse source-of-truth sync",
+                        sync_mode="selected-pos",
+                        sync_pos_devices=[branch_device],
+                        audit_mode="force-source-of-truth",
+                        allow_catalog_definition=True,
+                    )
+                    price_events += len(uuids)
+
+        return {
+            "branches": len(owned),
+            "specs": len(truth_specs_seen),
+            "rename_events": rename_events,
+            "ownership_events": ownership_events,
+            "price_events": price_events,
+            "skipped_missing_price": skipped_missing_price,
+        }
+
+    def auto_queue_pos_source_of_truth_for_version(self) -> Dict[str, Any]:
+        """Queue POS source-of-truth corrections after updates or server reset."""
+        key = "auto_pos_source_of_truth_version"
+        try:
+            already = str(self.get_app_setting(key, "") or "").strip()
+        except Exception:
+            already = ""
+        reset_detected = ""
+        reset_requeued = ""
+        try:
+            row = self.conn.execute(
+                "SELECT value FROM sync_meta WHERE key = 'server_reset_detected_at'"
+            ).fetchone()
+            reset_detected = str(row["value"] or "").strip() if row else ""
+            row = self.conn.execute(
+                "SELECT value FROM sync_meta WHERE key = 'server_reset_source_truth_requeued_at'"
+            ).fetchone()
+            reset_requeued = str(row["value"] or "").strip() if row else ""
+        except Exception:
+            reset_detected = ""
+            reset_requeued = ""
+        needs_reset_requeue = bool(reset_detected and reset_detected != reset_requeued)
+
+        if already == APP_VERSION and not needs_reset_requeue:
+            return {"skipped": True, "reason": "already queued for this version", "version": APP_VERSION}
+
+        result = self.force_pos_source_of_truth_sync()
+        queued = (
+            int(result.get("ownership_events") or 0)
+            + int(result.get("rename_events") or 0)
+            + int(result.get("price_events") or 0)
+        )
+        try:
+            self.set_app_setting(key, APP_VERSION)
+            self.set_app_setting(
+                "auto_pos_source_of_truth_last_result",
+                json.dumps({**result, "queued": queued, "version": APP_VERSION}, ensure_ascii=False, default=str),
+            )
+            if needs_reset_requeue:
+                self.conn.execute(
+                    """
+                    INSERT INTO sync_meta(key, value, updated_at)
+                    VALUES('server_reset_source_truth_requeued_at', ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (reset_detected, now_iso()),
+                )
+        except Exception:
+            pass
+        return {**result, "queued": queued, "version": APP_VERSION, "server_reset_requeue": needs_reset_requeue}
+
     def emit_price_update_sync_events(
         self,
         *,
@@ -3328,12 +4067,14 @@ class SqliteDatabase:
         sync_mode: str = "all-pos",
         sync_pos_devices: Optional[Sequence[str]] = None,
         audit_mode: str = "manual",
+        allow_catalog_definition: bool = False,
     ) -> List[str]:
         """Emit one or more PRICE_UPDATE outbox rows with explicit target_scope.
 
         sync_mode:
           - none: do not emit sync events
           - all-pos: fan-out to every POS (server-side scope `all-pos`)
+          - related-pos: one event per POS that already owns the item
           - selected-pos: one event per selected POS device name (`pos:<name>`)
           - bill-auto: internal helper mode (same as all-pos/selected depending on callers)
         """
@@ -3368,11 +4109,30 @@ class SqliteDatabase:
                     "filters":       cleaned_filters,
                     "updated_count": None,
                     "note":          note,
+                    "allow_catalog_definition": bool(allow_catalog_definition),
                 },
                 target_scope="all-pos",
             )
             if eu:
                 uuids.append(str(eu))
+        elif mode == "related-pos":
+            devs = self.related_pos_devices_for_price_update(cleaned_filters)
+            for d in devs:
+                scope = f"pos:{d}"
+                targets.append(scope)
+                eu = self._record_sync_event(
+                    "PRICE_UPDATE",
+                    {
+                        "new_price":     float(new_price),
+                        "filters":       cleaned_filters,
+                        "updated_count": None,
+                        "note":          note,
+                        "allow_catalog_definition": bool(allow_catalog_definition),
+                    },
+                    target_scope=scope,
+                )
+                if eu:
+                    uuids.append(str(eu))
         elif mode == "selected-pos":
             devs = [str(x).strip() for x in (sync_pos_devices or []) if str(x).strip()]
             # de-dupe while preserving order
@@ -3393,6 +4153,7 @@ class SqliteDatabase:
                         "filters":       cleaned_filters,
                         "updated_count": None,
                         "note":          note,
+                        "allow_catalog_definition": bool(allow_catalog_definition),
                     },
                     target_scope=scope,
                 )
@@ -3408,6 +4169,7 @@ class SqliteDatabase:
                     "filters":       cleaned_filters,
                     "updated_count": None,
                     "note":          note,
+                    "allow_catalog_definition": bool(allow_catalog_definition),
                 },
                 target_scope="all-pos",
             )
@@ -3802,10 +4564,12 @@ class SqliteDatabase:
         package_no: int,
         unit_price: Optional[float],
         count: int,
+        has_badge: int = 0,
     ) -> int:
 
         if count < 0:
             raise ValueError("Count must be >= 0")
+        badge = int(has_badge or 0)
 
         # ---- Resolve effective price ----
         price: Optional[float] = None
@@ -3837,14 +4601,15 @@ class SqliteDatabase:
                 int(package_no),
                 float(price),
                 int(count),
+                badge,
             )
 
             if int(count) > 0:
                 self.conn.execute(
                     """INSERT INTO movements
                     (ts,direction,stock_id,qty,note,bill_id,
-                        item_type,school,color,size,warehouse_no,package_no,unit_price)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        item_type,school,color,size,warehouse_no,package_no,unit_price,has_badge)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         now_iso(),
                         "IN",
@@ -3859,6 +4624,7 @@ class SqliteDatabase:
                         int(warehouse_no),
                         int(package_no),
                         float(price),
+                        badge,
                     ),
                 )
 
@@ -3886,6 +4652,7 @@ class SqliteDatabase:
                     "package_no":   int(package_no),
                     "unit_price":   float(price),
                     "count":        int(count),
+                    "has_badge":    badge,
                 })
 
         return int(stock_id)
@@ -4172,10 +4939,6 @@ class SqliteDatabase:
         """
         if not bill_lines:
             raise ValueError("Bill has no items")
-        if (target_pos or "").strip():
-            for line in bill_lines:
-                if bool(line.get("allow_factory_fill")):
-                    raise ValueError("لا يمكن شحن بند من المصنع إلى فرع. اختر كمية متاحة من المخزون أولاً.")
         self.validate_stock_available_for_bill_lines(bill_lines)
 
         with self.conn:
@@ -4243,6 +5006,40 @@ class SqliteDatabase:
                 # If still None and it's factory-only, default to 0.0 (user could have typed price in the dialog)
                 if price_base is None:
                     price_base = 0.0
+
+                if remaining > 0 and allow_factory and (target_pos or "").strip():
+                    direct_wh = int(line.get("warehouse_no") or 0)
+                    direct_pkg = int(line.get("package_no") or 0)
+                    direct_badge = int(line.get("has_badge") or 0)
+                    stock_id = self.add_or_update_stock_row(
+                        str(line.get("item_type") or "").strip(),
+                        str(line.get("school") or "").strip(),
+                        str(line.get("color") or "").strip(),
+                        str(line.get("size") or "").strip(),
+                        direct_wh,
+                        direct_pkg,
+                        float(price_base),
+                        int(remaining),
+                        direct_badge,
+                    )
+                    self.conn.execute(
+                        """INSERT INTO movements
+                        (ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,warehouse_no,package_no,unit_price,has_badge)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            now_iso(), "IN", int(stock_id), int(remaining),
+                            "Direct branch shipment intake", bill_id,
+                            line["item_type"], line["school"], line["color"], line["size"],
+                            direct_wh, direct_pkg, float(price_base), direct_badge,
+                        ),
+                    )
+                    direct_row = self.conn.execute(
+                        "SELECT * FROM stocks WHERE id=?", (int(stock_id),)
+                    ).fetchone()
+                    if direct_row is not None:
+                        chunks.append((direct_row, int(remaining)))
+                        remaining = 0
+                        taken = qty_needed
 
                 user_set_price = bool(line.get("user_set_price"))
                 if user_set_price:
@@ -4415,6 +5212,22 @@ class SqliteDatabase:
                         sync_pos_devices=sync_devs,
                         audit_mode="bill-auto",
                     )
+
+            try:
+                logging_setup.log_event(  # type: ignore[union-attr]
+                    "business.bill_created",
+                    bill_id=bill_id,
+                    bill_uuid=bill_uuid_row[0] if bill_uuid_row else None,
+                    customer=(customer or "").strip() or None,
+                    target_pos=(target_pos or "").strip() or None,
+                    kind=("branch_shipment" if (target_pos or "").strip() else "warehouse_sale"),
+                    total=float(total),
+                    line_count=len(items_payload),
+                    qty_total=sum(int(it.get("qty") or 0) for it in items_payload),
+                    manual_price_updates=len(user_priced_specs),
+                )
+            except Exception:
+                pass
 
             return bill_id
 
@@ -4597,12 +5410,13 @@ class SqliteDatabase:
     def void_bill(self, bill_id: int) -> None:
         """Void a confirmed bill — return items to stock."""
         cur = self.conn.execute(
-            "SELECT COALESCE(status,'CONFIRMED') AS status FROM bills WHERE id=?", (int(bill_id),))
+            "SELECT customer, COALESCE(status,'CONFIRMED') AS status FROM bills WHERE id=?", (int(bill_id),))
         row = cur.fetchone()
         if not row:
             raise ValueError("الفاتورة غير موجودة")
         if row["status"] != "CONFIRMED":
             raise ValueError("يمكن إلغاء الفواتير المؤكدة فقط")
+        branch_target = normalize_branch_customer_name(row["customer"])
         items = self.list_bill_items(bill_id)
         with self.conn:
             for item in items:
@@ -4625,18 +5439,17 @@ class SqliteDatabase:
                 qty = int(item["qty"])
                 wh = int(item.get("warehouse_no") or 0)
                 pkg = int(item.get("package_no") or 0)
-                if wh > 0 and pkg > 0:
-                    self.ensure_package_open(wh, pkg)
-                cur2 = self.conn.execute(
-                    """INSERT INTO stocks
-                    (item_type,school,color,size,warehouse_no,package_no,
-                     unit_price,count,has_badge)
-                    VALUES(?,?,?,?,?,?,?,?,?)""",
-                    (item["item_type"], item["school"], item["color"],
-                     item["size"], wh, pkg, float(item["unit_price"]),
-                     qty, int(item.get("has_badge") or 0)),
+                stock_id = self.add_or_update_stock_row(
+                    item["item_type"],
+                    item["school"],
+                    item["color"],
+                    item["size"],
+                    wh,
+                    pkg,
+                    float(item["unit_price"]),
+                    qty,
+                    int(item.get("has_badge") or 0),
                 )
-                stock_id = cur2.lastrowid
                 self.conn.execute(
                     """INSERT INTO movements
                     (ts,direction,stock_id,qty,note,bill_id,
@@ -4655,25 +5468,34 @@ class SqliteDatabase:
             bill_uuid_row = self.conn.execute(
                 "SELECT uuid FROM bills WHERE id=?", (int(bill_id),)
             ).fetchone()
-            self._record_sync_event_or_raise("SALE_VOIDED", {
-                "bill_uuid": bill_uuid_row[0] if bill_uuid_row else None,
-                "bill_id":   int(bill_id),
-                "items": [
-                    {
-                        "item_type":    item["item_type"],
-                        "school":       item["school"],
-                        "color":        item["color"],
-                        "size":         item["size"],
-                        "warehouse_no": int(item.get("warehouse_no") or 0),
-                        "package_no":   int(item.get("package_no") or 0),
-                        "unit_price":   float(item["unit_price"]),
-                        "qty":          int(item["qty"]),
-                        "origin":       item.get("origin"),
-                        "has_badge":    int(item.get("has_badge") or 0),
-                    }
-                    for item in items
-                ],
-            })
+            items_payload = [
+                {
+                    "item_type":    item["item_type"],
+                    "school":       item["school"],
+                    "color":        item["color"],
+                    "size":         item["size"],
+                    "warehouse_no": int(item.get("warehouse_no") or 0),
+                    "package_no":   int(item.get("package_no") or 0),
+                    "unit_price":   float(item["unit_price"]),
+                    "qty":          int(item["qty"]),
+                    "origin":       item.get("origin"),
+                    "has_badge":    int(item.get("has_badge") or 0),
+                }
+                for item in items
+            ]
+            if branch_target:
+                self._record_branch_shipment_cancel_event(
+                    shipment_uuid=(bill_uuid_row[0] if bill_uuid_row else None) or "",
+                    target_name=branch_target,
+                    note=f"cancel bill #{int(bill_id)}",
+                    lines=items_payload,
+                )
+            else:
+                self._record_sync_event_or_raise("SALE_VOIDED", {
+                    "bill_uuid": bill_uuid_row[0] if bill_uuid_row else None,
+                    "bill_id":   int(bill_id),
+                    "items": items_payload,
+                })
 
     def delete_draft_bill(self, bill_id: int) -> None:
         """Delete a draft bill entirely (no stock was deducted)."""
@@ -4894,6 +5716,7 @@ class SqliteDatabase:
         """Move qty items from stock_id to dest warehouse/package."""
         if qty < 0:
             raise ValueError("الكمية يجب أن تكون أكبر من صفر")
+        transfer_spec: Optional[Tuple[str, str, str]] = None
         with self.conn:
             cur = self.conn.execute("SELECT * FROM stocks WHERE id=?", (int(stock_id),))
             s = cur.fetchone()
@@ -4906,63 +5729,105 @@ class SqliteDatabase:
             if src_wh == dest_warehouse_no and src_pkg == dest_package_no:
                 raise ValueError("المصدر والوجهة متطابقان")
             self.ensure_package_open(dest_warehouse_no, dest_package_no)
-            self.conn.execute(
-                "UPDATE stocks SET count = count - ? WHERE id = ?",
-                (qty, int(stock_id)))
-            dest_stock_id = self.add_or_update_stock_row(
-                s["item_type"], s["school"], s["color"], s["size"],
-                int(dest_warehouse_no), int(dest_package_no),
-                float(s["unit_price"]), qty, int(s["has_badge"] or 0),
+            transfer_spec = (
+                str(s["item_type"] or "").strip(),
+                str(s["school"] or "").strip(),
+                str(s["color"] or "").strip(),
             )
-            out_cur = self.conn.execute(
-                """INSERT INTO movements
-                (ts,direction,stock_id,qty,note,bill_id,
-                 item_type,school,color,size,warehouse_no,package_no,
-                 unit_price,has_badge)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (now_iso(), "TRANSFER_OUT", int(stock_id), qty,
-                 f"{note} -> WH{dest_warehouse_no}/PKG{dest_package_no}",
-                 None, s["item_type"], s["school"], s["color"], s["size"],
-                 src_wh, src_pkg, float(s["unit_price"]),
-                 int(s["has_badge"] or 0)))
-            out_id = out_cur.lastrowid
-            in_cur = self.conn.execute(
-                """INSERT INTO movements
-                (ts,direction,stock_id,qty,note,bill_id,
-                 item_type,school,color,size,warehouse_no,package_no,
-                 unit_price,has_badge)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (now_iso(), "TRANSFER_IN", dest_stock_id, qty,
-                 f"{note} <- WH{src_wh}/PKG{src_pkg}",
-                 None, s["item_type"], s["school"], s["color"], s["size"],
-                 int(dest_warehouse_no), int(dest_package_no),
-                 float(s["unit_price"]), int(s["has_badge"] or 0)))
-            in_id = in_cur.lastrowid
-            self.auto_reopen_package_if_empty(src_wh, src_pkg)
-            dest_uuid_row = self.conn.execute(
-                "SELECT uuid FROM stocks WHERE id=?", (int(dest_stock_id),)
-            ).fetchone()
-            src_uuid_row = self.conn.execute(
-                "SELECT uuid FROM stocks WHERE id=?", (int(stock_id),)
-            ).fetchone()
-            self._record_sync_event("STOCK_TRANSFER", {
-                "src_stock_uuid":  src_uuid_row[0] if src_uuid_row else None,
-                "src_stock_id":    int(stock_id),
-                "src_warehouse_no": src_wh,
-                "src_package_no":   src_pkg,
-                "dest_stock_uuid": dest_uuid_row[0] if dest_uuid_row else None,
-                "dest_stock_id":   int(dest_stock_id),
-                "dest_warehouse_no": int(dest_warehouse_no),
-                "dest_package_no":   int(dest_package_no),
-                "qty":             int(qty),
-                "item_type":       s["item_type"],
-                "school":          s["school"],
-                "color":           s["color"],
-                "size":            s["size"],
-                "unit_price":      float(s["unit_price"]),
-                "has_badge":       int(s["has_badge"] or 0),
-                "note":            note,
-            })
+            if qty == 0:
+                dest_stock_id = self.add_or_update_stock_row(
+                    s["item_type"], s["school"], s["color"], s["size"],
+                    int(dest_warehouse_no), int(dest_package_no),
+                    float(s["unit_price"]), 0, int(s["has_badge"] or 0),
+                )
+                self.conn.execute("DELETE FROM stocks WHERE id=? AND COALESCE(count, 0)=0", (int(stock_id),))
+                self._record_sync_event("STOCK_TRANSFER", {
+                    "src_stock_id":    int(stock_id),
+                    "src_warehouse_no": src_wh,
+                    "src_package_no":   src_pkg,
+                    "dest_stock_id":   int(dest_stock_id),
+                    "dest_warehouse_no": int(dest_warehouse_no),
+                    "dest_package_no":   int(dest_package_no),
+                    "qty":             0,
+                    "catalog_only":    True,
+                    "item_type":       s["item_type"],
+                    "school":          s["school"],
+                    "color":           s["color"],
+                    "size":            s["size"],
+                    "unit_price":      float(s["unit_price"]),
+                    "has_badge":       int(s["has_badge"] or 0),
+                    "note":            note,
+                })
+                out_id = in_id = 0
+            else:
+                self.conn.execute(
+                    "UPDATE stocks SET count = count - ? WHERE id = ?",
+                    (qty, int(stock_id)))
+                dest_stock_id = self.add_or_update_stock_row(
+                    s["item_type"], s["school"], s["color"], s["size"],
+                    int(dest_warehouse_no), int(dest_package_no),
+                    float(s["unit_price"]), qty, int(s["has_badge"] or 0),
+                )
+                out_cur = self.conn.execute(
+                    """INSERT INTO movements
+                    (ts,direction,stock_id,qty,note,bill_id,
+                     item_type,school,color,size,warehouse_no,package_no,
+                     unit_price,has_badge)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (now_iso(), "TRANSFER_OUT", int(stock_id), qty,
+                     f"{note} -> WH{dest_warehouse_no}/PKG{dest_package_no}",
+                     None, s["item_type"], s["school"], s["color"], s["size"],
+                     src_wh, src_pkg, float(s["unit_price"]),
+                     int(s["has_badge"] or 0)))
+                out_id = out_cur.lastrowid
+                in_cur = self.conn.execute(
+                    """INSERT INTO movements
+                    (ts,direction,stock_id,qty,note,bill_id,
+                     item_type,school,color,size,warehouse_no,package_no,
+                     unit_price,has_badge)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (now_iso(), "TRANSFER_IN", dest_stock_id, qty,
+                     f"{note} <- WH{src_wh}/PKG{src_pkg}",
+                     None, s["item_type"], s["school"], s["color"], s["size"],
+                     int(dest_warehouse_no), int(dest_package_no),
+                     float(s["unit_price"]), int(s["has_badge"] or 0)))
+                in_id = in_cur.lastrowid
+                self.auto_reopen_package_if_empty(src_wh, src_pkg)
+                dest_uuid_row = self.conn.execute(
+                    "SELECT uuid FROM stocks WHERE id=?", (int(dest_stock_id),)
+                ).fetchone()
+                src_uuid_row = self.conn.execute(
+                    "SELECT uuid FROM stocks WHERE id=?", (int(stock_id),)
+                ).fetchone()
+                self._record_sync_event("STOCK_TRANSFER", {
+                    "src_stock_uuid":  src_uuid_row[0] if src_uuid_row else None,
+                    "src_stock_id":    int(stock_id),
+                    "src_warehouse_no": src_wh,
+                    "src_package_no":   src_pkg,
+                    "dest_stock_uuid": dest_uuid_row[0] if dest_uuid_row else None,
+                    "dest_stock_id":   int(dest_stock_id),
+                    "dest_warehouse_no": int(dest_warehouse_no),
+                    "dest_package_no":   int(dest_package_no),
+                    "qty":             int(qty),
+                    "item_type":       s["item_type"],
+                    "school":          s["school"],
+                    "color":           s["color"],
+                    "size":            s["size"],
+                    "unit_price":      float(s["unit_price"]),
+                    "has_badge":       int(s["has_badge"] or 0),
+                    "note":            note,
+                })
+        if transfer_spec and all(transfer_spec):
+            item, school, color = transfer_spec
+            profile_id = self.resolve_price_profile_id(item, school, color)
+            self.ensure_full_size_catalog_for_specs(
+                item,
+                school,
+                color,
+                warehouse_no=int(dest_warehouse_no),
+                package_no=int(dest_package_no),
+                preferred_profile_id=profile_id,
+            )
         return (out_id, in_id)
 
     # -------- Branch Shipment (Phase 3) --------
@@ -5013,6 +5878,8 @@ class SqliteDatabase:
         label = (source_device or "").strip()
         if not label:
             return "", []
+        if normalize_test_pos_device_name(label):
+            return " AND 1=0", []
         keys: List[str] = []
         seen_lower = set()
 
@@ -5050,6 +5917,54 @@ class SqliteDatabase:
         ph = ",".join("?" * len(keys))
         return f" AND source_device IN ({ph})", keys
 
+    def excluded_test_pos_source_devices(self) -> List[str]:
+        """Stored source_device values that belong to local/test POS devices."""
+        cache = getattr(self, "_excluded_test_pos_sources_cache", None)
+        if isinstance(cache, list):
+            return list(cache)
+        out: List[str] = []
+        seen: Set[str] = set()
+
+        def _add(value: Any) -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            key = text.casefold()
+            if key in seen:
+                return
+            seen.add(key)
+            out.append(text)
+
+        for dev in sorted(TEST_POS_DEVICE_NAMES):
+            _add(dev)
+            _add(branch_display_name(dev))
+            for src in self._source_devices_from_sync_payload_name(dev):
+                _add(src)
+            try:
+                rows = self.conn.execute(
+                    """
+                    SELECT device_name, device_uuid
+                      FROM known_devices
+                     WHERE LOWER(TRIM(device_name)) = LOWER(?)
+                        OR TRIM(device_uuid) = TRIM(?)
+                    """,
+                    (dev, dev),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            for row in rows:
+                _add(row["device_name"])
+                _add(row["device_uuid"])
+        setattr(self, "_excluded_test_pos_sources_cache", list(out))
+        return out
+
+    def test_pos_source_exclusion_sql(self, column: str = "source_device") -> Tuple[str, List[Any]]:
+        excluded = self.excluded_test_pos_source_devices()
+        if not excluded:
+            return "", []
+        ph = ",".join("?" for _ in excluded)
+        return f" AND LOWER(COALESCE(TRIM({column}), '')) NOT IN ({ph})", [str(v).casefold() for v in excluded]
+
     def _source_devices_from_sync_payload_name(self, label: str) -> List[str]:
         """Historical sync rows may only have a UUID in source_device.
 
@@ -5061,6 +5976,20 @@ class SqliteDatabase:
         raw = str(label or "").strip()
         if not raw:
             return []
+        try:
+            stamp_row = self.conn.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(server_seq), 0) AS max_seq FROM sync_inbox"
+            ).fetchone()
+            stamp = (int((stamp_row["c"] if stamp_row else 0) or 0), int((stamp_row["max_seq"] if stamp_row else 0) or 0))
+        except sqlite3.OperationalError:
+            stamp = (0, 0)
+        cache = getattr(self, "_source_devices_payload_name_cache", None)
+        if not isinstance(cache, dict) or cache.get("stamp") != stamp:
+            cache = {"stamp": stamp, "values": {}, "by_name": None}
+            setattr(self, "_source_devices_payload_name_cache", cache)
+        cached = cache["values"].get(raw.casefold())
+        if cached is not None:
+            return list(cached)
         wanted = {
             raw.casefold(),
             branch_display_name(raw).casefold(),
@@ -5069,50 +5998,67 @@ class SqliteDatabase:
         if canonical:
             wanted.add(canonical.casefold())
             wanted.add(branch_display_name(canonical).casefold())
+        by_name = cache.get("by_name")
+        if not isinstance(by_name, dict):
+            by_name = {}
+
+            def _add_alias(name: Any, source: str) -> None:
+                text = str(name or "").strip()
+                if not text or not source:
+                    return
+                dev = configured_branch_device_name(text) or text
+                for key_text in (text, dev, branch_display_name(dev)):
+                    key = str(key_text or "").strip().casefold()
+                    if not key:
+                        continue
+                    bucket = by_name.setdefault(key, [])
+                    if source not in bucket:
+                        bucket.append(source)
+
+            try:
+                rows = self.conn.execute(
+                    """
+                    SELECT source_device, payload_json
+                      FROM sync_inbox
+                     WHERE source_device IS NOT NULL
+                       AND TRIM(source_device) != ''
+                       AND payload_json IS NOT NULL
+                    """
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            for row in rows:
+                src = str(row["source_device"] or "").strip()
+                if not src:
+                    continue
+                try:
+                    payload = json.loads(row["payload_json"] or "{}")
+                except Exception:
+                    payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                _add_alias(src, src)
+                for c in (
+                    payload.get("source_device_name"),
+                    payload.get("device_name"),
+                    payload.get("branch_device"),
+                    payload.get("branch_name"),
+                    payload.get("pos_name"),
+                    payload.get("source_name"),
+                ):
+                    _add_alias(c, src)
+            cache["by_name"] = by_name
+
         out: List[str] = []
         seen: set = set()
-        try:
-            rows = self.conn.execute(
-                """
-                SELECT source_device, payload_json
-                  FROM sync_inbox
-                 WHERE source_device IS NOT NULL
-                   AND TRIM(source_device) != ''
-                   AND payload_json IS NOT NULL
-                """
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return []
-        for row in rows:
-            try:
-                payload = json.loads(row["payload_json"] or "{}")
-            except Exception:
-                continue
-            candidates = [
-                payload.get("source_device_name"),
-                payload.get("device_name"),
-                payload.get("branch_device"),
-                payload.get("branch_name"),
-                payload.get("pos_name"),
-                payload.get("source_name"),
-            ]
-            match = False
-            for c in candidates:
-                text = str(c or "").strip()
-                if not text:
-                    continue
-                dev = configured_branch_device_name(text) or text
-                values = {text.casefold(), dev.casefold(), branch_display_name(dev).casefold()}
-                if values & wanted:
-                    match = True
-                    break
-            if not match:
-                continue
-            src = str(row["source_device"] or "").strip()
-            key = src.casefold()
-            if src and key not in seen:
-                seen.add(key)
-                out.append(src)
+        for key in wanted:
+            for src in by_name.get(key, []):
+                src = str(src or "").strip()
+                src_key = src.casefold()
+                if src and src_key not in seen:
+                    seen.add(src_key)
+                    out.append(src)
+        cache["values"][raw.casefold()] = list(out)
         return out
 
     def sum_pos_stock_audit_adjustments(
@@ -5143,12 +6089,136 @@ class SqliteDatabase:
             row = self.conn.execute(sql, qargs).fetchone()
         except sqlite3.OperationalError:
             return {"audit_count": 0, "audit_qty": 0, "audit_value": 0.0, "latest_audit_at": ""}
-        return {
+        result = {
             "audit_count": int((row["audit_count"] if row else 0) or 0),
             "audit_qty": int((row["audit_qty"] if row else 0) or 0),
             "audit_value": float((row["audit_value"] if row else 0.0) or 0.0),
             "latest_audit_at": str((row["latest_audit_at"] if row else "") or ""),
         }
+        return result
+
+    def sum_pos_open_reservation_downpayments(self, branch_device: str) -> float:
+        """Open reservation deposits currently held by a POS branch.
+
+        This is intentionally not date-filtered: an old open reservation still
+        represents money collected for stock that has not been delivered yet.
+        """
+        frag, args = self.resolve_pos_mirror_device_sql_filter(branch_device)
+        if not frag:
+            return 0.0
+        try:
+            row = self.conn.execute(
+                """
+                SELECT COALESCE(SUM(paid_amount), 0)
+                  FROM pos_reservations_mirror
+                 WHERE status = 'معلق'
+                """ + frag,
+                args,
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return 0.0
+        return float((row[0] if row else 0.0) or 0.0)
+
+    def repair_pos_stock_mirror_duplicates(self) -> Dict[str, int]:
+        """Collapse duplicate POS mirror rows to one row per branch/item spec."""
+        result = {"groups": 0, "deleted_rows": 0}
+        try:
+            groups = self.conn.execute(
+                """
+                SELECT source_device, item_type, school, color, size, COUNT(*) AS c
+                  FROM pos_stocks_mirror
+                 GROUP BY source_device, item_type, school, color, size
+                HAVING COUNT(*) > 1
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return result
+        with self.conn:
+            for g in groups:
+                rows = self.conn.execute(
+                    """
+                    SELECT id, unit_price, count, snapshot_at
+                      FROM pos_stocks_mirror
+                     WHERE source_device = ?
+                       AND item_type = ?
+                       AND school = ?
+                       AND color = ?
+                       AND size = ?
+                     ORDER BY snapshot_at DESC, count DESC, id DESC
+                    """,
+                    (g["source_device"], g["item_type"], g["school"], g["color"], g["size"]),
+                ).fetchall()
+                if not rows:
+                    continue
+                keep = rows[0]
+                keep_id = int(keep["id"])
+                keep_count = max(int(r["count"] or 0) for r in rows)
+                keep_price = float(keep["unit_price"] or 0.0)
+                keep_snapshot = str(keep["snapshot_at"] or "")
+                self.conn.execute(
+                    """
+                    UPDATE pos_stocks_mirror
+                       SET unit_price = ?, count = ?, snapshot_at = ?
+                     WHERE id = ?
+                    """,
+                    (keep_price, keep_count, keep_snapshot, keep_id),
+                )
+                delete_ids = [int(r["id"]) for r in rows if int(r["id"]) != keep_id]
+                if delete_ids:
+                    placeholders = ",".join("?" for _ in delete_ids)
+                    self.conn.execute(
+                        f"DELETE FROM pos_stocks_mirror WHERE id IN ({placeholders})",
+                        delete_ids,
+                    )
+                result["groups"] += 1
+                result["deleted_rows"] += len(delete_ids)
+            for src_row in self.conn.execute(
+                "SELECT DISTINCT source_device FROM pos_stocks_mirror"
+            ).fetchall():
+                src = str(src_row["source_device"] or "")
+                totals = self.conn.execute(
+                    """
+                    SELECT COALESCE(MAX(snapshot_at), '') AS snapshot_at,
+                           COUNT(*) AS row_count,
+                           COALESCE(SUM(count * unit_price), 0) AS total_value
+                      FROM pos_stocks_mirror
+                     WHERE source_device = ?
+                    """,
+                    (src,),
+                ).fetchone()
+                if totals:
+                    self.conn.execute(
+                        """
+                        INSERT INTO pos_stocks_snapshot_meta
+                            (source_device, snapshot_at, row_count, total_value)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(source_device) DO UPDATE SET
+                            snapshot_at = excluded.snapshot_at,
+                            row_count = excluded.row_count,
+                            total_value = excluded.total_value
+                        """,
+                        (
+                            src,
+                            str(totals["snapshot_at"] or ""),
+                            int(totals["row_count"] or 0),
+                            float(totals["total_value"] or 0.0),
+                        ),
+                    )
+            try:
+                self.conn.execute(
+                    """
+                    DROP INDEX IF EXISTS idx_pos_stocks_mirror_unique_spec
+                    """
+                )
+                self.conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_pos_stocks_mirror_unique_spec
+                    ON pos_stocks_mirror(source_device, item_type, school, color, size, unit_price)
+                    """
+                )
+            except sqlite3.OperationalError:
+                pass
+        return result
 
     def display_name_for_sync_source(self, raw: Optional[Any]) -> str:
         """Human-readable POS name for a mirror/ledger `source_device` value."""
@@ -5227,6 +6297,8 @@ class SqliteDatabase:
             try:
                 for r in self.conn.execute(q).fetchall():
                     v = str(r[0] or "").strip()
+                    if normalize_test_pos_device_name(v):
+                        continue
                     dev = configured_branch_device_name(v)
                     if dev:
                         names.add(dev)
@@ -5246,6 +6318,8 @@ class SqliteDatabase:
                 """
             ).fetchall():
                 raw = str(r[0] or "").strip()
+                if normalize_test_pos_device_name(raw):
+                    continue
                 dev = configured_branch_device_name(raw) or raw
                 if dev:
                     names.add(dev)
@@ -5265,6 +6339,10 @@ class SqliteDatabase:
         if frag:
             sql += frag
             args.extend(frag_args)
+        else:
+            excl, excl_args = self.test_pos_source_exclusion_sql()
+            sql += excl
+            args.extend(excl_args)
         if active_only:
             sql += " AND status = 'معلق'"
         sql += " ORDER BY updated_at DESC, id DESC"
@@ -5297,6 +6375,7 @@ class SqliteDatabase:
                    SUM(COALESCE(paid_amount, 0)) AS sum_paid_amount,
                    COUNT(*) AS reservation_line_count,
                    COUNT(DISTINCT source_device) AS pos_device_count,
+                   GROUP_CONCAT(DISTINCT source_device) AS source_devices,
                    MAX(updated_at) AS last_updated
               FROM pos_reservations_mirror
              WHERE 1=1
@@ -5306,16 +6385,68 @@ class SqliteDatabase:
         if frag:
             sql += frag
             args.extend(frag_args)
+        else:
+            excl, excl_args = self.test_pos_source_exclusion_sql()
+            sql += excl
+            args.extend(excl_args)
         if active_only:
             sql += " AND status = 'معلق'"
         sql += """
           GROUP BY 1, 2, 3, 4
-          ORDER BY MAX(updated_at) DESC, 1, 2, 3, 4
+          ORDER BY 2 COLLATE NOCASE, 1 COLLATE NOCASE, 3 COLLATE NOCASE, 4 COLLATE NOCASE
         """
         try:
-            return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
+            raw_rows = [dict(r) for r in self.conn.execute(sql, args).fetchall()]
         except sqlite3.OperationalError:
             return []
+        merged: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
+        device_sets: Dict[Tuple[str, str, str, str], Set[str]] = {}
+        for row in raw_rows:
+            item = str(row.get("item_type") or "").strip()
+            school = str(row.get("school") or "").strip()
+            color = str(row.get("color") or "").strip()
+            size = _normalize_size_label(_strip_digit_marks(row.get("size")))
+            key = (item.casefold(), school.casefold(), color.casefold(), size.casefold())
+            if key not in merged:
+                merged[key] = {
+                    "item_type": item,
+                    "school": school,
+                    "color": color,
+                    "size": size,
+                    "agg_qty": 0,
+                    "sum_total_amount": 0.0,
+                    "sum_paid_amount": 0.0,
+                    "reservation_line_count": 0,
+                    "pos_device_count": 0,
+                    "last_updated": row.get("last_updated") or "",
+                }
+                device_sets[key] = set()
+            out = merged[key]
+            out["agg_qty"] = int(out.get("agg_qty") or 0) + int(row.get("agg_qty") or 0)
+            out["sum_total_amount"] = float(out.get("sum_total_amount") or 0.0) + float(row.get("sum_total_amount") or 0.0)
+            out["sum_paid_amount"] = float(out.get("sum_paid_amount") or 0.0) + float(row.get("sum_paid_amount") or 0.0)
+            out["reservation_line_count"] = int(out.get("reservation_line_count") or 0) + int(row.get("reservation_line_count") or 0)
+            last_updated = str(row.get("last_updated") or "")
+            if last_updated > str(out.get("last_updated") or ""):
+                out["last_updated"] = last_updated
+            for dev in str(row.get("source_devices") or "").split(","):
+                dev = dev.strip()
+                if dev:
+                    device_sets[key].add(dev)
+        for key, out in merged.items():
+            qty = int(out.get("agg_qty") or 0)
+            total = float(out.get("sum_total_amount") or 0.0)
+            out["avg_unit_price"] = round(total / qty, 2) if qty > 0 else 0.0
+            out["pos_device_count"] = len(device_sets.get(key) or set())
+        return sorted(
+            merged.values(),
+            key=lambda r: (
+                str(r.get("school") or "").casefold(),
+                warehouse_item_sort_key(r.get("item_type") or "", r.get("color") or ""),
+                str(r.get("color") or "").casefold(),
+                warehouse_size_sort_key(r.get("size") or ""),
+            ),
+        )
 
     def stock_availability_by_specs(
         self,
@@ -5330,6 +6461,7 @@ class SqliteDatabase:
         out: Dict[Tuple[str, str, str, str], int] = {}
         dev = str(source_device or "").strip()
         if dev == "__ALL_POS__":
+            excl, excl_args = self.test_pos_source_exclusion_sql()
             sql = """
                 SELECT TRIM(COALESCE(item_type, '')) AS item_type,
                        TRIM(COALESCE(school, '')) AS school,
@@ -5337,9 +6469,11 @@ class SqliteDatabase:
                        TRIM(COALESCE(CAST(size AS TEXT), '')) AS size,
                        COALESCE(SUM(count), 0) AS qty
                   FROM pos_stocks_mirror
+                 WHERE 1=1
+            """ + excl + """
                  GROUP BY 1, 2, 3, 4
             """
-            args = []
+            args = excl_args
         elif dev:
             frag, frag_args = self.resolve_pos_mirror_device_sql_filter(dev)
             if not frag:
@@ -5403,7 +6537,12 @@ class SqliteDatabase:
                    SUM(CASE WHEN category = 'reservation_downpayment' THEN COALESCE(cash_amount, amount) ELSE 0 END) AS res_dep_amt,
                    SUM(CASE WHEN category = 'reservation_payment' THEN COALESCE(cash_amount, amount) ELSE 0 END) AS res_pay_amt,
                    SUM(CASE WHEN category = 'reservation_collect' THEN COALESCE(cash_amount, amount) ELSE 0 END) AS res_coll_amt,
-                   SUM(COALESCE(cash_amount, amount)) AS net_amt
+                   SUM(COALESCE(cash_amount, amount)) AS net_amt,
+                   SUM(CASE
+                       WHEN cash_amount IS NOT NULL THEN COALESCE(amount, 0) - COALESCE(cash_amount, 0)
+                       ELSE 0
+                   END) AS visa_amt,
+                   SUM(COALESCE(amount, 0)) AS day_total_amt
               FROM pos_financial_ledger
              WHERE 1=1
         """
@@ -5412,6 +6551,10 @@ class SqliteDatabase:
         if frag:
             sql += frag
             args.extend(frag_args)
+        else:
+            excl, excl_args = self.test_pos_source_exclusion_sql()
+            sql += excl
+            args.extend(excl_args)
         if date_from:
             sql += " AND day >= ?"
             args.append(date_from[:10])
@@ -5426,6 +6569,7 @@ class SqliteDatabase:
         money_cols = (
             "sales_amt", "returns_amt", "voids_amt", "exchange_amt",
             "res_dep_amt", "res_pay_amt", "res_coll_amt", "net_amt",
+            "visa_amt", "day_total_amt",
         )
         merged: Dict[Tuple[str, str], Dict[str, Any]] = {}
         for row in raw_rows:
@@ -5466,6 +6610,10 @@ class SqliteDatabase:
         if frag:
             sql += frag
             args.extend(frag_args)
+        else:
+            excl, excl_args = self.test_pos_source_exclusion_sql()
+            sql += excl
+            args.extend(excl_args)
         sql += " ORDER BY id ASC"
         try:
             return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
@@ -5483,6 +6631,7 @@ class SqliteDatabase:
         - current branch stock value from latest snapshot
         - cycle gap = shipped - cash - stock_value
         """
+        started = time.time()
         def _in_range(ts: str) -> bool:
             d = (str(ts or "").strip()[:10] if ts else "")
             if not d:
@@ -5495,6 +6644,69 @@ class SqliteDatabase:
 
         out: Dict[str, Dict[str, Any]] = {}
         approved = list(DEFAULT_BRANCH_POS_NAMES)
+        approved_set = set(approved)
+
+        def _source_branch_map() -> Dict[str, str]:
+            mapping: Dict[str, str] = {}
+
+            def _add(source: Any, branch: Any) -> None:
+                src = str(source or "").strip()
+                br = configured_branch_device_name(branch)
+                if src and br:
+                    mapping[src] = br
+
+            for dev in approved:
+                _add(dev, dev)
+            try:
+                for kd in self.conn.execute(
+                    "SELECT device_name, device_uuid FROM known_devices WHERE role = 'pos'"
+                ).fetchall():
+                    dev_name = str(kd["device_name"] or "").strip()
+                    dev_uuid = str(kd["device_uuid"] or "").strip()
+                    branch = configured_branch_device_name(dev_name)
+                    if branch:
+                        _add(dev_name, branch)
+                        _add(dev_uuid, branch)
+            except sqlite3.OperationalError:
+                pass
+            try:
+                rows = self.conn.execute(
+                    """
+                    SELECT source_device, payload_json
+                      FROM sync_inbox
+                     WHERE source_device IS NOT NULL
+                       AND TRIM(source_device) != ''
+                       AND payload_json IS NOT NULL
+                    """
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            for row in rows:
+                src = str(row["source_device"] or "").strip()
+                if not src:
+                    continue
+                try:
+                    payload = json.loads(row["payload_json"] or "{}")
+                except Exception:
+                    payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                for key in (
+                    "source_device_name",
+                    "device_name",
+                    "branch_device",
+                    "branch_name",
+                    "pos_name",
+                    "source_name",
+                ):
+                    branch = configured_branch_device_name(payload.get(key))
+                    if branch:
+                        _add(src, branch)
+                        break
+            return mapping
+
+        source_branch = _source_branch_map()
+
         for dev in approved:
             out[dev] = {
                 "branch_device": dev,
@@ -5502,6 +6714,9 @@ class SqliteDatabase:
                 "shipment_bills_count": 0,
                 "shipment_qty": 0,
                 "shipment_value": 0.0,
+                "branch_return_value": 0.0,
+                "branch_transfer_out_value": 0.0,
+                "branch_transfer_in_value": 0.0,
                 "audit_adjust_count": 0,
                 "audit_adjust_qty": 0,
                 "audit_adjust_value": 0.0,
@@ -5516,26 +6731,84 @@ class SqliteDatabase:
 
         # 1) Warehouse branch shipments
         try:
-            bills = self.list_bills()
-        except Exception:
-            bills = []
-        for b in bills:
-            if (b.get("status") or "CONFIRMED") != "CONFIRMED":
-                continue
-            if not _in_range(str(b.get("created_at") or "")):
-                continue
-            branch_dev = normalize_branch_customer_name(b.get("customer"))
+            sql = """
+                SELECT b.id, b.customer, b.created_at,
+                       COALESCE(SUM(bi.qty), 0) AS qty,
+                       COALESCE(SUM(
+                           CASE
+                               WHEN ABS(COALESCE(bi.line_total, 0)) > 0.000001
+                               THEN bi.line_total
+                               ELSE COALESCE(bi.qty, 0) * COALESCE(bi.unit_price, 0)
+                           END
+                       ), 0) AS value
+                  FROM bills b
+                  LEFT JOIN bill_items bi ON bi.bill_id = b.id
+                 WHERE COALESCE(b.status, 'CONFIRMED') = 'CONFIRMED'
+            """
+            args: List[Any] = []
+            if date_from:
+                sql += " AND substr(b.created_at,1,10) >= ?"
+                args.append(date_from[:10])
+            if date_to:
+                sql += " AND substr(b.created_at,1,10) <= ?"
+                args.append(date_to[:10])
+            sql += " GROUP BY b.id, b.customer, b.created_at"
+            bill_rows = self.conn.execute(sql, args).fetchall()
+        except sqlite3.OperationalError:
+            bill_rows = []
+        for b in bill_rows:
+            branch_dev = normalize_branch_customer_name(b["customer"])
             if not branch_dev or branch_dev not in out:
                 continue
-            bid = int(b.get("id") or 0)
-            lines = self.list_bill_items(bid)
             bucket = out[branch_dev]
             bucket["shipment_bills_count"] = int(bucket["shipment_bills_count"]) + 1
-            for ln in lines:
-                q = int(ln.get("qty") or 0)
-                v = float(ln.get("line_total") or 0.0)
-                bucket["shipment_qty"] = int(bucket["shipment_qty"]) + q
-                bucket["shipment_value"] = float(bucket["shipment_value"]) + v
+            bucket["shipment_qty"] = int(bucket["shipment_qty"]) + int(b["qty"] or 0)
+            bucket["shipment_value"] = float(bucket["shipment_value"]) + float(b["value"] or 0.0)
+
+        # 1a) Branch-side stock exits/entries after the original shipment.
+        # The first column is a baseline of stock value currently assigned to
+        # the branch, so POS returns/to-factory and outgoing branch transfers
+        # reduce it. A transfer rerouted to another branch increases the target.
+        try:
+            queue_rows = self.conn.execute(
+                """
+                SELECT queue_kind, source_device, requested_target_device,
+                       rerouted_target_device, status, created_at,
+                       unit_price, qty
+                  FROM branch_inventory_queue
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            queue_rows = []
+        for qr in queue_rows:
+            if not _in_range(str(qr["created_at"] or "")):
+                continue
+            kind = str(qr["queue_kind"] or "").strip().upper()
+            source = canonical_branch_device_name(qr["source_device"], approved) or str(qr["source_device"] or "").strip()
+            try:
+                qty = int(qr["qty"] or 0)
+                value = qty * float(qr["unit_price"] or 0.0)
+            except (TypeError, ValueError):
+                qty = 0
+                value = 0.0
+            if qty <= 0 or abs(value) < 0.000001:
+                continue
+            if source in out and kind in {"RETURN", "TRANSFER"}:
+                bucket = out[source]
+                bucket["shipment_qty"] = int(bucket["shipment_qty"]) - qty
+                bucket["shipment_value"] = float(bucket["shipment_value"]) - value
+                if kind == "RETURN":
+                    bucket["branch_return_value"] = float(bucket["branch_return_value"]) + value
+                else:
+                    bucket["branch_transfer_out_value"] = float(bucket["branch_transfer_out_value"]) + value
+            if kind == "TRANSFER" and str(qr["status"] or "").strip().upper() == "REROUTED":
+                target_raw = qr["rerouted_target_device"] or qr["requested_target_device"]
+                target = canonical_branch_device_name(target_raw, approved) or str(target_raw or "").strip()
+                if target in out:
+                    bucket = out[target]
+                    bucket["shipment_qty"] = int(bucket["shipment_qty"]) + qty
+                    bucket["shipment_value"] = float(bucket["shipment_value"]) + value
+                    bucket["branch_transfer_in_value"] = float(bucket["branch_transfer_in_value"]) + value
 
         # 1b) POS physical audits change the branch baseline too. If a
         # branch removes stock during جرد, the cycle's "sent stock" total
@@ -5550,25 +6823,105 @@ class SqliteDatabase:
             bucket["shipment_qty"] = int(bucket["shipment_qty"]) + int(bucket["audit_adjust_qty"])
             bucket["shipment_value"] = float(bucket["shipment_value"]) + float(bucket["audit_adjust_value"])
 
-        # 2) Net cash received from branch POS ledgers
-        for dev in approved:
-            frag, frag_args = self.resolve_pos_mirror_device_sql_filter(dev)
-            sql = "SELECT COALESCE(SUM(COALESCE(cash_amount, amount)),0) FROM pos_financial_ledger WHERE 1=1"
-            args: List[Any] = []
-            if frag:
-                sql += frag
-                args.extend(frag_args)
+        # 2) POS collected total. Prefer closed shift summaries because the
+        # business rule is "sum shift totals"; use the latest daily snapshot
+        # as the live/open-shift fallback for each branch/day.
+        daily_by_branch_day: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        try:
+            snap_sql = """
+                SELECT source_device, day, total_collected, snapshot_at, id
+                  FROM pos_financial_daily_snapshot
+                 WHERE 1=1
+            """
+            snap_args: List[Any] = []
             if date_from:
-                sql += " AND day >= ?"
-                args.append(date_from[:10])
+                snap_sql += " AND day >= ?"
+                snap_args.append(date_from[:10])
             if date_to:
-                sql += " AND day <= ?"
-                args.append(date_to[:10])
+                snap_sql += " AND day <= ?"
+                snap_args.append(date_to[:10])
+            for snap_row in self.conn.execute(snap_sql, snap_args).fetchall():
+                src = str(snap_row["source_device"] or "").strip()
+                branch = source_branch.get(src) or configured_branch_device_name(src)
+                day = str(snap_row["day"] or "").strip()[:10]
+                if branch not in approved_set or not day:
+                    continue
+                key = (branch, day)
+                current = daily_by_branch_day.get(key)
+                marker = (str(snap_row["snapshot_at"] or ""), int(snap_row["id"] or 0))
+                current_marker = (
+                    str(current.get("snapshot_at") or ""),
+                    int(current.get("id") or 0),
+                ) if current else ("", 0)
+                if current is None or marker > current_marker:
+                    daily_by_branch_day[key] = dict(snap_row)
+        except sqlite3.OperationalError:
+            pass
+
+        shift_by_branch_day: Dict[Tuple[str, str], float] = {}
+        try:
+            shift_rows = self.conn.execute(
+                """
+                SELECT source_device, shift_key, shift_id, started_at, ended_at, status, summary_json
+                  FROM pos_shifts_mirror
+                 WHERE status = 'CLOSED'
+                   AND COALESCE(summary_json, '') != ''
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            shift_rows = []
+        shift_seen: Set[Tuple[str, str]] = set()
+        for sr in shift_rows:
+            src = str(sr["source_device"] or "").strip()
+            branch = source_branch.get(src) or configured_branch_device_name(src)
+            if branch not in approved_set:
+                continue
+            raw_shift_key = str(sr["shift_key"] or "").strip()
+            if not raw_shift_key:
+                raw_shift_key = f"id:{sr['shift_id']}" if sr["shift_id"] is not None else ""
+            if raw_shift_key:
+                dedupe_key = (branch, raw_shift_key)
+                if dedupe_key in shift_seen:
+                    continue
+                shift_seen.add(dedupe_key)
+            day = str(sr["ended_at"] or sr["started_at"] or "").strip()[:10]
+            if not day:
+                continue
+            if date_from and day < date_from[:10]:
+                continue
+            if date_to and day > date_to[:10]:
+                continue
             try:
-                row = self.conn.execute(sql, args).fetchone()
-                out[dev]["cash_net"] = float((row[0] if row else 0.0) or 0.0)
-            except sqlite3.OperationalError:
-                out[dev]["cash_net"] = 0.0
+                summary = json.loads(sr["summary_json"] or "{}")
+            except Exception:
+                summary = {}
+            if not isinstance(summary, dict):
+                summary = {}
+            amount = summary.get("money_in_total")
+            if amount is None:
+                amount = summary.get("total_collected")
+            if amount is None:
+                amount = float(summary.get("cash_collected") or 0.0) + float(summary.get("visa_collected") or 0.0)
+            try:
+                value = float(amount or 0.0)
+            except (TypeError, ValueError):
+                value = 0.0
+            key = (branch, day)
+            shift_by_branch_day[key] = float(shift_by_branch_day.get(key, 0.0)) + value
+
+        for dev in approved:
+            days = {
+                day for branch, day in daily_by_branch_day.keys() if branch == dev
+            } | {
+                day for branch, day in shift_by_branch_day.keys() if branch == dev
+            }
+            total = 0.0
+            for day in days:
+                daily_row = daily_by_branch_day.get((dev, day))
+                daily_total = float((daily_row or {}).get("total_collected") or 0.0)
+                shift_total = float(shift_by_branch_day.get((dev, day), 0.0) or 0.0)
+                total += daily_total if daily_total >= shift_total else shift_total
+            out[dev]["cash_net"] = total
 
         # 2b) Manual actual cash received at warehouse
         for dev in approved:
@@ -5580,10 +6933,11 @@ class SqliteDatabase:
 
         # 3) Current stock value from latest snapshot source per branch
         latest_src: Dict[str, str] = {}
+        latest_stock_value: Dict[str, float] = {}
         try:
             snaps = self.conn.execute(
                 """
-                SELECT pm.source_device, pm.snapshot_at,
+                SELECT pm.source_device, pm.snapshot_at, pm.row_count, pm.total_value,
                        COALESCE(kd.device_name, pm.source_device) AS branch_name
                 FROM pos_stocks_snapshot_meta pm
                 LEFT JOIN known_devices kd
@@ -5595,12 +6949,13 @@ class SqliteDatabase:
             for r in snaps:
                 src = str(r[0] or "").strip()
                 snap_at = str(r[1] or "").strip()
-                branch = configured_branch_device_name(r[2] or src)
+                branch = source_branch.get(src) or configured_branch_device_name(src) or configured_branch_device_name(r[2] or src)
                 if branch not in out:
                     continue
                 if branch not in latest_at or snap_at > latest_at[branch]:
                     latest_at[branch] = snap_at
                     latest_src[branch] = src
+                    latest_stock_value[branch] = float(r["total_value"] or 0.0)
         except sqlite3.OperationalError:
             latest_src = {}
 
@@ -5608,33 +6963,138 @@ class SqliteDatabase:
             src = latest_src.get(dev)
             if not src:
                 continue
+            out[dev]["stock_value"] = float(latest_stock_value.get(dev) or 0.0)
             try:
                 row = self.conn.execute(
                     """
-                    SELECT COALESCE(SUM(count),0), COALESCE(SUM(count*unit_price),0)
-                    FROM pos_stocks_mirror
-                    WHERE source_device = ?
+                    SELECT COALESCE(SUM(count), 0) AS stock_qty,
+                           COALESCE(SUM(count * unit_price), 0) AS stock_value
+                      FROM pos_stocks_mirror
+                     WHERE source_device = ?
                     """,
                     (src,),
                 ).fetchone()
-                out[dev]["stock_qty"] = int((row[0] if row else 0) or 0)
-                out[dev]["stock_value"] = float((row[1] if row else 0.0) or 0.0)
+                out[dev]["stock_qty"] = int((row["stock_qty"] if row else 0) or 0)
+                # Fallback for old DBs where snapshot metadata is missing/incomplete.
+                if dev not in latest_stock_value:
+                    out[dev]["stock_value"] = float((row["stock_value"] if row else 0.0) or 0.0)
             except sqlite3.OperationalError:
                 pass
 
         for dev in approved:
             b = out[dev]
-            b["cycle_gap"] = float(b["shipment_value"]) - float(b["cash_net"]) - float(b["stock_value"])
-            b["actual_gap"] = float(b["shipment_value"]) - float(b["actual_received"]) - float(b["stock_value"])
+            b["cycle_gap"] = (
+                float(b["shipment_value"]) - float(b["cash_net"]) - float(b["stock_value"])
+            )
+            b["actual_gap"] = (
+                float(b["shipment_value"]) - float(b["actual_received"]) - float(b["stock_value"])
+            )
 
         rows = list(out.values())
         rows.sort(key=lambda r: str(r.get("branch_name") or ""))
+        try:
+            if logging_setup is not None:  # type: ignore[name-defined]
+                logging_setup.log_event(
+                    "db.branch_cycle_summary.list",
+                    rows=len(rows),
+                    elapsed_ms=int((time.time() - started) * 1000),
+                    date_from=(date_from[:10] if date_from else None),
+                    date_to=(date_to[:10] if date_to else None),
+                )  # type: ignore[union-attr]
+        except Exception:
+            pass
         return rows
+
+    def _backfill_pos_financial_ledger_fields(self) -> None:
+        if getattr(self, "_pos_financial_ledger_backfilled", False):
+            return
+        self._pos_financial_ledger_backfilled = True
+        try:
+            cols = {str(r[1]) for r in self.conn.execute("PRAGMA table_info(pos_financial_ledger)").fetchall()}
+        except sqlite3.OperationalError:
+            return
+        with self.conn:
+            if "payment_method" not in cols:
+                try:
+                    self.conn.execute("ALTER TABLE pos_financial_ledger ADD COLUMN payment_method TEXT")
+                except sqlite3.OperationalError:
+                    pass
+            if "shift_id" not in cols:
+                try:
+                    self.conn.execute("ALTER TABLE pos_financial_ledger ADD COLUMN shift_id INTEGER")
+                except sqlite3.OperationalError:
+                    pass
+
+        try:
+            rows = self.conn.execute(
+                """
+                SELECT id, event_uuid, meta_json
+                  FROM pos_financial_ledger
+                 WHERE COALESCE(payment_method, '') = ''
+                    OR shift_id IS NULL
+                 LIMIT 1000
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return
+        if not rows:
+            return
+
+        payload_cache: Dict[str, Dict[str, Any]] = {}
+
+        def _payload_for(event_uuid: str) -> Dict[str, Any]:
+            key = str(event_uuid or "").split(":", 1)[0]
+            if key in payload_cache:
+                return payload_cache[key]
+            payload: Dict[str, Any] = {}
+            try:
+                row = self.conn.execute(
+                    "SELECT payload_json FROM sync_inbox WHERE event_uuid = ? LIMIT 1",
+                    (key,),
+                ).fetchone()
+                if row:
+                    payload = json.loads(row["payload_json"] or "{}")
+                    if not isinstance(payload, dict):
+                        payload = {}
+            except Exception:
+                payload = {}
+            payload_cache[key] = payload
+            return payload
+
+        with self.conn:
+            for row in rows:
+                payment_method = ""
+                shift_id = None
+                try:
+                    meta = json.loads(row["meta_json"] or "{}")
+                    if isinstance(meta, dict):
+                        payment_method = str(meta.get("payment_method") or "").strip().upper()
+                except Exception:
+                    pass
+                payload = _payload_for(str(row["event_uuid"] or ""))
+                if not payment_method:
+                    payment_method = str(payload.get("payment_method") or "").strip().upper()
+                try:
+                    raw_shift_id = payload.get("shift_id")
+                    shift_id = int(raw_shift_id) if raw_shift_id is not None else None
+                except (TypeError, ValueError):
+                    shift_id = None
+                self.conn.execute(
+                    """
+                    UPDATE pos_financial_ledger
+                       SET payment_method = COALESCE(NULLIF(payment_method, ''), NULLIF(?, '')),
+                           shift_id = COALESCE(shift_id, ?)
+                     WHERE id = ?
+                    """,
+                    (payment_method, shift_id, int(row["id"])),
+                )
 
     def list_pos_branch_monitor(
         self,
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
+        *,
+        read_only: bool = False,
     ) -> List[Dict[str, Any]]:
         """One-row-per-POS operational monitor for warehouse control.
 
@@ -5642,6 +7102,9 @@ class SqliteDatabase:
         intentionally uses the signed ledger total, so every incoming cash
         event is included while refunds/voids reduce the expected drawer cash.
         """
+        started = time.time()
+        if not read_only:
+            self._backfill_pos_financial_ledger_fields()
         df = (date_from or "").strip()[:10]
         dt = (date_to or "").strip()[:10]
         if not df and not dt:
@@ -5683,8 +7146,10 @@ class SqliteDatabase:
                     "reserved_total": 0.0,
                     "reserved_paid": 0.0,
                     "shift_status": "",
+                    "shift_id": None,
                     "shift_started_at": "",
                     "shift_ended_at": "",
+                    "shift_event_at": "",
                     "inbox_errors": 0,
                     "dead_letters": 0,
                     "status": "",
@@ -5715,7 +7180,6 @@ class SqliteDatabase:
         except sqlite3.OperationalError:
             pass
 
-        latest_source_by_branch: Dict[str, Tuple[str, str]] = {}
         try:
             snaps = self.conn.execute(
                 """
@@ -5741,18 +7205,45 @@ class SqliteDatabase:
             if not row["snapshot_at"] or snap > str(row["snapshot_at"]):
                 row["snapshot_at"] = snap
                 row["app_version"] = str(r["app_version"] or "").strip()
-                row["stock_rows"] = int(r["row_count"] or 0)
-                row["stock_value"] = float(r["total_value"] or 0.0)
-                latest_source_by_branch[row["branch_device"]] = (src, snap)
             row["last_sync_at"] = latest_timestamp_text(row.get("last_sync_at"), snap)
+
+        try:
+            stock_rows = self.conn.execute(
+                """
+                SELECT pm.source_device,
+                       COALESCE(kd.device_name, pm.source_device) AS branch_name,
+                       COUNT(*) AS stock_rows,
+                       COALESCE(SUM(pm.count), 0) AS stock_qty,
+                       COALESCE(SUM(pm.count * pm.unit_price), 0) AS stock_value
+                  FROM pos_stocks_mirror pm
+             LEFT JOIN known_devices kd
+                    ON kd.device_name = pm.source_device
+                    OR kd.device_uuid = pm.source_device
+                 GROUP BY pm.source_device, COALESCE(kd.device_name, pm.source_device)
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            stock_rows = []
+        for sr in stock_rows:
+            src = str(sr["source_device"] or "").strip()
+            branch = str(sr["branch_name"] or src).strip()
+            branch_dev = configured_branch_device_name(branch)
+            if not branch_dev:
+                continue
+            row = _ensure(branch_dev)
+            row["stock_rows"] = int(sr["stock_rows"] or 0)
+            row["stock_qty"] = int(sr["stock_qty"] or 0)
+            row["stock_value"] = float(sr["stock_value"] or 0.0)
 
         try:
             version_rows = self.conn.execute(
                 """
                 SELECT source_device, payload_json, COALESCE(apply_at, applied_at, '') AS seen_at
                   FROM sync_inbox
-                 WHERE payload_json LIKE '%"app_version"%'
-                 ORDER BY server_seq ASC
+                 WHERE event_type = 'POS_STOCK_SNAPSHOT'
+                   AND payload_json LIKE '%"app_version"%'
+                 ORDER BY server_seq DESC
+                 LIMIT 300
                 """
             ).fetchall()
         except sqlite3.OperationalError:
@@ -5785,29 +7276,26 @@ class SqliteDatabase:
             if not branch_dev:
                 continue
             row = _ensure(branch_dev)
-            seen_at = str(vr["seen_at"] or "")
+            seen_at = str(
+                payload.get("snapshot_at")
+                or payload.get("event_at")
+                or payload.get("created_at")
+                or payload.get("ts")
+                or vr["seen_at"]
+                or ""
+            )
             latest_seen = latest_timestamp_text(row.get("_app_version_seen_at"), seen_at)
             if latest_seen == seen_at or not row.get("app_version"):
                 row["app_version"] = app_version
                 row["_app_version_seen_at"] = seen_at
-            row["last_sync_at"] = latest_timestamp_text(row.get("last_sync_at"), seen_at)
+            if seen_at:
+                row["last_sync_at"] = latest_timestamp_text(row.get("last_sync_at"), seen_at)
 
         for dev, row in out.items():
             row["sync_age_min"] = timestamp_age_minutes(row.get("last_sync_at"))
             snap = str(row.get("snapshot_at") or "")
             if snap:
                 row["snapshot_age_min"] = timestamp_age_minutes(snap)
-            src = latest_source_by_branch.get(dev, ("", ""))[0]
-            if src:
-                try:
-                    qrow = self.conn.execute(
-                        "SELECT COALESCE(SUM(count),0) FROM pos_stocks_mirror WHERE source_device = ?",
-                        (src,),
-                    ).fetchone()
-                    row["stock_qty"] = int((qrow[0] if qrow else 0) or 0)
-                except sqlite3.OperationalError:
-                    pass
-
         all_devices = list(out.keys())
         for dev in all_devices:
             row = _ensure(dev)
@@ -5815,16 +7303,29 @@ class SqliteDatabase:
             sql = """
                 SELECT
                     SUM(CASE WHEN category = 'sale' THEN COALESCE(gross_amount, amount) ELSE 0 END) AS sales_amt,
-                    SUM(CASE WHEN category = 'return_bill' THEN COALESCE(cash_amount, amount) ELSE 0 END) AS returns_amt,
-                    SUM(CASE WHEN category = 'void_bill' THEN COALESCE(cash_amount, amount) ELSE 0 END) AS voids_amt,
-                    SUM(CASE WHEN category = 'exchange_net' THEN COALESCE(cash_amount, amount) ELSE 0 END) AS exchange_amt,
+                    SUM(CASE WHEN category = 'return_bill' THEN amount ELSE 0 END) AS returns_amt,
+                    SUM(CASE WHEN category = 'void_bill' THEN amount ELSE 0 END) AS voids_amt,
+                    SUM(CASE WHEN category = 'exchange_net' THEN amount ELSE 0 END) AS exchange_amt,
                     SUM(CASE WHEN category IN (
                         'reservation_downpayment',
                         'reservation_payment',
                         'reservation_collect'
-                    ) THEN COALESCE(cash_amount, amount) ELSE 0 END) AS reservation_cash,
-                    SUM(COALESCE(cash_amount, amount)) AS cash_net,
-                    SUM(CASE WHEN cash_amount IS NOT NULL THEN COALESCE(amount, 0) - COALESCE(cash_amount, 0) ELSE 0 END) AS visa_net,
+                    ) THEN CASE
+                        WHEN UPPER(COALESCE(payment_method, '')) = 'CASH' THEN amount
+                        WHEN UPPER(COALESCE(payment_method, '')) = 'VISA' THEN 0
+                        ELSE COALESCE(cash_amount, amount)
+                    END ELSE 0 END) AS reservation_cash,
+                    SUM(CASE
+                        WHEN UPPER(COALESCE(payment_method, '')) = 'CASH' THEN amount
+                        WHEN UPPER(COALESCE(payment_method, '')) = 'VISA' THEN 0
+                        ELSE COALESCE(cash_amount, amount)
+                    END) AS cash_net,
+                    SUM(CASE
+                        WHEN UPPER(COALESCE(payment_method, '')) = 'VISA' THEN amount
+                        WHEN UPPER(COALESCE(payment_method, '')) = 'CASH' THEN 0
+                        WHEN cash_amount IS NOT NULL THEN COALESCE(amount, 0) - COALESCE(cash_amount, 0)
+                        ELSE 0
+                    END) AS visa_net,
                     SUM(COALESCE(amount, 0)) AS total_collected
                   FROM pos_financial_ledger
                  WHERE 1=1
@@ -5876,7 +7377,7 @@ class SqliteDatabase:
                 pass
 
             shift_sql = """
-                SELECT status, started_at, ended_at, updated_at
+                SELECT shift_id, status, started_at, ended_at, updated_at
                   FROM pos_shifts_mirror
                  WHERE 1=1
             """
@@ -5884,18 +7385,35 @@ class SqliteDatabase:
             if frag:
                 shift_sql += frag
                 shift_args.extend(frag_args)
+            if df or dt:
+                shift_sql += """
+                    AND (
+                        (started_at IS NOT NULL AND TRIM(started_at) != ''
+                         AND substr(started_at, 1, 10) >= ?
+                         AND substr(started_at, 1, 10) <= ?)
+                        OR
+                        (ended_at IS NOT NULL AND TRIM(ended_at) != ''
+                         AND substr(ended_at, 1, 10) >= ?
+                         AND substr(ended_at, 1, 10) <= ?)
+                    )
+                """
+                start_day = df or "0000-00-00"
+                end_day = dt or "9999-12-31"
+                shift_args.extend([start_day, end_day, start_day, end_day])
             shift_sql += """
                  ORDER BY
-                    CASE WHEN status='OPEN' THEN 0 ELSE 1 END,
-                    COALESCE(ended_at, started_at, updated_at) DESC
+                    COALESCE(ended_at, started_at, updated_at) DESC,
+                    id DESC
                  LIMIT 1
             """
             try:
                 srow = self.conn.execute(shift_sql, shift_args).fetchone()
                 if srow:
+                    row["shift_id"] = int(srow["shift_id"]) if srow["shift_id"] is not None else None
                     row["shift_status"] = str(srow["status"] or "")
                     row["shift_started_at"] = str(srow["started_at"] or "")
                     row["shift_ended_at"] = str(srow["ended_at"] or "")
+                    row["shift_event_at"] = str(srow["updated_at"] or "")
             except sqlite3.OperationalError:
                 pass
 
@@ -5921,6 +7439,8 @@ class SqliteDatabase:
                 pass
 
             notes: List[str] = []
+            row["sync_age_min"] = timestamp_age_minutes(row.get("last_sync_at"))
+            row["snapshot_age_min"] = timestamp_age_minutes(row.get("snapshot_at")) if row.get("snapshot_at") else None
             sync_age = row.get("sync_age_min")
             snapshot_age = row.get("snapshot_age_min")
             if not row.get("last_sync_at"):
@@ -5935,6 +7455,16 @@ class SqliteDatabase:
                 notes.append("لا توجد لقطة مخزون")
             elif snapshot_age is None:
                 notes.append("وقت اللقطة غير واضح")
+            shift_status = str(row.get("shift_status") or "").upper()
+            if shift_status == "OPEN":
+                shift_event_age = timestamp_age_minutes(row.get("shift_event_at") or row.get("shift_started_at"))
+                shift_start = str(row.get("shift_started_at") or "")
+                if shift_event_age is None:
+                    notes.append("الوردية مفتوحة حسب آخر حدث - وقت الحدث غير واضح")
+                elif int(shift_event_age) >= 720:
+                    notes.append("الوردية مفتوحة حسب آخر حدث - لم يصل حدث إغلاق")
+                elif dt and shift_start[:10] and shift_start[:10] < dt:
+                    notes.append("الوردية مفتوحة من يوم سابق - لم يصل حدث إغلاق")
             if int(row.get("inbox_errors") or 0) or int(row.get("dead_letters") or 0):
                 notes.append("أخطاء مزامنة")
             audit = self.sum_pos_stock_audit_adjustments(dev, date_from=df, date_to=dt)
@@ -5953,7 +7483,7 @@ class SqliteDatabase:
             if not notes:
                 row["status"] = "جيد"
                 row["notes"] = ""
-            elif any(x in notes for x in ("لا توجد مزامنة", "المزامنة قديمة", "أخطاء مزامنة")):
+            elif any(x in notes for x in ("لا توجد مزامنة", "المزامنة قديمة", "أخطاء مزامنة")) or any("لم يصل حدث إغلاق" in x for x in notes):
                 row["status"] = "حرج"
                 row["notes"] = "، ".join(notes)
             else:
@@ -5962,6 +7492,17 @@ class SqliteDatabase:
 
         rows = list(out.values())
         rows.sort(key=lambda r: str(r.get("branch_name") or ""))
+        try:
+            if logging_setup is not None:  # type: ignore[name-defined]
+                logging_setup.log_event(
+                    "db.pos_branch_monitor.list",
+                    rows=len(rows),
+                    elapsed_ms=int((time.time() - started) * 1000),
+                    date_from=df or None,
+                    date_to=dt or None,
+                )  # type: ignore[union-attr]
+        except Exception:
+            pass
         return rows
 
     def add_branch_cash_receipt(
@@ -6147,14 +7688,18 @@ class SqliteDatabase:
         target = (target_name or "").strip()
         if not target:
             raise ValueError("اسم الفرع المطلوب غير صالح.")
-        if target == item.get("source_device"):
-            raise ValueError("لا يمكن إعادة التوجيه إلى نفس الفرع المرسل.")
-
         with self.conn:
+            import uuid as _uuid
+
+            original_ref = item.get("external_ref") or item.get("sync_event_uuid") or ""
+            shipment_uuid = str(_uuid.uuid4())
+            processed_note = (note or "").strip() or f"Rerouted to {target}"
+            if original_ref:
+                processed_note = f"{processed_note} | original_ref={original_ref}"
             self._record_branch_shipment_event(
-                shipment_uuid=item.get("external_ref") or item.get("sync_event_uuid") or "",
+                shipment_uuid=shipment_uuid,
                 target_name=target,
-                note=(note or "").strip() or f"rerouted from {item.get('source_device')}",
+                note=processed_note,
                 lines=[{
                     "item_type": item["item_type"],
                     "school": item["school"],
@@ -6175,7 +7720,7 @@ class SqliteDatabase:
                 """,
                 (
                     now_iso(),
-                    (note or "").strip() or f"Rerouted to {target}",
+                    processed_note,
                     target,
                     int(queue_id),
                 ),
@@ -6231,6 +7776,96 @@ class SqliteDatabase:
             "has_alpha": int(bool(has_alpha)),
         }
 
+    def _copy_reclassification_metadata_to_target(
+        self,
+        src: Dict[str, str],
+        dst: Dict[str, str],
+        *,
+        target_price: float = 0.0,
+    ) -> Dict[str, Any]:
+        size_profiles: List[Dict[str, Any]] = []
+        catalog_rows: List[Dict[str, Any]] = []
+        price_profile_id: Optional[int] = None
+
+        src_profile = self.get_size_profile(src["item_type"], src["school"], src["color"])
+        if src_profile:
+            r1s, r1e, r2s, r2e, has_alpha = src_profile
+            self.upsert_size_profile(
+                dst["item_type"],
+                dst["school"],
+                dst["color"],
+                r1_start=r1s,
+                r1_end=r1e,
+                r2_start=r2s,
+                r2_end=r2e,
+                has_alpha=bool(has_alpha),
+            )
+            row = self._size_profile_payload_row(dst["item_type"], dst["school"], dst["color"])
+            if row:
+                size_profiles.append(row)
+
+        assignment = self.get_price_profile_assignment(src["item_type"], src["school"], src["color"]) or {}
+        try:
+            price_profile_id = int(assignment.get("profile_id") or 0) or None
+        except (TypeError, ValueError):
+            price_profile_id = None
+        if price_profile_id:
+            if src["item_type"] != dst["item_type"]:
+                source_lines = self.list_price_profile_lines(price_profile_id, item_type=src["item_type"])
+                for line in source_lines:
+                    size = _normalize_size_label(_strip_digit_marks(line.get("size") or ""))
+                    if not size:
+                        continue
+                    try:
+                        price = float(line.get("price") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    self.conn.execute(
+                        """
+                        INSERT INTO price_profile_lines(
+                            profile_id, item_type, size, price, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
+                        ON CONFLICT(profile_id, item_type, size)
+                        DO UPDATE SET
+                            price = excluded.price,
+                            updated_at = datetime('now')
+                        """,
+                        (price_profile_id, dst["item_type"], size, price),
+                    )
+            self.assign_price_profile(dst["item_type"], dst["school"], dst["color"], price_profile_id)
+            catalog_rows.extend(
+                self.price_profile_catalog_rows_for_targets(
+                    price_profile_id,
+                    [(dst["item_type"], dst["school"], dst["color"])],
+                )
+            )
+
+        if not catalog_rows:
+            profile = self.get_size_profile(dst["item_type"], dst["school"], dst["color"])
+            labels = size_labels_from_profile_tuple(profile) if profile else []
+            if dst["size"] not in labels:
+                labels.append(dst["size"])
+            for size in labels:
+                price = float(target_price or 0)
+                if price <= 0:
+                    price = float(self.get_effective_price(dst["item_type"], dst["school"], dst["color"], size) or 0)
+                catalog_rows.append({
+                    "item_type": dst["item_type"],
+                    "school": dst["school"],
+                    "color": dst["color"],
+                    "size": _normalize_size_label(_strip_digit_marks(size)),
+                    "unit_price": float(price or 0),
+                    "qty": 0,
+                    "catalog_only": True,
+                })
+
+        return {
+            "size_profiles": size_profiles,
+            "catalog_rows": catalog_rows,
+            "price_profile_id": price_profile_id,
+        }
+
     def send_size_profile_to_all_pos(
         self,
         item_type: str,
@@ -6238,80 +7873,10 @@ class SqliteDatabase:
         color: str,
         note: str = "Size profile catalog sync",
     ) -> int:
-        profile_row = self._size_profile_payload_row(item_type, school, color)
-        if not profile_row:
-            return 0
-        try:
-            devices = self.list_known_pos_device_names() or []
-        except Exception:
-            devices = []
-        if not devices:
-            return 0
-
-        import json as _json
-        import sqlite3 as _sqlite3
-        try:
-            from sync_core import new_uuid as _new_uuid
-        except Exception:
-            _new_uuid = None
-
-        def _fallback_uuid() -> str:
-            import uuid as _u
-            return str(_u.uuid4())
-
-        payload = {
-            "items": [],
-            "size_profiles": [profile_row],
-            "spec_history": [
-                {"field": "item_type", "value": profile_row["item_type"]},
-                {"field": "school", "value": profile_row["school"]},
-                {"field": "color", "value": profile_row["color"]},
-            ],
-            "note": note,
-        }
-        sent = 0
-        with self.conn:
-            for dev in devices:
-                target = str(dev or "").strip()
-                if not target:
-                    continue
-                event_uuid = (_new_uuid() if _new_uuid else _fallback_uuid())
-                target_scope = f"pos:{target}"
-                try:
-                    self.conn.execute(
-                        """
-                        INSERT INTO sync_outbox
-                            (event_uuid, event_type, payload_json,
-                             created_at, status, attempts, target_scope)
-                        VALUES (?, ?, ?, ?, 'pending', 0, ?)
-                        """,
-                        (
-                            event_uuid,
-                            "CATALOG_UPSERT",
-                            _json.dumps(payload, ensure_ascii=False, default=str),
-                            now_iso(),
-                            target_scope,
-                        ),
-                    )
-                except _sqlite3.OperationalError:
-                    payload_with_scope = dict(payload)
-                    payload_with_scope["__target_scope__"] = target_scope
-                    self.conn.execute(
-                        """
-                        INSERT INTO sync_outbox
-                            (event_uuid, event_type, payload_json,
-                             created_at, status, attempts)
-                        VALUES (?, ?, ?, ?, 'pending', 0)
-                        """,
-                        (
-                            event_uuid,
-                            "CATALOG_UPSERT",
-                            _json.dumps(payload_with_scope, ensure_ascii=False, default=str),
-                            now_iso(),
-                        ),
-                    )
-                sent += 1
-        return sent
+        # Branch POS devices should not receive definitions just because a
+        # warehouse profile changed. Definitions reach a POS only via an actual
+        # branch shipment, or the explicit "إرسال تعريف للحجز" action.
+        return 0
 
     def _record_branch_shipment_event(
         self,
@@ -6403,6 +7968,118 @@ class SqliteDatabase:
                 ),
             )
 
+    def _record_branch_shipment_cancel_event(
+        self,
+        shipment_uuid: str,
+        target_name: str,
+        note: str,
+        lines: List[Dict[str, Any]],
+    ) -> None:
+        known = []
+        try:
+            known = self.list_known_pos_device_names() or []
+        except Exception:
+            known = []
+        canonical_target = canonical_branch_device_name(target_name, known) or (target_name or "").strip()
+        if not canonical_target:
+            raise ValueError("اسم الفرع المستهدف غير صالح.")
+        payload = {
+            "shipment_uuid": str(shipment_uuid or "").strip(),
+            "bill_uuid": str(shipment_uuid or "").strip(),
+            "cancelled_at": now_iso(),
+            "note": note or "",
+            "items": lines,
+        }
+        self._record_sync_event_or_raise(
+            "STOCK_TRANSFER_CANCELLED",
+            payload,
+            target_scope=f"pos:{canonical_target}",
+        )
+
+    def record_branch_stock_reclassification_event(
+        self,
+        branch_device: str,
+        source_device: str,
+        from_spec: Dict[str, Any],
+        to_spec: Dict[str, Any],
+        qty: int,
+        note: str = "",
+    ) -> str:
+        known = []
+        try:
+            known = self.list_known_pos_device_names() or []
+        except Exception:
+            known = []
+        branch = canonical_branch_device_name(branch_device, known) or configured_branch_device_name(branch_device) or str(branch_device or "").strip()
+        source_name = str(source_device or "").strip() or branch
+        if not branch:
+            raise ValueError("اختر فرع POS أولاً.")
+        qty = int(qty or 0)
+        if qty <= 0:
+            raise ValueError("الكمية يجب أن تكون أكبر من صفر.")
+
+        def _spec(raw: Dict[str, Any]) -> Dict[str, str]:
+            spec = {
+                "item_type": str(raw.get("item_type") or "").strip(),
+                "school": str(raw.get("school") or "").strip(),
+                "color": str(raw.get("color") or "").strip(),
+                "size": _normalize_size_label(_strip_digit_marks(raw.get("size"))),
+            }
+            if not all(spec.values()):
+                raise ValueError("المواصفات غير مكتملة.")
+            return spec
+
+        src = _spec(from_spec)
+        dst = _spec(to_spec)
+        if src == dst:
+            raise ValueError("المواصفات الجديدة مطابقة للمواصفات الحالية.")
+        try:
+            source_count = int(from_spec.get("count") or 0)
+        except (TypeError, ValueError):
+            source_count = 0
+        if source_count > 0 and qty > source_count:
+            raise ValueError("الكمية المطلوبة أكبر من كمية الصف المحدد.")
+        try:
+            target_price = float(to_spec.get("unit_price") or 0)
+        except (TypeError, ValueError):
+            target_price = 0.0
+        if target_price <= 0:
+            target_price = float(self._warehouse_source_price_for_spec(dst) or 0.0)
+        if target_price <= 0:
+            target_price = float(self.get_effective_price(dst["item_type"], dst["school"], dst["color"], dst["size"]) or 0.0)
+        try:
+            source_price = float(from_spec.get("unit_price") or 0)
+        except (TypeError, ValueError):
+            source_price = 0.0
+        metadata = self._copy_reclassification_metadata_to_target(
+            src,
+            dst,
+            target_price=float(target_price or source_price or 0.0),
+        )
+
+        payload = {
+            "branch_device": branch,
+            "source_device_name": source_name,
+            "from_spec": {**src, "unit_price": float(source_price), "count_before": int(source_count)},
+            "to_spec": {**dst, "unit_price": float(target_price)},
+            "qty": int(qty),
+            "note": (note or "").strip() or "Branch stock reclassification",
+            "created_at": now_iso(),
+        }
+        if metadata.get("size_profiles"):
+            payload["size_profiles"] = metadata["size_profiles"]
+        if metadata.get("catalog_rows"):
+            payload["catalog_rows"] = metadata["catalog_rows"]
+        if metadata.get("price_profile_id"):
+            payload["price_profile_id"] = metadata["price_profile_id"]
+        with self.conn:
+            event_uuid = self._record_sync_event_or_raise(
+                "BRANCH_STOCK_RECLASSIFIED",
+                payload,
+                target_scope=f"pos:{branch}",
+            )
+        return event_uuid
+
     def send_catalog_rows_to_pos(
         self,
         target_name: str,
@@ -6447,6 +8124,56 @@ class SqliteDatabase:
                 lines=lines,
             )
         return len(lines)
+
+    def record_branch_catalog_delete_event(
+        self,
+        target_name: str,
+        filters: Sequence[Dict[str, Any]],
+        note: str = "Warehouse branch catalog delete",
+    ) -> str:
+        known = self.list_known_pos_device_names() or []
+        target = (
+            canonical_branch_device_name(target_name, known)
+            or configured_branch_device_name(target_name)
+            or str(target_name or "").strip()
+        )
+        if not target:
+            raise ValueError("اختر فرع POS أولاً.")
+
+        clean_filters: List[Dict[str, str]] = []
+        seen = set()
+        for raw in filters or []:
+            if not isinstance(raw, dict):
+                continue
+            filt = {
+                "item_type": str(raw.get("item_type") or "").strip(),
+                "school": str(raw.get("school") or "").strip(),
+                "color": str(raw.get("color") or "").strip(),
+                "size": _normalize_size_label(_strip_digit_marks(raw.get("size"))),
+            }
+            filt = {k: v for k, v in filt.items() if v}
+            if not filt:
+                continue
+            key = tuple((k, filt.get(k, "").casefold()) for k in ("item_type", "school", "color", "size"))
+            if key in seen:
+                continue
+            seen.add(key)
+            clean_filters.append(filt)
+        if not clean_filters:
+            raise ValueError("لا توجد مواصفات صالحة للحذف.")
+
+        payload = {
+            "branch_device": target,
+            "filters": clean_filters,
+            "note": str(note or "").strip() or "Warehouse branch catalog delete",
+            "created_at": now_iso(),
+        }
+        with self.conn:
+            return self._record_sync_event_or_raise(
+                "BRANCH_CATALOG_DELETED",
+                payload,
+                target_scope=f"pos:{target}",
+            )
 
     def get_next_shipment_receipt_review(self) -> Optional[Dict[str, Any]]:
         row = self.conn.execute(
@@ -6651,6 +8378,21 @@ class SqliteDatabase:
 
     # -------- Stock Audit --------
 
+    @staticmethod
+    def _parse_stock_id_list(value: Any) -> List[int]:
+        ids: List[int] = []
+        for part in str(value or "").replace(";", ",").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                stock_id = int(part)
+            except Exception:
+                continue
+            if stock_id > 0 and stock_id not in ids:
+                ids.append(stock_id)
+        return ids
+
     def apply_stock_adjustments(self, adjustments: List[Dict[str, Any]],
                                 note: str = "Physical count adjustment") -> int:
         """Apply stock count adjustments from a physical audit."""
@@ -6664,7 +8406,8 @@ class SqliteDatabase:
                 if diff == 0:
                     continue
                 stock_id_raw = adj.get("stock_id")
-                stock_id = parse_int_text(stock_id_raw)
+                stock_ids = self._parse_stock_id_list(stock_id_raw)
+                stock_id = stock_ids[0] if stock_ids else parse_int_text(stock_id_raw)
                 s = None
                 if stock_id is not None:
                     cur = self.conn.execute("SELECT * FROM stocks WHERE id=?", (stock_id,))
@@ -6681,7 +8424,9 @@ class SqliteDatabase:
                     unit_price = parse_float_text(adj.get("unit_price"), 0.0) or 0.0
                     if not (item_type and school and color and size and warehouse_no is not None and package_no is not None):
                         continue
-                    self.ensure_package_open(warehouse_no, package_no)
+                    # Audit corrects the physical truth of an existing package.
+                    # A closed package may still need stock added back when the
+                    # recorded count was wrong, so do not require reopening here.
                     stock_id = self.add_or_update_stock_row(
                         item_type,
                         school,
@@ -6698,47 +8443,106 @@ class SqliteDatabase:
                     continue
                 direction = "ADJUST_IN" if diff > 0 else "ADJUST_OUT"
                 abs_diff = abs(diff)
-                current_count = int(s["count"] or 0)
                 if actual < 0:
                     raise ValueError("Actual stock count cannot be negative")
-                if diff < 0 and abs_diff > current_count:
-                    raise ValueError("Stock adjustment would make the item count negative")
                 if diff > 0:
+                    affected_rows = [(s, abs_diff)]
                     self.conn.execute(
                         "UPDATE stocks SET count = count + ? WHERE id = ?",
                         (abs_diff, stock_id))
                 else:
+                    affected_rows = []
+                    remaining = int(abs_diff)
+                    candidates: List[sqlite3.Row] = []
+                    seen_ids: Set[int] = set()
+
+                    if stock_ids:
+                        placeholders = ",".join("?" for _ in stock_ids)
+                        preferred = self.conn.execute(
+                            f"""SELECT * FROM stocks
+                                WHERE id IN ({placeholders})
+                                  AND LOWER(TRIM(item_type))=LOWER(TRIM(?))
+                                  AND LOWER(TRIM(school))=LOWER(TRIM(?))
+                                  AND LOWER(TRIM(color))=LOWER(TRIM(?))
+                                  AND LOWER(TRIM(size))=LOWER(TRIM(?))
+                                  AND CAST(warehouse_no AS TEXT)=CAST(? AS TEXT)
+                                  AND count > 0
+                                ORDER BY id ASC""",
+                            (
+                                *stock_ids,
+                                s["item_type"], s["school"], s["color"], s["size"],
+                                s["warehouse_no"],
+                            ),
+                        ).fetchall()
+                        for candidate in preferred:
+                            candidates.append(candidate)
+                            seen_ids.add(int(candidate["id"]))
+
+                    fallback = self.conn.execute(
+                        """SELECT * FROM stocks
+                           WHERE LOWER(TRIM(item_type))=LOWER(TRIM(?))
+                             AND LOWER(TRIM(school))=LOWER(TRIM(?))
+                             AND LOWER(TRIM(color))=LOWER(TRIM(?))
+                             AND LOWER(TRIM(size))=LOWER(TRIM(?))
+                             AND CAST(warehouse_no AS TEXT)=CAST(? AS TEXT)
+                             AND count > 0
+                           ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END, id ASC""",
+                        (
+                            s["item_type"], s["school"], s["color"], s["size"],
+                            s["warehouse_no"], int(s["id"]),
+                        ),
+                    ).fetchall()
+                    for candidate in fallback:
+                        cid = int(candidate["id"])
+                        if cid not in seen_ids:
+                            candidates.append(candidate)
+                            seen_ids.add(cid)
+
+                    for candidate in candidates:
+                        if remaining <= 0:
+                            break
+                        take = min(int(candidate["count"] or 0), remaining)
+                        if take <= 0:
+                            continue
+                        self.conn.execute(
+                            "UPDATE stocks SET count = count - ? WHERE id = ?",
+                            (int(take), int(candidate["id"])),
+                        )
+                        affected_rows.append((candidate, int(take)))
+                        remaining -= int(take)
+                    if remaining > 0:
+                        raise ValueError("لا يمكن تطبيق التسوية لأن الكمية المتاحة أقل من الفرق المطلوب.")
+
+                movement_ts = now_iso()
+                for affected, take_qty in affected_rows:
                     self.conn.execute(
-                        "UPDATE stocks SET count = count - ? WHERE id = ?",
-                        (abs_diff, stock_id))
-                self.conn.execute(
-                    """INSERT INTO movements
-                    (ts,direction,stock_id,qty,note,bill_id,
-                     item_type,school,color,size,warehouse_no,package_no,
-                     unit_price,has_badge)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (now_iso(), direction, stock_id, abs_diff,
-                     f"{note} (expected {expected}, actual {actual})",
-                     None, s["item_type"], s["school"], s["color"],
-                     s["size"], int(s["warehouse_no"]),
-                     int(s["package_no"]), float(s["unit_price"]),
-                     int(s["has_badge"] or 0)))
-                applied_events.append({
-                    "stock_uuid":   s["uuid"] if "uuid" in s.keys() else None,
-                    "stock_id":     stock_id,
-                    "direction":    direction,
-                    "qty":          abs_diff,
-                    "expected":     expected,
-                    "actual":       actual,
-                    "item_type":    s["item_type"],
-                    "school":       s["school"],
-                    "color":        s["color"],
-                    "size":         s["size"],
-                    "warehouse_no": int(s["warehouse_no"]),
-                    "package_no":   int(s["package_no"]),
-                    "unit_price":   float(s["unit_price"]),
-                    "has_badge":    int(s["has_badge"] or 0),
-                })
+                        """INSERT INTO movements
+                        (ts,direction,stock_id,qty,note,bill_id,
+                         item_type,school,color,size,warehouse_no,package_no,
+                         unit_price,has_badge)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (movement_ts, direction, int(affected["id"]), int(take_qty),
+                         f"{note} (expected {expected}, actual {actual})",
+                         None, affected["item_type"], affected["school"], affected["color"],
+                         affected["size"], int(affected["warehouse_no"]),
+                         int(affected["package_no"]), float(affected["unit_price"]),
+                         int(affected["has_badge"] or 0)))
+                    applied_events.append({
+                        "stock_uuid":   affected["uuid"] if "uuid" in affected.keys() else None,
+                        "stock_id":     int(affected["id"]),
+                        "direction":    direction,
+                        "qty":          int(take_qty),
+                        "expected":     expected,
+                        "actual":       actual,
+                        "item_type":    affected["item_type"],
+                        "school":       affected["school"],
+                        "color":        affected["color"],
+                        "size":         affected["size"],
+                        "warehouse_no": int(affected["warehouse_no"]),
+                        "package_no":   int(affected["package_no"]),
+                        "unit_price":   float(affected["unit_price"]),
+                        "has_badge":    int(affected["has_badge"] or 0),
+                    })
                 count += 1
             if applied_events:
                 self._record_sync_event("STOCK_AUDIT_APPLIED", {
@@ -7387,6 +9191,7 @@ class SqliteDatabase:
                     "sold_warehouse_qty": 0,
                     "pos_sold_qty": 0,
                     "branch_shipped_qty": 0,
+                    "audit_adjust_qty": 0,
                     "branch_sold_qty_est": 0,
                     "reserved_qty": 0,
                     "warehouse_qty": 0,
@@ -7481,6 +9286,10 @@ class SqliteDatabase:
                 frag, frag_args = self.resolve_pos_mirror_device_sql_filter(branch_filter)
                 sql += frag
                 args.extend(frag_args)
+            else:
+                excl, excl_args = self.test_pos_source_exclusion_sql()
+                sql += excl
+                args.extend(excl_args)
             sql += " GROUP BY item_type, school, color, size"
             rows = cur.execute(sql, tuple(args)).fetchall()
         except sqlite3.OperationalError:
@@ -7569,70 +9378,46 @@ class SqliteDatabase:
             key = _to_key(r)
             _bucket(key)["branch_shipped_qty"] = int(r[4] or 0)
 
-        # POS sold qty from synced POS sale payloads only.
-        # Warehouse bills/shipments do not mark an item as sold for this view.
+        # POS local stock audits are part of branch income/baseline. Positive
+        # diffs add pieces to the branch, negative diffs remove pieces from the
+        # branch baseline.
         try:
-            sale_sql = """
-                SELECT event_type, source_device, payload_json
-                FROM sync_inbox
-                WHERE event_type IN ('SALE_CREATED','SALE_RETURNED','SALE_VOIDED','SALE_EXCHANGED','SALE_BILL_TYPE_CORRECTED')
-                  AND COALESCE(apply_status,'ok') != 'error'
-            """
-            sale_args: List[Any] = []
-            d_sql, d_args = _date_clause("COALESCE(apply_at, applied_at)")
-            sale_sql += d_sql
-            sale_args.extend(d_args)
+            audit_where = ["1=1"]
+            audit_args: List[Any] = []
             if branch_filter:
                 frag, frag_args = self.resolve_pos_mirror_device_sql_filter(branch_filter)
-                sale_sql += frag
-                sale_args.extend(frag_args)
-            sale_rows = cur.execute(sale_sql, tuple(sale_args)).fetchall()
+                if frag:
+                    placeholders = ",".join("?" for _ in frag_args)
+                    audit_where.append(f"i.source_device IN ({placeholders})")
+                    audit_args.extend(frag_args)
+            else:
+                excl, excl_args = self.test_pos_source_exclusion_sql("i.source_device")
+                if excl:
+                    audit_where.append(excl.replace(" AND ", "", 1))
+                    audit_args.extend(excl_args)
+            df = (filters.get("date_from") or "").strip()
+            dt = (filters.get("date_to") or "").strip()
+            if df:
+                audit_where.append("date(r.created_at) >= date(?)")
+                audit_args.append(df)
+            if dt:
+                audit_where.append("date(r.created_at) <= date(?)")
+                audit_args.append(dt)
+            rows = cur.execute(
+                f"""
+                SELECT i.item_type, i.school, i.color, i.size, COALESCE(SUM(i.diff_qty),0)
+                FROM pos_stock_audit_items_mirror i
+                JOIN pos_stock_audit_reports_mirror r ON r.audit_uuid = i.audit_uuid
+                WHERE {' AND '.join(audit_where)}
+                GROUP BY i.item_type, i.school, i.color, i.size
+                """,
+                tuple(audit_args),
+            ).fetchall()
         except sqlite3.OperationalError:
-            sale_rows = []
-
-        def _apply_pos_sale_lines(lines: Any, sign: int) -> None:
-            if not isinstance(lines, list):
-                return
-            for ln in lines:
-                if not isinstance(ln, dict):
-                    continue
-                try:
-                    qty = int(ln.get("qty") or 0)
-                except Exception:
-                    qty = 0
-                if qty <= 0:
-                    continue
-                key = (
-                    _normalize_spec_label(ln.get("item_type")),
-                    _normalize_spec_label(ln.get("school")),
-                    _normalize_spec_label(ln.get("color")),
-                    _normalize_size_label(str(ln.get("size") or "")),
-                )
-                if not all(key):
-                    continue
-                _bucket(key)["pos_sold_qty"] += int(sign) * qty
-
-        for rr in sale_rows:
-            try:
-                payload = json.loads(rr["payload_json"] or "{}")
-            except Exception:
-                payload = {}
-            if not isinstance(payload, dict):
-                continue
-            event_type = str(rr["event_type"] or "").strip()
-            if event_type == "SALE_CREATED":
-                _apply_pos_sale_lines(payload.get("items") or [], +1)
-            elif event_type in ("SALE_RETURNED", "SALE_VOIDED"):
-                _apply_pos_sale_lines(payload.get("lines") or payload.get("items") or [], -1)
-            elif event_type == "SALE_EXCHANGED":
-                _apply_pos_sale_lines(payload.get("take_lines") or [], +1)
-                _apply_pos_sale_lines(payload.get("return_lines") or [], -1)
-            elif event_type == "SALE_BILL_TYPE_CORRECTED":
-                if str(payload.get("from_bill_type") or "").upper() == "EXCHANGE" and str(payload.get("to_bill_type") or "").upper() == "SALE":
-                    # Old exchange effect was: take_lines sold, return_lines unsold.
-                    # New sale effect is: both take_lines and return_lines sold.
-                    # The delta is therefore +2 for every formerly-returned line.
-                    _apply_pos_sale_lines(payload.get("return_lines") or [], +2)
+            rows = []
+        for r in rows:
+            key = _to_key(r)
+            _bucket(key)["audit_adjust_qty"] += int(r[4] or 0)
 
         cur.close()
 
@@ -7640,13 +9425,18 @@ class SqliteDatabase:
         for key, m in metrics.items():
             if not _spec_match(key):
                 continue
-            branch_sold = max(0, int(m["pos_sold_qty"]))
-            warehouse_client_sold = 0 if branch_filter else int(m["sold_warehouse_qty"])
-            sold_total = max(0, int(m["pos_sold_qty"]) + warehouse_client_sold)
+            incoming_qty = int(m["branch_shipped_qty"]) + int(m["audit_adjust_qty"])
+            branch_remaining_qty = int(m["branch_qty"])
+            sold_total = max(0, incoming_qty - branch_remaining_qty)
+            branch_sold = sold_total
             remaining_total = int(m["warehouse_qty"]) + int(m["branch_qty"])
-            remaining_for_request = int(m["branch_qty"]) if branch_filter else remaining_total
-            requested_qty = max(0, sold_total - remaining_for_request)
-            incoming_qty = int(m["branch_shipped_qty"]) if branch_filter else int(m["incoming_qty"])
+            requested_qty = max(0, sold_total - remaining_total)
+            movement_incoming_qty = int(incoming_qty)
+            movement_sold_qty = branch_sold
+            movement_remaining_qty = (
+                int(m["warehouse_qty"]) + int(m["branch_qty"])
+            )
+            movement_requested_qty = max(0, movement_sold_qty - movement_remaining_qty)
             if branch_filter and not (
                 incoming_qty
                 or branch_sold
@@ -7660,7 +9450,7 @@ class SqliteDatabase:
                 continue
             if has_date_filter and not (
                 incoming_qty
-                or int(m["pos_sold_qty"])
+                or int(m["audit_adjust_qty"])
                 or int(m["reserved_qty"])
             ):
                 # Date filters should narrow the visible product rows to items
@@ -7674,13 +9464,17 @@ class SqliteDatabase:
                     "size": key[3],
                     "incoming_qty": incoming_qty,
                     "sold_branch_qty": int(branch_sold),
-                    "sold_warehouse_qty": int(m["sold_warehouse_qty"]),
+                    "sold_warehouse_qty": 0,
                     "sold_total_qty": int(sold_total),
                     "reserved_qty": int(m["reserved_qty"]),
                     "remaining_branch_qty": int(m["branch_qty"]),
                     "remaining_warehouse_qty": int(m["warehouse_qty"]),
                     "remaining_total_qty": int(remaining_total),
                     "requested_qty": int(requested_qty),
+                    "movement_incoming_qty": int(movement_incoming_qty),
+                    "movement_sold_qty": int(movement_sold_qty),
+                    "movement_remaining_qty": int(movement_remaining_qty),
+                    "movement_requested_qty": int(movement_requested_qty),
                 }
             )
 
@@ -9996,6 +11790,7 @@ class OutcomeFrame(ttk.Frame):
 
         self._size_btns = {}
         self._selected_size_btn = None
+        self._size_qty_focus_after_id = None
 
         self._grid_host = tk.Frame(self._canvas, bg=_UI["BG"])
         self._grid_window = self._canvas.create_window((0, 0), window=self._grid_host, anchor="nw")
@@ -10048,8 +11843,9 @@ class OutcomeFrame(ttk.Frame):
                          activebackground=_UI["SURFACE2"])
         _qm.pack(side=tk.LEFT)
         _add_hover(_qm, _UI["SURFACE2"], _UI["SURFACE"])
-        ttk.Entry(act_inner, textvariable=self.qty_var, width=5, justify="center",
-                  font=_FONTS["body"]).pack(side=tk.LEFT, padx=2)
+        self._qty_entry = ttk.Entry(act_inner, textvariable=self.qty_var, width=5, justify="center",
+                                    font=_FONTS["body"])
+        self._qty_entry.pack(side=tk.LEFT, padx=2)
         _qp = tk.Button(act_inner, text="+",
                          command=lambda: self.qty_var.set(str((parse_int_text(self.qty_var.get(), 1) or 1) + 1)),
                          bg=_UI["SURFACE"], fg=_UI["TEXT"], font=("Segoe UI", 11, "bold"),
@@ -10801,12 +12597,32 @@ class OutcomeFrame(ttk.Frame):
             for lbl in list(self._size_btns.keys()):
                 if lbl.startswith(psz + " ("):
                     btn, _ = self._size_btns[lbl]
-                    self._on_size_click(lbl, btn)
+                    self._on_size_click(lbl, btn, focus_qty=False)
                     break
 
         self._bind_grid_scroll()
 
-    def _on_size_click(self, label_with_count: str, btn):
+    def _cancel_size_qty_focus(self) -> None:
+        after_id = getattr(self, "_size_qty_focus_after_id", None)
+        if after_id:
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+        self._size_qty_focus_after_id = None
+
+    def _focus_qty_entry_after_size_click(self) -> None:
+        self._size_qty_focus_after_id = None
+        entry = getattr(self, "_qty_entry", None)
+        try:
+            if entry is not None and entry.winfo_exists():
+                entry.focus_set()
+                entry.icursor(tk.END)
+                entry.selection_range(0, tk.END)
+        except Exception:
+            pass
+
+    def _on_size_click(self, label_with_count: str, btn, *, focus_qty: bool = True):
         # 1) Extract raw size
         size = label_with_count.split(" (", 1)[0].strip()
         self._sel_size = size
@@ -10837,9 +12653,14 @@ class OutcomeFrame(ttk.Frame):
         except Exception:
             pass
 
+        if focus_qty:
+            self._cancel_size_qty_focus()
+            self._size_qty_focus_after_id = self.after(180, self._focus_qty_entry_after_size_click)
+
     def _on_size_double_click(self, label_with_count: str, btn):
         """Double-click on a size button: select it and add +1 to the bill immediately."""
-        self._on_size_click(label_with_count, btn)
+        self._cancel_size_qty_focus()
+        self._on_size_click(label_with_count, btn, focus_qty=False)
         # Auto-set qty to 1 and try to add
         self.qty_var.set("1")
         price_txt = (self.price_var.get() or "").strip()
@@ -10986,19 +12807,6 @@ class OutcomeFrame(ttk.Frame):
 
         user_set_flag = bool(getattr(self, "_price_user_edited", False))
         allow_factory = bool(self.instant_mode.get())
-        if allow_factory:
-            try:
-                customer_raw = (self.customer.get() or "").strip()
-                known_pos = set(self.db.list_known_pos_device_names() or [])
-                if canonical_branch_device_name(customer_raw, known_pos) or customer_raw in known_pos:
-                    messagebox.showwarning(
-                        "غير متاح للشحن",
-                        "لا يمكن إضافة بند من المصنع إلى شحنة فرع. اختر كمية متاحة من المخزون أولاً.",
-                        parent=self,
-                    )
-                    return
-            except Exception:
-                pass
         line = {
             "item_type":  self._sel_item,
             "school":     self._sel_school,
@@ -11083,19 +12891,6 @@ class OutcomeFrame(ttk.Frame):
             return
 
         allow_factory = bool(self.instant_mode.get())
-        if allow_factory:
-            try:
-                customer_raw = (self.customer.get() or "").strip()
-                known_pos = set(self.db.list_known_pos_device_names() or [])
-                if canonical_branch_device_name(customer_raw, known_pos) or customer_raw in known_pos:
-                    messagebox.showwarning(
-                        "غير متاح للشحن",
-                        "لا يمكن إضافة بنود من المصنع إلى شحنة فرع. اختر كميات متاحة من المخزون أولاً.",
-                        parent=self,
-                    )
-                    return
-            except Exception:
-                pass
 
         try:
             factory_qty = parse_int_text(self.qty_var.get(), 1) or 1
@@ -11237,14 +13032,6 @@ class OutcomeFrame(ttk.Frame):
             target_pos = None
             customer = customer_raw
 
-        if target_pos and any(bool(ln.get("allow_factory_fill")) for ln in self.bill_lines):
-            messagebox.showwarning(
-                "غير متاح للشحن",
-                "لا يمكن تأكيد شحنة فرع تحتوي على بند من المصنع. احذف هذا البند واختر كمية متاحة من المخزون.",
-                parent=self,
-            )
-            return
-
         # ===== CONFIRMATION OVERLAY =====
         total = self.total_var.get()
         n_items = len(self.bill_lines)
@@ -11253,7 +13040,9 @@ class OutcomeFrame(ttk.Frame):
         overlay.title("تأكيد الفاتورة" if not target_pos else "تأكيد شحنة إلى فرع")
         overlay.transient(self.winfo_toplevel())
         overlay.grab_set()
-        overlay.resizable(False, False)
+        overlay.geometry("700x520")
+        overlay.minsize(560, 380)
+        overlay.resizable(True, True)
 
         frm = ttk.Frame(overlay, padding=20)
         frm.pack(fill=tk.BOTH, expand=True)
@@ -11270,7 +13059,9 @@ class OutcomeFrame(ttk.Frame):
         ttk.Label(frm, text=f"الإجمالي: {total}", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=8, pady=(4, 12))
 
         # Summary of items
-        summary = ttk.Treeview(frm, columns=("item", "size", "qty", "price"), show="headings", height=min(6, n_items))
+        summary_wrap = ttk.Frame(frm)
+        summary_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 12))
+        summary = ttk.Treeview(summary_wrap, columns=("item", "size", "qty", "price"), show="headings", height=min(8, n_items))
         for col, txt, w in [("item", "الصنف", 180), ("size", "المقاس", 70), ("qty", "الكمية", 60), ("price", "السعر", 80)]:
             summary.heading(col, text=txt)
             summary.column(col, width=w, anchor="center")
@@ -11279,7 +13070,10 @@ class OutcomeFrame(ttk.Frame):
                 f"{ln['item_type']} / {ln['school']}",
                 ln["size"], ln["qty"], f"{format_money(float(ln['unit_price']))}"
             ))
-        summary.pack(fill=tk.X, padx=8, pady=(0, 12))
+        ysb = ttk.Scrollbar(summary_wrap, orient="vertical", command=summary.yview)
+        summary.configure(yscrollcommand=ysb.set)
+        summary.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ysb.pack(side=tk.RIGHT, fill=tk.Y)
         apply_zebra_tags(summary)
         _bind_mousewheel(summary)
 
@@ -11535,91 +13329,6 @@ class FactoryItemDialog(tk.Toplevel):
         return self._result
 
 
-def open_price_sync_audit_dialog(parent: tk.Misc, db: "SqliteDatabase", *, limit: int = 200) -> None:
-    """Read-only UI for warehouse-side PRICE_UPDATE fan-out decisions."""
-    dlg = tk.Toplevel(parent)
-    dlg.title("سجل تعديلات أسعار الفروع")
-    try:
-        dlg.transient(parent.winfo_toplevel())
-    except Exception:
-        pass
-    dlg.grab_set()
-
-    top = ttk.Frame(dlg, padding=10)
-    top.pack(fill=tk.BOTH, expand=True)
-
-    ttk.Label(
-        top,
-        text="يعرض هذا السجل قرارات «تعديل السعر» التي تمت مزامنتها مع فروع البيع (POS) — بما فيها أحداث الفاتورة عند إدخال سعر يدوي.",
-        wraplength=860,
-    ).pack(anchor="w", pady=(0, 8))
-
-    # Treeview must live inside `grid` — `top` already uses pack(); mixing grid+pack on one parent raises TclError.
-    grid = ttk.Frame(top)
-    grid.pack(fill=tk.BOTH, expand=True)
-
-    cols = ("ts", "price", "mode", "targets", "uuids", "filters", "note")
-    tv = ttk.Treeview(grid, columns=cols, show="headings", height=16)
-    for c, t, w in [
-        ("ts", "الوقت", 170),
-        ("price", "السعر", 90),
-        ("mode", "وضع السجل", 120),
-        ("targets", "النطاق/الفروع", 260),
-        ("uuids", "معرّفات الحدث", 260),
-        ("filters", "عوامل التصفية", 320),
-        ("note", "ملاحظة", 220),
-    ]:
-        tv.heading(c, text=t)
-        tv.column(c, width=w, anchor="center")
-
-    ysb = ttk.Scrollbar(grid, orient="vertical", command=tv.yview)
-    xsb = ttk.Scrollbar(grid, orient="horizontal", command=tv.xview)
-    tv.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
-    tv.grid(row=0, column=0, sticky="nsew")
-    ysb.grid(row=0, column=1, sticky="ns")
-    xsb.grid(row=1, column=0, sticky="ew")
-    grid.rowconfigure(0, weight=1)
-    grid.columnconfigure(0, weight=1)
-    apply_zebra_tags(tv)
-    _bind_mousewheel(tv)
-
-    def _short_json(txt: str, max_len: int = 220) -> str:
-        s = (txt or "").strip()
-        if len(s) <= max_len:
-            return s
-        return s[: max_len - 1] + "…"
-
-    def _reload():
-        tv.delete(*tv.get_children())
-        rows = db.list_price_sync_audit(limit=limit)
-        for r in rows:
-            tv.insert(
-                "",
-                tk.END,
-                values=(
-                    str(r.get("created_at") or ""),
-                    f"{format_money(float(r.get('new_price') or 0))}",
-                    str(r.get("sync_mode") or ""),
-                    _short_json(str(r.get("targets_json") or ""), 260),
-                    _short_json(str(r.get("event_uuids_json") or ""), 260),
-                    _short_json(str(r.get("filters_json") or ""), 320),
-                    str(r.get("note") or ""),
-                ),
-            )
-
-    btns = ttk.Frame(top)
-    btns.pack(fill=tk.X, pady=(8, 0))
-    ttk.Button(btns, text="تحديث", command=_reload).pack(side=tk.RIGHT)
-    ttk.Button(btns, text="إغلاق", command=dlg.destroy).pack(side=tk.RIGHT, padx=(0, 8))
-
-    _reload()
-    dlg.update_idletasks()
-    try:
-        dlg.geometry("1100x640")
-    except Exception:
-        pass
-
-
 # ------------------- Inventory Window -------------------
 
 class InventoryWindow(tk.Toplevel):
@@ -11797,9 +13506,6 @@ class InventoryWindow(tk.Toplevel):
         ttk.Label(bar, textvariable=self.sum_qty, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(4, 12))
         ttk.Label(bar, text="إجمالي القيمة:").pack(side=tk.LEFT)
         ttk.Label(bar, textvariable=self.sum_val, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(4, 12))
-        _ba = ttk.Button(bar, text="سجل أسعار الفروع…", command=self._open_price_branch_audit)
-        _ba.pack(side=tk.RIGHT)
-        ToolTip(_ba, "عرض سجل مزامنة تعديلات الأسعار إلى فروع البيع (POS)")
         _bc = ttk.Button(bar, text="إرسال تعريف للحجز…", command=self._send_catalog_to_pos_dialog)
         _bc.pack(side=tk.RIGHT, padx=(8, 0))
         ToolTip(_bc, "إرسال الصفوف المحددة إلى فرع POS بكمية صفر حتى تظهر في الحجوزات")
@@ -11811,9 +13517,6 @@ class InventoryWindow(tk.Toplevel):
         ToolTip(_bd, "حذف الصفوف المحددة من المخزون")
 
         self._refresh()
-
-    def _open_price_branch_audit(self):
-        open_price_sync_audit_dialog(self, self.db)
 
     def _send_catalog_to_pos_dialog(self):
         rows: List[Dict[str, Any]] = []
@@ -11974,6 +13677,17 @@ class InventoryWindow(tk.Toplevel):
     def _edit_size_ranges_dialog(self):
 
         # 1) Try to get from selected rows
+        selected_specs: List[Dict[str, str]] = []
+        for iid in self.table.selection() or []:
+            vals = self.table.item(iid, "values")
+            if not vals or len(vals) < 5:
+                continue
+            selected_specs.append({
+                "item_type": str(vals[1] or "").strip(),
+                "school": str(vals[2] or "").strip(),
+                "color": str(vals[3] or "").strip(),
+                "size": _normalize_size_label(_strip_digit_marks(vals[4])),
+            })
         picked = self._get_selected_profile_keys()
 
         if picked:
@@ -12098,15 +13812,36 @@ class InventoryWindow(tk.Toplevel):
                     r2_end=r2e,
                     has_alpha=has_alpha_var.get(),
                 )
-                sent = self.db.send_size_profile_to_all_pos(
-                    item_type,
-                    school,
-                    color,
-                    note="Size profile updated",
-                )
+                sent = 0
+                if selected_specs:
+                    devices = set()
+                    for spec in selected_specs:
+                        if not all(spec.get(k) for k in ("item_type", "school", "color", "size")):
+                            continue
+                        for dev in self.db.related_pos_devices_for_price_update(spec):
+                            devices.add(dev)
+                    profile_rows = []
+                    labels = size_labels_from_profile_tuple(self.db.get_size_profile(item_type, school, color))
+                    for label in labels:
+                        size_label = _normalize_size_label(label)
+                        price = self.db.get_effective_price(item_type, school, color, size_label)
+                        profile_rows.append({
+                            "item_type": item_type,
+                            "school": school,
+                            "color": color,
+                            "size": size_label,
+                            "unit_price": float(price or 0),
+                        })
+                    for dev in sorted(devices, key=lambda x: branch_display_name(x).casefold()):
+                        if profile_rows:
+                            sent += self.db.send_catalog_rows_to_pos(
+                                dev,
+                                profile_rows,
+                                note="Size profile catalog sync",
+                            )
                 msg = "تم حفظ نطاقات المقاسات"
                 if sent:
-                    msg += f" وإرسالها إلى {sent} فرع"
+                    msg += f" وتجهيز {sent} تعريف للفروع"
                 show_toast(dlg, msg)
                 dlg.destroy()
             except Exception as ex:
@@ -12205,10 +13940,10 @@ class InventoryWindow(tk.Toplevel):
                 result = self.db.apply_price_profile_to_stock(
                     profile_id,
                     targets,
-                    stock_ids=None,
+                    stock_ids=selected_stock_ids if has_selection else None,
                     note=f"Price profile applied: {label}",
                 )
-                catalog_sent = self._send_profile_catalog_to_all_pos(profile_id, targets, label)
+                catalog_sent = 0 if has_selection else self._send_profile_catalog_to_all_pos(profile_id, targets, label)
                 show_toast(
                     dlg,
                     f"تم حفظ البروفايل وتحديث {result.get('updated', 0)} صف، وتخطي {result.get('skipped', 0)}",
@@ -13806,14 +15541,15 @@ class MovementsWindow(tk.Toplevel):
         branch_selected = str(self.fbranch.get() or "").strip()
         use_branch_only = bool(branch_selected)
         for r in rows:
-            sold_qty = int((r.get("sold_branch_qty") if use_branch_only else r.get("sold_total_qty")) or 0)
-            remaining_qty = int((r.get("remaining_branch_qty") if use_branch_only else r.get("remaining_total_qty")) or 0)
+            incoming_qty = int(r.get("incoming_qty") or 0)
+            sold_qty = int(r.get("sold_total_qty") or 0)
+            remaining_qty = int(r.get("remaining_total_qty") or 0)
             requested_qty = int(r.get("requested_qty") or 0)
             self.table.insert(
                 "", tk.END,
                 values=(
                     r.get("item_type",""), r.get("school",""), r.get("color",""), r.get("size",""),
-                    int(r.get("incoming_qty") or 0),
+                    incoming_qty,
                     sold_qty,
                     remaining_qty,
                     requested_qty,
@@ -13824,13 +15560,13 @@ class MovementsWindow(tk.Toplevel):
         s = {
             "n": len(rows),
             "incoming_qty": sum(int(r.get("incoming_qty") or 0) for r in rows),
-            "sold_total_qty": sum(int((r.get("sold_branch_qty") if use_branch_only else r.get("sold_total_qty")) or 0) for r in rows),
+            "sold_total_qty": sum(int(r.get("sold_total_qty") or 0) for r in rows),
             "reserved_qty": sum(int(r.get("reserved_qty") or 0) for r in rows),
-            "remaining_total_qty": sum(int((r.get("remaining_branch_qty") if use_branch_only else r.get("remaining_total_qty")) or 0) for r in rows),
+            "remaining_total_qty": sum(int(r.get("remaining_total_qty") or 0) for r in rows),
             "requested_qty": sum(int(r.get("requested_qty") or 0) for r in rows),
         }
-        sold_label = "إجمالي مباع الفرع" if use_branch_only else "إجمالي المباع"
-        rem_label = "إجمالي متبقي الفرع" if use_branch_only else "إجمالي المتبقي (المخزن + الفروع)"
+        sold_label = "إجمالي مباع POS للفرع" if use_branch_only else "إجمالي مباع POS لكل الفروع"
+        rem_label = "إجمالي المتبقي (المخزن + الفرع)" if use_branch_only else "إجمالي المتبقي (المخزن + كل فروع POS)"
         req_label = "إجمالي المطلوب للفرع" if use_branch_only else "إجمالي المطلوب"
         branch_prefix = ""
         if use_branch_only:
@@ -13878,8 +15614,8 @@ class MovementsWindow(tk.Toplevel):
         table = [[
             m.get("item_type",""), m.get("school",""), m.get("color",""), m.get("size",""),
             int(m.get("incoming_qty") or 0),
-            int((m.get("sold_branch_qty") if str(self.fbranch.get() or "").strip() else m.get("sold_total_qty")) or 0),
-            int((m.get("remaining_branch_qty") if str(self.fbranch.get() or "").strip() else m.get("remaining_total_qty")) or 0),
+            int(m.get("sold_total_qty") or 0),
+            int(m.get("remaining_total_qty") or 0),
             int(m.get("requested_qty") or 0),
             int(m.get("reserved_qty") or 0),
         ] for m in rows]
@@ -13927,8 +15663,8 @@ class MovementsWindow(tk.Toplevel):
 
         totals = {
             "incoming": sum(int(r.get("incoming_qty") or 0) for r in rows),
-            "sold": sum(int((r.get("sold_branch_qty") if str(self.fbranch.get() or "").strip() else r.get("sold_total_qty")) or 0) for r in rows),
-            "remaining": sum(int((r.get("remaining_branch_qty") if str(self.fbranch.get() or "").strip() else r.get("remaining_total_qty")) or 0) for r in rows),
+            "sold": sum(int(r.get("sold_total_qty") or 0) for r in rows),
+            "remaining": sum(int(r.get("remaining_total_qty") or 0) for r in rows),
             "requested": sum(int(r.get("requested_qty") or 0) for r in rows),
             "reserved": sum(int(r.get("reserved_qty") or 0) for r in rows),
         }
@@ -13974,7 +15710,7 @@ class MovementsWindow(tk.Toplevel):
                     continue
                 actual_sizes.add(size)
                 remaining_by_size[size] = remaining_by_size.get(size, 0) + int(
-                    (r.get("remaining_branch_qty") if branch_selected else r.get("remaining_total_qty")) or 0
+                    r.get("remaining_total_qty") or 0
                 )
                 requested_by_size[size] = requested_by_size.get(size, 0) + int(r.get("requested_qty") or 0)
 
@@ -14281,7 +16017,7 @@ class TransferWindow(tk.Toplevel):
         row2 = ttk.Frame(src_frame)
         row2.pack(fill=tk.X, padx=4, pady=4)
         ttk.Label(row2, text="المخزن:").pack(side=tk.LEFT)
-        self.f_wh = ttk.Combobox(row2, values=["", "1", "2", "3", "4"], width=5, state="readonly")
+        self.f_wh = ttk.Combobox(row2, values=["", *WAREHOUSE_NUMBER_DISPLAY_VALUES], width=14, state="readonly")
         self.f_wh.pack(side=tk.LEFT, padx=4)
         ttk.Label(row2, text="العبوة:").pack(side=tk.LEFT)
         self.f_pkg = ttk.Entry(row2, width=8)
@@ -14295,7 +16031,7 @@ class TransferWindow(tk.Toplevel):
         self.src_table = ttk.Treeview(
             table_wrap,
             columns=("id", "type", "school", "color", "size", "wh", "pkg", "price", "count"),
-            show="headings", height=10)
+            show="headings", height=10, selectmode="extended")
         for col, txt, w in [
             ("id", "ID", 50), ("type", "النوع", 120), ("school", "المدرسة", 120),
             ("color", "اللون", 70), ("size", "المقاس", 60), ("wh", "المخزن", 50),
@@ -14334,7 +16070,7 @@ class TransferWindow(tk.Toplevel):
             "school": self.f_school.get() or None,
             "color": self.f_color.get() or None,
             "size": self.f_size.get() or None,
-            "warehouse_no": self.f_wh.get() or None,
+            "warehouse_no": warehouse_numeric_value(self.f_wh.get()) or None,
             "package_no": self.f_pkg.get().strip() or None,
         }
         try:
@@ -14346,7 +16082,7 @@ class TransferWindow(tk.Toplevel):
         for r in rows:
             self.src_table.insert("", tk.END, iid=str(r["id"]), values=(
                 r["id"], r["item_type"], r["school"], r["color"], r["size"],
-                r["warehouse_no"], r["package_no"],
+                warehouse_display_label(r["warehouse_no"]), r["package_no"],
                 f"{format_money(float(r['unit_price']))}", r["count"]
             ))
         apply_zebra_tags(self.src_table)
@@ -14354,32 +16090,84 @@ class TransferWindow(tk.Toplevel):
     def _do_transfer(self):
         sel = self.src_table.selection()
         if not sel:
-            messagebox.showwarning("لم يتم التحديد", "اختر صف مخزون أولاً.", parent=self)
+            messagebox.showwarning("لم يتم التحديد", "اختر صف مخزون واحدًا أو أكثر أولاً.", parent=self)
             return
-        stock_id = parse_int_text(sel[0])
-        if stock_id is None:
-            messagebox.showerror("بيانات غير صالحة", "معرف صف المخزون غير صالح.", parent=self)
+        stock_ids = []
+        for iid in sel:
+            stock_id = parse_int_text(iid)
+            if stock_id is not None:
+                stock_ids.append(int(stock_id))
+        if not stock_ids:
+            messagebox.showerror("بيانات غير صالحة", "معرفات صفوف المخزون غير صالحة.", parent=self)
             return
         try:
             dest_wh = int(warehouse_numeric_value(self.dest_wh.get()))
             dest_pkg = parse_int_text(self.dest_pkg.get())
-            qty = parse_int_text(self.transfer_qty.get())
-            if dest_pkg is None or qty is None:
+            qty_text = (self.transfer_qty.get() or "").strip()
+            qty = parse_int_text(qty_text) if qty_text else None
+            if dest_pkg is None:
                 raise ValueError
-            if dest_wh < 1 or dest_pkg < 1 or qty < 1:
+            if dest_wh < 1 or dest_pkg < 1 or (qty is not None and qty < 0):
                 raise ValueError
         except (ValueError, TypeError):
             messagebox.showerror("بيانات غير صالحة",
-                                 "أدخل مخزن وعبوة وكمية صحيحة (>= 1).", parent=self)
+                                 "أدخل مخزن وعبوة صحيحين. اترك الكمية فارغة لتحويل الكمية كاملة.", parent=self)
             return
+        if qty is None:
+            total_qty = 0
+            missing = []
+            for stock_id in stock_ids:
+                row = self.db.conn.execute(
+                    "SELECT count FROM stocks WHERE id = ?",
+                    (int(stock_id),),
+                ).fetchone()
+                if not row:
+                    missing.append(f"#{stock_id}: صف المخزون غير موجود")
+                    continue
+                total_qty += int(row["count"] or 0)
+            if missing:
+                messagebox.showerror("فشل التحويل", "\n".join(missing), parent=self)
+                self._load_source()
+                return
+            qty_label = "الكمية كاملة"
+        else:
+            total_qty = int(qty) * len(stock_ids)
+            qty_label = f"{qty} وحدة لكل صف"
         if not messagebox.askyesno("تأكيد التحويل",
-                                   f"تحويل {qty} وحدة إلى المخزن {dest_wh} / العبوة {dest_pkg}؟",
+                                   f"تحويل {qty_label} من {len(stock_ids)} صف إلى المخزن {dest_wh} / العبوة {dest_pkg}؟\n"
+                                   f"إجمالي الكمية المتوقع: {total_qty}",
                                    parent=self):
             return
         try:
-            self.db.transfer_stock(stock_id, qty, dest_wh, dest_pkg)
-            show_toast(self, f"تم التحويل بنجاح ({qty} وحدة)")
+            moved = 0
+            catalog_moved = 0
+            errors = []
+            for stock_id in stock_ids:
+                try:
+                    move_qty = qty
+                    if move_qty is None:
+                        row = self.db.conn.execute(
+                            "SELECT count FROM stocks WHERE id = ?",
+                            (int(stock_id),),
+                        ).fetchone()
+                        move_qty = int((row["count"] if row else 0) or 0)
+                    self.db.transfer_stock(stock_id, int(move_qty), dest_wh, dest_pkg)
+                    if int(move_qty or 0) > 0:
+                        moved += int(move_qty)
+                    else:
+                        catalog_moved += 1
+                except Exception as ex:
+                    errors.append(f"#{stock_id}: {ex}")
             self._load_source()
+            if errors:
+                raise RuntimeError("\n".join(errors))
+            if catalog_moved and moved:
+                show_toast(self, f"تم التحويل بنجاح ({moved} وحدة، {catalog_moved} تعريف)")
+            elif catalog_moved:
+                show_toast(self, f"تم تحويل {catalog_moved} تعريف بنجاح")
+            else:
+                show_toast(self, f"تم التحويل بنجاح ({moved} وحدة)")
+            self.transfer_qty.delete(0, tk.END)
         except Exception as ex:
             messagebox.showerror("فشل التحويل", str(ex), parent=self)
 
@@ -15260,12 +17048,13 @@ class BranchInventoryQueueWindow(tk.Toplevel):
         ttk.Button(btns, text="تحديث", command=self._refresh).pack(side=tk.TOP, fill=tk.X, pady=2)
         ttk.Button(btns, text="إسناد للمخزون", command=self._assign_selected).pack(side=tk.TOP, fill=tk.X, pady=2)
         ttk.Button(btns, text="تحويل إلى فرع", command=self._reroute_selected).pack(side=tk.TOP, fill=tk.X, pady=2)
+        ttk.Button(btns, text="إرجاع للمرسل", command=self._return_selected_to_sender).pack(side=tk.TOP, fill=tk.X, pady=2)
         ttk.Button(btns, text="إتلاف / معيب", command=self._discard_selected).pack(side=tk.TOP, fill=tk.X, pady=2)
 
         wrap = ttk.Frame(self)
         wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         cols = ("id", "kind", "source", "target", "type", "school", "color", "size", "qty", "price", "status", "note")
-        self._tree = ttk.Treeview(wrap, columns=cols, show="headings")
+        self._tree = ttk.Treeview(wrap, columns=cols, show="headings", selectmode="extended")
         for col, txt, w in [
             ("id", "#", 55), ("kind", "النوع", 80), ("source", "المرسل", 100), ("target", "الهدف", 100),
             ("type", "الصنف", 150), ("school", "المدرسة", 130), ("color", "اللون", 110), ("size", "المقاس", 70),
@@ -15288,17 +17077,29 @@ class BranchInventoryQueueWindow(tk.Toplevel):
         tk.Label(self, textvariable=self._status_var, bg=_UI["BG"], fg=_UI["TEXT_SEC"]).pack(fill=tk.X, padx=8, pady=(0, 8))
 
     def _selected_queue_id(self) -> Optional[int]:
-        sel = self._tree.selection()
-        if not sel:
-            return None
-        return parse_int_text(sel[0])
+        ids = self._selected_queue_ids()
+        return ids[0] if ids else None
+
+    def _selected_queue_ids(self) -> List[int]:
+        out: List[int] = []
+        for iid in self._tree.selection():
+            queue_id = parse_int_text(iid)
+            if queue_id is not None:
+                out.append(int(queue_id))
+        return out
+
+    def _selected_queue_rows(self) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for queue_id in self._selected_queue_ids():
+            row = self.db.get_branch_inventory_queue_item(queue_id)
+            if row:
+                rows.append(row)
+        return rows
 
     def _load_selected_defaults(self):
-        queue_id = self._selected_queue_id()
-        row = self.db.get_branch_inventory_queue_item(queue_id) if queue_id is not None else None
+        selected_rows = self._selected_queue_rows()
+        row = selected_rows[0] if len(selected_rows) == 1 else None
         names = self.db.list_known_pos_device_names()
-        if row:
-            names = [n for n in names if n != row.get("source_device")]
         ui_names = [branch_display_name(n) for n in names]
         ui_to_dev = {branch_display_name(n): n for n in names}
         self._target_ui_to_dev = ui_to_dev
@@ -15306,8 +17107,13 @@ class BranchInventoryQueueWindow(tk.Toplevel):
 
         self._set_next_package_for_selected_warehouse(force=False)
 
-        req = branch_display_name(row.get("requested_target_device")) if row else ""
-        if row and req in ui_names:
+        requested = {
+            str(r.get("requested_target_device") or "").strip()
+            for r in selected_rows
+            if str(r.get("requested_target_device") or "").strip()
+        }
+        req = branch_display_name(next(iter(requested))) if len(requested) == 1 else ""
+        if req in ui_names:
             self._target_var.set(req)
         elif self._target_var.get() not in ui_names:
             self._target_var.set(ui_names[0] if ui_names else "")
@@ -15349,9 +17155,9 @@ class BranchInventoryQueueWindow(tk.Toplevel):
             self._pkg_var.set("1")
 
     def _assign_selected(self):
-        queue_id = self._selected_queue_id()
-        if queue_id is None:
-            messagebox.showwarning("تنبيه", "اختر عنصرًا من القائمة أولاً.", parent=self)
+        queue_ids = self._selected_queue_ids()
+        if not queue_ids:
+            messagebox.showwarning("تنبيه", "اختر عنصرًا واحدًا أو أكثر من القائمة أولاً.", parent=self)
             return
         try:
             w = self._selected_warehouse_no()
@@ -15360,8 +17166,16 @@ class BranchInventoryQueueWindow(tk.Toplevel):
             messagebox.showerror("بيانات غير صالحة", "أدخل رقم مخزن وعبوة صحيحين.", parent=self)
             return
         try:
-            self.db.assign_branch_inventory_queue_item(queue_id, w, p, self._note_var.get())
-            show_toast(self, "تم إسناد العنصر إلى المخزون")
+            errors = []
+            for queue_id in queue_ids:
+                try:
+                    self.db.assign_branch_inventory_queue_item(queue_id, w, p, self._note_var.get())
+                except Exception as ex:
+                    errors.append(f"#{queue_id}: {ex}")
+            if errors:
+                self._refresh()
+                raise RuntimeError("\n".join(errors))
+            show_toast(self, f"تم إسناد {len(queue_ids)} عنصر إلى المخزون")
             self._note_var.set("")
             self._pkg_var.set("")
             self._refresh()
@@ -15369,24 +17183,32 @@ class BranchInventoryQueueWindow(tk.Toplevel):
             messagebox.showerror("فشل الإسناد", str(ex), parent=self)
 
     def _discard_selected(self):
-        queue_id = self._selected_queue_id()
-        if queue_id is None:
-            messagebox.showwarning("تنبيه", "اختر عنصرًا من القائمة أولاً.", parent=self)
+        queue_ids = self._selected_queue_ids()
+        if not queue_ids:
+            messagebox.showwarning("تنبيه", "اختر عنصرًا واحدًا أو أكثر من القائمة أولاً.", parent=self)
             return
-        if not messagebox.askyesno("تأكيد", "سيتم إتلاف هذا العنصر ولن يدخل المخزون. هل أنت متأكد؟", parent=self):
+        if not messagebox.askyesno("تأكيد", f"سيتم إتلاف {len(queue_ids)} عنصر ولن تدخل المخزون. هل أنت متأكد؟", parent=self):
             return
         try:
-            self.db.discard_branch_inventory_queue_item(queue_id, self._note_var.get())
-            show_toast(self, "تم إتلاف / تعليم العنصر كمعيب")
+            errors = []
+            for queue_id in queue_ids:
+                try:
+                    self.db.discard_branch_inventory_queue_item(queue_id, self._note_var.get())
+                except Exception as ex:
+                    errors.append(f"#{queue_id}: {ex}")
+            if errors:
+                self._refresh()
+                raise RuntimeError("\n".join(errors))
+            show_toast(self, f"تم إتلاف / تعليم {len(queue_ids)} عنصر كمعيب")
             self._note_var.set("")
             self._refresh()
         except Exception as ex:
             messagebox.showerror("فشل الإتلاف", str(ex), parent=self)
 
     def _reroute_selected(self):
-        queue_id = self._selected_queue_id()
-        if queue_id is None:
-            messagebox.showwarning("تنبيه", "اختر عنصرًا من القائمة أولاً.", parent=self)
+        queue_ids = self._selected_queue_ids()
+        if not queue_ids:
+            messagebox.showwarning("تنبيه", "اختر عنصرًا واحدًا أو أكثر من القائمة أولاً.", parent=self)
             return
         target_ui = (self._target_var.get() or "").strip()
         target = getattr(self, "_target_ui_to_dev", {}).get(target_ui, target_ui)
@@ -15394,12 +17216,48 @@ class BranchInventoryQueueWindow(tk.Toplevel):
             messagebox.showerror("بيانات ناقصة", "اختر الفرع الهدف أولاً.", parent=self)
             return
         try:
-            self.db.reroute_branch_inventory_queue_item(queue_id, target, self._note_var.get())
-            show_toast(self, f"تم تحويل العنصر إلى الفرع {branch_display_name(target)}")
+            errors = []
+            for queue_id in queue_ids:
+                try:
+                    self.db.reroute_branch_inventory_queue_item(queue_id, target, self._note_var.get())
+                except Exception as ex:
+                    errors.append(f"#{queue_id}: {ex}")
+            if errors:
+                self._refresh()
+                raise RuntimeError("\n".join(errors))
+            show_toast(self, f"تم تحويل {len(queue_ids)} عنصر إلى الفرع {branch_display_name(target)}")
             self._note_var.set("")
             self._refresh()
         except Exception as ex:
             messagebox.showerror("فشل التحويل", str(ex), parent=self)
+
+    def _return_selected_to_sender(self):
+        rows = self._selected_queue_rows()
+        if not rows:
+            messagebox.showwarning("تنبيه", "اختر عنصرًا واحدًا أو أكثر من القائمة أولاً.", parent=self)
+            return
+        if not messagebox.askyesno("تأكيد", f"سيتم إرجاع {len(rows)} عنصر إلى الفرع المرسل لكل عنصر. هل أنت متأكد؟", parent=self):
+            return
+        try:
+            errors = []
+            for row in rows:
+                queue_id = int(row.get("id") or 0)
+                target = str(row.get("source_device") or "").strip()
+                if not target:
+                    errors.append(f"#{queue_id}: لا يوجد فرع مرسل.")
+                    continue
+                try:
+                    self.db.reroute_branch_inventory_queue_item(queue_id, target, self._note_var.get())
+                except Exception as ex:
+                    errors.append(f"#{queue_id}: {ex}")
+            if errors:
+                self._refresh()
+                raise RuntimeError("\n".join(errors))
+            show_toast(self, f"تم إرجاع {len(rows)} عنصر إلى الفروع المرسلة")
+            self._note_var.set("")
+            self._refresh()
+        except Exception as ex:
+            messagebox.showerror("فشل الإرجاع", str(ex), parent=self)
 
 # ------------------- Branch Stock View (Phase 3) -------------------
 
@@ -15412,6 +17270,7 @@ class BranchStockWindow(tk.Toplevel):
     Includes a "مزامنة الآن" shortcut so the user can refresh without
     leaving the window.
     """
+    LOW_STOCK_THRESHOLD = 15
 
     def __init__(self, master, db: SqliteDatabase):
         super().__init__(master)
@@ -15419,6 +17278,12 @@ class BranchStockWindow(tk.Toplevel):
         self.title("مخزون الفروع")
         self.geometry("1000x620")
         self.configure(bg=_UI["BG"])
+        self._show_zero_var = tk.BooleanVar(value=False)
+        self._show_low_stock_var = tk.BooleanVar(value=False)
+        self._all_rows: List[Tuple[str, str, str, str, float, int]] = []
+        self._load_generation = 0
+        self._filter_job: Optional[str] = None
+        self._render_job: Optional[str] = None
 
         header = tk.Frame(self, bg=_UI["ACCENT"], height=44)
         header.pack(fill=tk.X)
@@ -15457,6 +17322,10 @@ class BranchStockWindow(tk.Toplevel):
                    command=self._run_sync_and_reload).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="إصلاح مواصفات…",
                    command=self._repair_selected_spec).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="تصحيح تصنيف كمية…",
+                   command=self._reclassify_selected_quantity).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="حذف تعريف…",
+                   command=self._delete_selected_branch_catalog).pack(side=tk.LEFT, padx=4)
 
         # Filter row
         filt = ttk.LabelFrame(self, text="تصنيف")
@@ -15487,29 +17356,48 @@ class BranchStockWindow(tk.Toplevel):
             w.grid(row=0, column=i, padx=6, pady=(6, 0), sticky="ew")
             filt.columnconfigure(i, weight=1)
             for ev in ("<<ComboboxSelected>>", "<KeyRelease>"):
-                w.cb.bind(ev, lambda e: (self._refresh_filter_values(), self._apply_filter()), add="+")
+                w.cb.bind(ev, lambda e: self._schedule_filter_refresh(), add="+")
 
         ttk.Label(filt, text="بحث:").grid(row=1, column=3, sticky="e", padx=(6, 4), pady=(6, 6))
         self._filter_var = tk.StringVar()
         ent = ttk.Entry(filt, textvariable=self._filter_var, width=28)
         ent.grid(row=1, column=2, sticky="ew", padx=6, pady=(6, 6))
-        self._filter_var.trace_add("write", lambda *_: self._apply_filter())
+        self._filter_var.trace_add("write", lambda *_: self._schedule_filter_refresh(refresh_values=False))
 
         btns = ttk.Frame(filt)
         btns.grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(6, 6))
         ttk.Button(btns, text="بحث", command=self._apply_filter).pack(side=tk.LEFT)
         ttk.Button(btns, text="مسح", command=self._clear_filters).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btns, text="طباعة جدول المقاسات", command=self._print_size_sheets).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btns, text="تعديل نطاقات المقاسات…", command=self._edit_branch_size_profile_dialog).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btns, text="تعيين بروفايل سعر…", command=self._edit_branch_price_profile_dialog).pack(side=tk.LEFT, padx=8)
+        _cz = ttk.Checkbutton(
+            btns,
+            text="إظهار الكميات الصفرية",
+            variable=self._show_zero_var,
+            command=lambda: (self._refresh_filter_values(), self._apply_filter()),
+        )
+        _cz.pack(side=tk.LEFT, padx=8)
+        ToolTip(_cz, "إظهار أو إخفاء صفوف الفرع التي كميتها صفر")
+        _low = ttk.Checkbutton(
+            btns,
+            text="إظهار المخزون المنخفض",
+            variable=self._show_low_stock_var,
+            command=lambda: (self._refresh_filter_values(), self._apply_filter()),
+        )
+        _low.pack(side=tk.LEFT, padx=8)
+        ToolTip(_low, f"إظهار صفوف الفرع التي كميتها أقل من {self.LOW_STOCK_THRESHOLD}")
 
         # Table
-        cols = ("item_type", "school", "color", "size", "unit_price", "count", "value")
+        cols = ("item_type", "school", "color", "size", "unit_price", "count", "warehouse_qty", "value")
         headers = {
             "item_type": "النوع", "school": "المدرسة", "color": "اللون",
             "size": "المقاس", "unit_price": "السعر", "count": "الكمية",
-            "value": "القيمة",
+            "warehouse_qty": "كمية المخزن", "value": "القيمة",
         }
         widths = {
             "item_type": 120, "school": 110, "color": 90, "size": 70,
-            "unit_price": 80, "count": 70, "value": 90,
+            "unit_price": 80, "count": 70, "warehouse_qty": 90, "value": 90,
         }
         self._tree = ttk.Treeview(
             self, columns=cols, show="headings", height=20,
@@ -15518,6 +17406,9 @@ class BranchStockWindow(tk.Toplevel):
             self._tree.heading(c, text=headers[c])
             self._tree.column(c, width=widths[c], anchor="center")
         self._tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+        self._tree.tag_configure("zero_stock", background="#f3f4f6", foreground="#6b7280")
+        self._tree.tag_configure("low_stock", background="#fff7ed", foreground="#9a3412")
+        self._tree.tag_configure("warehouse_available", background="#dcfce7", foreground="#166534")
         apply_zebra_tags(self._tree)
         _bind_mousewheel(self._tree)
 
@@ -15591,7 +17482,16 @@ class BranchStockWindow(tk.Toplevel):
     def _reload_stock(self):
         pick = (self._device_var.get() or "").strip()
         name = getattr(self, "_device_ui_to_raw", {}).get(pick, pick)
+        self._load_generation += 1
+        generation = self._load_generation
+        if self._render_job is not None:
+            try:
+                self.after_cancel(self._render_job)
+            except Exception:
+                pass
+            self._render_job = None
         self._tree.delete(*self._tree.get_children())
+        self._all_rows = []
         if not name:
             return
         meta = self._metas.get(name)
@@ -15604,37 +17504,83 @@ class BranchStockWindow(tk.Toplevel):
         else:
             self._meta_var.set("لا توجد لقطة مخزون بعد لهذا الفرع")
 
-        try:
-            source_name = getattr(self, "_device_source_by_raw", {}).get(name, name)
-            rows = self.db.conn.execute(
-                """
-                SELECT item_type, school, color, size, unit_price, count
-                  FROM pos_stocks_mirror
-                 WHERE source_device = ?
-                 ORDER BY school, item_type, color, size
-                """,
-                (source_name,),
-            ).fetchall()
-        except Exception:
-            rows = []
+        source_name = getattr(self, "_device_source_by_raw", {}).get(name, name)
+        self._status_var.set("جارٍ تحميل مخزون الفرع...")
 
-        self._all_rows = [
-            (r[0], r[1], r[2], r[3], float(r[4] or 0), int(r[5] or 0))
-            for r in rows
-        ]
-        self._all_rows.sort(key=lambda r: (
-            str(r[1] or "").casefold(),
-            warehouse_item_sort_key(r[0], r[2]),
-            warehouse_size_sort_key(r[3]),
-        ))
-        self._refresh_filter_values()
-        self._apply_filter()
+        def worker() -> None:
+            started = time.time()
+            out: List[Tuple[str, str, str, str, float, int]] = []
+            err = ""
+            try:
+                conn = sqlite3.connect(self.db.path, timeout=30.0)
+                try:
+                    conn.row_factory = sqlite3.Row
+                    conn.execute("PRAGMA busy_timeout=30000;")
+                    conn.execute("PRAGMA query_only=ON;")
+                    rows = conn.execute(
+                        """
+                        SELECT item_type, school, color, size, unit_price, count
+                          FROM pos_stocks_mirror
+                         WHERE source_device = ?
+                         ORDER BY school, item_type, color, size
+                        """,
+                        (source_name,),
+                    ).fetchall()
+                finally:
+                    conn.close()
+                out = [
+                    (r[0], r[1], r[2], r[3], float(r[4] or 0), int(r[5] or 0))
+                    for r in rows
+                ]
+                out.sort(key=lambda r: (
+                    str(r[1] or "").casefold(),
+                    warehouse_item_sort_key(r[0], r[2]),
+                    warehouse_size_sort_key(r[3]),
+                ))
+            except Exception as ex:
+                err = str(ex)
+
+            def done() -> None:
+                if generation != self._load_generation:
+                    return
+                self._all_rows = out
+                if err:
+                    self._status_var.set(f"فشل تحميل مخزون الفرع: {err}")
+                else:
+                    self._status_var.set(f"تم تحميل {len(out)} صف")
+                try:
+                    if logging_setup is not None:  # type: ignore[name-defined]
+                        logging_setup.log_event(
+                            "ui.branch_stock.load",
+                            source_device=source_name,
+                            rows=len(out),
+                            elapsed_ms=int((time.time() - started) * 1000),
+                            error=err or None,
+                        )  # type: ignore[union-attr]
+                except Exception:
+                    pass
+                self._refresh_filter_values()
+                self._apply_filter()
+
+            try:
+                self.after(0, done)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _branch_distinct(self, field: str, constraints: Dict[str, Any]) -> List[str]:
         idx_map = {"item_type": 0, "school": 1, "color": 2, "size": 3}
         field_idx = idx_map[field]
         values = set()
+        show_zero = bool(self._show_zero_var.get()) or bool(self._show_low_stock_var.get())
+        show_low = bool(self._show_low_stock_var.get())
         for row in getattr(self, "_all_rows", []):
+            count = int(row[5] or 0)
+            if show_low and count >= self.LOW_STOCK_THRESHOLD:
+                continue
+            if not show_zero and count == 0:
+                continue
             if constraints.get("item_type") and row[0] != constraints["item_type"]:
                 continue
             if constraints.get("school") and row[1] != constraints["school"]:
@@ -15646,6 +17592,27 @@ class BranchStockWindow(tk.Toplevel):
             val = str(row[field_idx] or "").strip()
             if val:
                 values.add(val)
+        if (
+            field == "size"
+            and show_zero
+            and constraints.get("item_type")
+            and constraints.get("school")
+            and constraints.get("color")
+        ):
+            try:
+                _branch_device, source_name = self._current_branch_names()
+                catalog_rows = self._branch_rows_for_size_profile_catalog(
+                    source_name,
+                    str(constraints.get("item_type") or "").strip(),
+                    str(constraints.get("school") or "").strip(),
+                    str(constraints.get("color") or "").strip(),
+                )
+                for catalog_row in catalog_rows:
+                    size_value = str(catalog_row.get("size") or "").strip()
+                    if size_value:
+                        values.add(size_value)
+            except Exception:
+                pass
         if field == "item_type":
             return sort_warehouse_item_type_values(values)
         return sorted(values)
@@ -15656,6 +17623,23 @@ class BranchStockWindow(tk.Toplevel):
                 w.refresh_values()
             except Exception:
                 pass
+
+    def _schedule_filter_refresh(self, refresh_values: bool = True):
+        if self._filter_job is not None:
+            try:
+                self.after_cancel(self._filter_job)
+            except Exception:
+                pass
+        self._filter_job = self.after(
+            120,
+            lambda: self._run_scheduled_filter_refresh(refresh_values),
+        )
+
+    def _run_scheduled_filter_refresh(self, refresh_values: bool):
+        self._filter_job = None
+        if refresh_values:
+            self._refresh_filter_values()
+        self._apply_filter()
 
     def _clear_filters(self):
         for w in (self._flt_type, self._flt_school, self._flt_color, self._flt_size):
@@ -15668,6 +17652,102 @@ class BranchStockWindow(tk.Toplevel):
         self._apply_filter()
 
     def _selected_branch_row(self) -> Optional[Dict[str, Any]]:
+        rows = self._selected_branch_rows()
+        return rows[0] if rows else None
+
+    def _selected_branch_rows(self) -> List[Dict[str, Any]]:
+        selected: List[Dict[str, Any]] = []
+        for iid in list(self._tree.selection() or []):
+            vals = self._tree.item(iid, "values") or ()
+            if len(vals) < 4:
+                continue
+            selected.append({
+                "item_type": str(vals[0] or "").strip(),
+                "school": str(vals[1] or "").strip(),
+                "color": str(vals[2] or "").strip(),
+                "size": str(vals[3] or "").strip(),
+                "unit_price": (parse_float_text(vals[4], 0.0) or 0.0) if len(vals) > 4 else 0.0,
+                "count": (parse_int_text(vals[5], 0) or 0) if len(vals) > 5 else 0,
+            })
+        return [
+            row for row in selected
+            if all(str(row.get(k) or "").strip() for k in ("item_type", "school", "color", "size"))
+        ]
+
+    @staticmethod
+    def _distinct_filter_rows(rows: Sequence[Dict[str, Any]], fields: Sequence[str]) -> List[Dict[str, str]]:
+        out: List[Dict[str, str]] = []
+        seen = set()
+        for row in rows or []:
+            filt: Dict[str, str] = {}
+            for field in fields:
+                value = str(row.get(field) or "").strip()
+                if field == "size":
+                    value = _normalize_size_label(_strip_digit_marks(value))
+                if value:
+                    filt[field] = value
+            if len(filt) != len(fields):
+                continue
+            key = tuple((field, filt[field].casefold()) for field in fields)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(filt)
+        return out
+
+    @staticmethod
+    def _common_selected_value(rows: Sequence[Dict[str, Any]], field: str) -> str:
+        values = {str(row.get(field) or "").strip() for row in rows if str(row.get(field) or "").strip()}
+        return next(iter(values)) if len(values) == 1 else ""
+
+    @staticmethod
+    def _spec_rename_payloads_for_selected_rows(
+        rows: Sequence[Dict[str, Any]],
+        *,
+        new_item_type: str = "",
+        new_school: str = "",
+        new_color: str = "",
+        new_size: str = "",
+        old_item_type: str = "",
+        old_school: str = "",
+        old_color: str = "",
+        old_size: str = "",
+    ) -> List[Dict[str, Any]]:
+        payloads: List[Dict[str, Any]] = []
+        seen = set()
+        for row in rows or []:
+            old_spec = {
+                "item_type": str(old_item_type or row.get("item_type") or "").strip(),
+                "school": str(old_school or row.get("school") or "").strip(),
+                "color": str(old_color or row.get("color") or "").strip(),
+                "size": str(old_size or row.get("size") or "").strip(),
+            }
+            new_spec = {
+                "item_type": str(new_item_type or old_spec["item_type"]).strip(),
+                "school": str(new_school or old_spec["school"]).strip(),
+                "color": str(new_color or old_spec["color"]).strip(),
+                "size": str(new_size or old_spec["size"]).strip(),
+            }
+            if not all(old_spec.values()) or not all(new_spec.values()) or old_spec == new_spec:
+                continue
+            key = (
+                tuple(old_spec[k].casefold() for k in ("item_type", "school", "color", "size")),
+                tuple(new_spec[k].casefold() for k in ("item_type", "school", "color", "size")),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            payloads.append({
+                "old_spec": old_spec,
+                "new_spec": new_spec,
+                "changed_fields": [
+                    fld for fld in ("item_type", "school", "color", "size")
+                    if old_spec.get(fld) != new_spec.get(fld)
+                ],
+            })
+        return payloads
+
+    def _selected_branch_row_legacy(self) -> Optional[Dict[str, Any]]:
         sel = self._tree.selection()
         if not sel:
             return None
@@ -15679,13 +17759,575 @@ class BranchStockWindow(tk.Toplevel):
             "school": str(vals[1] or "").strip(),
             "color": str(vals[2] or "").strip(),
             "size": str(vals[3] or "").strip(),
+            "unit_price": (parse_float_text(vals[4], 0.0) or 0.0) if len(vals) > 4 else 0.0,
+            "count": (parse_int_text(vals[5], 0) or 0) if len(vals) > 5 else 0,
         }
 
-    def _repair_selected_spec(self):
-        old_spec = self._selected_branch_row()
-        if not old_spec:
+    def _current_branch_names(self) -> Tuple[str, str]:
+        pick = (self._device_var.get() or "").strip()
+        branch_device = getattr(self, "_device_ui_to_raw", {}).get(pick, pick)
+        source_name = getattr(self, "_device_source_by_raw", {}).get(branch_device, branch_device)
+        return str(branch_device or "").strip(), str(source_name or "").strip()
+
+    def _selected_branch_profile_targets(self, *, require_single: bool = False) -> Optional[List[Tuple[str, str, str]]]:
+        targets = set()
+        selected = list(self._tree.selection() or [])
+        if selected:
+            for iid in selected:
+                vals = self._tree.item(iid, "values") or ()
+                if len(vals) < 3:
+                    continue
+                item_type = str(vals[0] or "").strip()
+                school = str(vals[1] or "").strip()
+                color = str(vals[2] or "").strip()
+                if item_type and school and color:
+                    targets.add((item_type, school, color))
+        else:
+            item_type = (self._flt_type.get() or "").strip()
+            school = (self._flt_school.get() or "").strip()
+            color = (self._flt_color.get() or "").strip()
+            if item_type and school and color:
+                targets.add((item_type, school, color))
+
+        if not targets:
+            messagebox.showwarning(
+                "حدد الصنف",
+                "حدد صفوفاً من الجدول أو اختر (النوع، المدرسة، اللون) من الفلاتر أولاً.",
+                parent=self,
+            )
+            return None
+        if require_single and len(targets) != 1:
+            messagebox.showwarning(
+                "تحديد غير صالح",
+                "تعديل نطاقات المقاسات يحتاج نوع/مدرسة/لون واحد فقط.",
+                parent=self,
+            )
+            return None
+        return sorted(targets, key=lambda x: (x[1].casefold(), x[0].casefold(), x[2].casefold()))
+
+    def _selected_branch_profile_specs(self) -> Optional[List[Dict[str, Any]]]:
+        specs: List[Dict[str, Any]] = []
+        seen = set()
+        selected = list(self._tree.selection() or [])
+        if not selected:
+            item_type = (self._flt_type.get() or "").strip()
+            school = (self._flt_school.get() or "").strip()
+            color = (self._flt_color.get() or "").strip()
+            if item_type and school and color:
+                selected = list(self._tree.get_children() or [])
+        for iid in selected:
+            vals = self._tree.item(iid, "values") or ()
+            if len(vals) < 5:
+                continue
+            spec = {
+                "item_type": str(vals[0] or "").strip(),
+                "school": str(vals[1] or "").strip(),
+                "color": str(vals[2] or "").strip(),
+                "size": _normalize_size_label(_strip_digit_marks(vals[3])),
+                "unit_price": parse_float_text(vals[4]) or 0.0,
+            }
+            if not all(spec.get(k) for k in ("item_type", "school", "color", "size")):
+                continue
+            key = tuple(str(spec[k]).casefold() for k in ("item_type", "school", "color", "size"))
+            if key in seen:
+                continue
+            seen.add(key)
+            specs.append(spec)
+        if not specs:
+            messagebox.showwarning(
+                "حدد صفوفاً",
+                "اختر الصفوف التي تريد تطبيق البروفايل عليها، أو اختر النوع والمدرسة واللون من الفلاتر لتطبيقه على النطاق المعروض.",
+                parent=self,
+            )
+            return None
+        return specs
+
+    def _branch_rows_for_size_profile_catalog(
+        self,
+        source_name: str,
+        item_type: str,
+        school: str,
+        color: str,
+    ) -> List[Dict[str, Any]]:
+        profile = self.db.get_size_profile(item_type, school, color)
+        labels = size_labels_from_profile_tuple(profile) if profile else []
+        if not labels:
+            return []
+        price_by_size: Dict[str, float] = {}
+        try:
+            rows = self.db.conn.execute(
+                """
+                SELECT size, unit_price
+                  FROM pos_stocks_mirror
+                 WHERE source_device = ?
+                   AND item_type = ?
+                   AND school = ?
+                   AND color = ?
+                """,
+                (source_name, item_type, school, color),
+            ).fetchall()
+            for row in rows:
+                sz = _normalize_size_label(row["size"])
+                if sz and sz not in price_by_size:
+                    price_by_size[sz] = float(row["unit_price"] or 0)
+        except Exception:
+            pass
+
+        out = []
+        assigned_profile_id = None
+        try:
+            assignment = self.db.get_price_profile_assignment(item_type, school, color) or {}
+            assigned_profile_id = assignment.get("profile_id")
+        except Exception:
+            assigned_profile_id = None
+        for label in labels:
+            sz = _normalize_size_label(label)
+            price = None
+            if assigned_profile_id:
+                try:
+                    price = self.db.get_price_profile_price(int(assigned_profile_id), item_type, sz)
+                except Exception:
+                    price = None
+            if price is None:
+                price = price_by_size.get(sz)
+            if price is None:
+                price = self.db.get_effective_price(item_type, school, color, sz)
+            out.append({
+                "item_type": item_type,
+                "school": school,
+                "color": color,
+                "size": sz,
+                "unit_price": float(price or 0),
+            })
+        return out
+
+    def _edit_branch_size_profile_dialog(self):
+        branch_device, source_name = self._current_branch_names()
+        if not branch_device or not source_name:
+            messagebox.showwarning("حدد الفرع", "اختر فرع POS أولاً.", parent=self)
+            return
+        targets = self._selected_branch_profile_targets(require_single=True)
+        if not targets:
+            return
+        item_type, school, color = targets[0]
+
+        dlg = tk.Toplevel(self)
+        dlg.title("تعديل نطاقات المقاسات")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frm, text=f"{branch_display_name(branch_device)}: {item_type} / {school} / {color}", font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 10)
+        )
+
+        r1_var = tk.StringVar()
+        r2_var = tk.StringVar()
+        has_alpha_var = tk.BooleanVar(value=False)
+        ttk.Label(frm, text="النطاق الأول").grid(row=1, column=0, sticky="e", padx=4, pady=4)
+        ttk.Combobox(frm, textvariable=r1_var, values=[""] + NUMERIC_RANGE_LABELS, state="readonly", width=14).grid(row=1, column=1, sticky="w", padx=4, pady=4)
+        ttk.Label(frm, text="النطاق الثاني").grid(row=2, column=0, sticky="e", padx=4, pady=4)
+        ttk.Combobox(frm, textvariable=r2_var, values=[""] + NUMERIC_RANGE_LABELS, state="readonly", width=14).grid(row=2, column=1, sticky="w", padx=4, pady=4)
+        ttk.Checkbutton(frm, text="تفعيل المقاسات بالحروف (S / M / L ...)", variable=has_alpha_var).grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=4, pady=(4, 8)
+        )
+
+        profile = self.db.get_size_profile(item_type, school, color)
+        if profile:
+            r1s, r1e, r2s, r2e, has_alpha = profile
+            if r1s is not None and r1e is not None:
+                r1_var.set(f"{r1s} → {r1e}")
+            if r2s is not None and r2e is not None:
+                r2_var.set(f"{r2s} → {r2e}")
+            has_alpha_var.set(bool(has_alpha))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=4, column=0, columnspan=3, sticky="e", pady=(10, 0))
+
+        def _save():
+            try:
+                r1s, r1e = parse_numeric_range_label(r1_var.get())
+                r2s, r2e = parse_numeric_range_label(r2_var.get())
+                self.db.upsert_size_profile(
+                    item_type,
+                    school,
+                    color,
+                    r1_start=r1s,
+                    r1_end=r1e,
+                    r2_start=r2s,
+                    r2_end=r2e,
+                    has_alpha=has_alpha_var.get(),
+                )
+                rows = self._branch_rows_for_size_profile_catalog(source_name, item_type, school, color)
+                sent = self.db.send_catalog_rows_to_pos(
+                    branch_device,
+                    rows,
+                    note="Size profile catalog sync",
+                ) if rows else 0
+                dlg.destroy()
+                show_toast(self, f"تم حفظ نطاق المقاسات وتجهيز {sent} تعريف للفرع")
+                self._reload_stock()
+            except Exception as ex:
+                messagebox.showerror("خطأ", str(ex), parent=dlg)
+
+        ttk.Button(btns, text="إلغاء", command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="حفظ وإرسال للفرع", command=_save).pack(side=tk.RIGHT, padx=6)
+
+    def _edit_branch_price_profile_dialog(self):
+        branch_device, source_name = self._current_branch_names()
+        if not branch_device or not source_name:
+            messagebox.showwarning("حدد الفرع", "اختر فرع POS أولاً.", parent=self)
+            return
+        targets = self._selected_branch_profile_targets(require_single=False)
+        if not targets:
+            return
+        profiles = self.db.list_price_profiles()
+        if not profiles:
+            if messagebox.askyesno(
+                "بروفايلات الأسعار",
+                "لا توجد بروفايلات أسعار بعد. هل تريد فتح نافذة بروفايلات الأسعار الآن؟",
+                parent=self,
+            ):
+                PriceProfileManagerWindow(self, self.db)
+            return
+
+        profile_names = [""] + [str(p.get("name") or "").strip() for p in profiles if str(p.get("name") or "").strip()]
+        profile_map = {str(p.get("name") or "").strip(): int(p["id"]) for p in profiles if str(p.get("name") or "").strip()}
+        current_names = set()
+        for item_type, school, color in targets:
+            current = self.db.get_price_profile_assignment(item_type, school, color) or {}
+            name = str(current.get("profile_name") or "").strip()
+            if name:
+                current_names.add(name)
+
+        dlg = tk.Toplevel(self)
+        dlg.title("تعيين بروفايل سعر للفرع")
+        dlg.transient(self)
+        dlg.grab_set()
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+        target_text = f"{branch_display_name(branch_device)} - {len(targets)} نوع/لون محدد"
+        if len(targets) == 1:
+            target_text = f"{branch_display_name(branch_device)}: {targets[0][0]} / {targets[0][1]} / {targets[0][2]}"
+        ttk.Label(frm, text=target_text, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 10))
+        selected_name = tk.StringVar(value=next(iter(current_names)) if len(current_names) == 1 else "")
+        ttk.Label(frm, text="بروفايل السعر").pack(anchor="w")
+        ttk.Combobox(frm, textvariable=selected_name, state="readonly", values=profile_names).pack(fill=tk.X, pady=(4, 8))
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill=tk.X, pady=(8, 0))
+
+        def _save():
+            label = (selected_name.get() or "").strip()
+            profile_id = profile_map.get(label)
+            if not profile_id:
+                messagebox.showwarning("اختر بروفايل", "اختر بروفايل سعر قبل الحفظ.", parent=dlg)
+                return
+            try:
+                profile_rows = self.db.price_profile_catalog_rows_for_targets(profile_id, targets)
+                if not profile_rows:
+                    messagebox.showwarning(
+                        "بروفايل فارغ",
+                        "لا توجد أسعار محفوظة في هذا البروفايل للأصناف المحددة.",
+                        parent=dlg,
+                    )
+                    return
+                for item_type, school, color in targets:
+                    self.db.assign_price_profile(item_type, school, color, profile_id)
+                sent = 0
+                for row in profile_rows:
+                    price = float(row.get("unit_price") or 0)
+                    event_uuids = self.db.emit_price_update_sync_events(
+                        filters={
+                            "item_type": row.get("item_type"),
+                            "school": row.get("school"),
+                            "color": row.get("color"),
+                            "size": row.get("size"),
+                        },
+                        new_price=float(price),
+                        note=f"Branch inventory price profile sync: {label}",
+                        sync_mode="selected-pos",
+                        sync_pos_devices=[branch_device],
+                        audit_mode="branch-inventory-selected-price-profile",
+                        allow_catalog_definition=True,
+                    )
+                    sent += len(event_uuids)
+                dlg.destroy()
+                show_toast(
+                    self,
+                    f"تم ربط البروفايل وتجهيز النطاق الكامل ({len(profile_rows)} مقاس) للفرع ({sent} حدث سعر)",
+                )
+                self._reload_stock()
+            except Exception as ex:
+                messagebox.showerror("خطأ", str(ex), parent=dlg)
+
+        def _clear():
+            try:
+                for item_type, school, color in targets:
+                    self.db.clear_price_profile_assignment(item_type, school, color)
+                dlg.destroy()
+                show_toast(self, f"تم مسح ربط السعر من {len(targets)} نوع/لون")
+            except Exception as ex:
+                messagebox.showerror("خطأ", str(ex), parent=dlg)
+
+        ttk.Button(btns, text="إدارة البروفايلات…", command=lambda: PriceProfileManagerWindow(dlg, self.db)).pack(side=tk.LEFT)
+        ttk.Button(btns, text="إلغاء", command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="حفظ وإرسال للفرع", command=_save).pack(side=tk.RIGHT, padx=6)
+        ttk.Button(btns, text="مسح الربط", command=_clear).pack(side=tk.RIGHT, padx=6)
+
+    def _reclassify_selected_quantity(self):
+        source_spec = self._selected_branch_row()
+        if not source_spec:
             messagebox.showwarning("حدد صفاً", "اختر صفاً من مخزون الفرع أولاً.", parent=self)
             return
+        branch_device, source_name = self._current_branch_names()
+        if not branch_device or not source_name:
+            messagebox.showwarning("حدد الفرع", "اختر فرع POS أولاً.", parent=self)
+            return
+        source_count = int(source_spec.get("count") or 0)
+        if source_count <= 0:
+            messagebox.showwarning("كمية غير صالحة", "لا يمكن تصحيح تصنيف صف كميته صفر.", parent=self)
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("تصحيح تصنيف كمية")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            frm,
+            text=f"{branch_display_name(branch_device)}: {source_spec['item_type']} / {source_spec['school']} / {source_spec['color']} / {source_spec['size']} ({source_count})",
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(frm, text="نقل كمية من هذا الصف إلى تصنيف آخر داخل نفس الفرع فقط.").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
+
+        qty_var = tk.StringVar(value=str(source_count))
+        item_var = tk.StringVar(value=str(source_spec.get("item_type") or ""))
+        school_var = tk.StringVar(value=str(source_spec.get("school") or ""))
+        color_var = tk.StringVar(value=str(source_spec.get("color") or ""))
+        size_var = tk.StringVar(value=str(source_spec.get("size") or ""))
+        price_var = tk.StringVar(value="")
+        note_var = tk.StringVar(value="")
+
+        def _values(field: str, constraints: Optional[Dict[str, Any]] = None) -> List[str]:
+            try:
+                vals = self.db.get_distinct_filtered(field, constraints or {})
+            except Exception:
+                vals = []
+            current = {
+                "item_type": item_var.get(),
+                "school": school_var.get(),
+                "color": color_var.get(),
+                "size": size_var.get(),
+            }.get(field, "")
+            if current and current not in vals:
+                vals = [current] + list(vals)
+            return vals
+
+        ttk.Label(frm, text="الكمية:").grid(row=2, column=0, sticky="e", padx=6, pady=4)
+        ttk.Entry(frm, textvariable=qty_var, width=14).grid(row=2, column=1, sticky="w", padx=6, pady=4)
+
+        fields = [
+            ("النوع الجديد:", item_var, "item_type"),
+            ("المدرسة الجديدة:", school_var, "school"),
+            ("اللون الجديد:", color_var, "color"),
+            ("المقاس الجديد:", size_var, "size"),
+        ]
+        combos: Dict[str, ttk.Combobox] = {}
+        for row, (label, var, field) in enumerate(fields, start=3):
+            ttk.Label(frm, text=label).grid(row=row, column=0, sticky="e", padx=6, pady=4)
+            cb = ttk.Combobox(frm, textvariable=var, values=_values(field), width=36)
+            cb.grid(row=row, column=1, sticky="ew", padx=6, pady=4)
+            combos[field] = cb
+
+        ttk.Label(frm, text="السعر الجديد (اختياري):").grid(row=7, column=0, sticky="e", padx=6, pady=4)
+        ttk.Entry(frm, textvariable=price_var, width=14).grid(row=7, column=1, sticky="w", padx=6, pady=4)
+        ttk.Label(frm, text="ملاحظة:").grid(row=8, column=0, sticky="e", padx=6, pady=4)
+        ttk.Entry(frm, textvariable=note_var, width=36).grid(row=8, column=1, sticky="ew", padx=6, pady=4)
+        frm.columnconfigure(1, weight=1)
+
+        def _refresh_targets(*_):
+            constraints = {
+                "item_type": item_var.get() or None,
+                "school": school_var.get() or None,
+                "color": color_var.get() or None,
+            }
+            for field, cb in combos.items():
+                local_constraints = dict(constraints)
+                local_constraints.pop(field, None)
+                if field == "size":
+                    local_constraints = constraints
+                try:
+                    cb["values"] = _values(field, local_constraints)
+                except Exception:
+                    pass
+            if not price_var.get().strip():
+                try:
+                    price = self.db._warehouse_source_price_for_spec({
+                        "item_type": item_var.get(),
+                        "school": school_var.get(),
+                        "color": color_var.get(),
+                        "size": size_var.get(),
+                    })
+                    if price is None:
+                        price = self.db.get_effective_price(item_var.get(), school_var.get(), color_var.get(), size_var.get())
+                    if price:
+                        price_var.set(format_money(float(price)))
+                except Exception:
+                    pass
+
+        for var in (item_var, school_var, color_var, size_var):
+            var.trace_add("write", _refresh_targets)
+        _refresh_targets()
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=9, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(btns, text="إلغاء", command=dlg.destroy).pack(side=tk.RIGHT)
+
+        def _save():
+            qty = parse_int_text(qty_var.get(), 0) or 0
+            if qty <= 0:
+                messagebox.showwarning("كمية غير صالحة", "اكتب كمية أكبر من صفر.", parent=dlg)
+                return
+            if qty > source_count:
+                messagebox.showwarning("كمية غير صالحة", "الكمية أكبر من كمية الصف المحدد.", parent=dlg)
+                return
+            target = {
+                "item_type": str(item_var.get() or "").strip(),
+                "school": str(school_var.get() or "").strip(),
+                "color": str(color_var.get() or "").strip(),
+                "size": _normalize_size_label(_strip_digit_marks(size_var.get())),
+                "unit_price": parse_float_text(price_var.get()) or 0.0,
+            }
+            if not all(target.get(k) for k in ("item_type", "school", "color", "size")):
+                messagebox.showwarning("بيانات ناقصة", "أكمل النوع والمدرسة واللون والمقاس الجديد.", parent=dlg)
+                return
+            try:
+                event_uuid = self.db.record_branch_stock_reclassification_event(
+                    branch_device,
+                    source_name,
+                    source_spec,
+                    target,
+                    qty,
+                    note_var.get(),
+                )
+                dlg.destroy()
+                show_toast(self, f"تم تسجيل تصحيح التصنيف ({qty}) للفرع. حدث: {event_uuid[:8]}")
+                self._reload_stock()
+            except Exception as ex:
+                messagebox.showerror("فشل التصحيح", str(ex), parent=dlg)
+
+        ttk.Button(btns, text="حفظ وإرسال للفرع", command=_save).pack(side=tk.RIGHT, padx=6)
+
+    def _delete_selected_branch_catalog(self):
+        selected_specs = self._selected_branch_rows()
+        if not selected_specs:
+            messagebox.showwarning("حدد صفاً", "اختر صفاً أو عدة صفوف من مخزون الفرع أولاً.", parent=self)
+            return
+        branch_device, _source_name = self._current_branch_names()
+        if not branch_device:
+            messagebox.showwarning("حدد الفرع", "اختر فرع POS أولاً.", parent=self)
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("حذف تعريف من فرع POS")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            frm,
+            text=f"{branch_display_name(branch_device)}: {len(selected_specs)} صف محدد",
+            font=("", 10, "bold"),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(
+            frm,
+            text="سيتم حذف الصفوف الصفرية فقط من الفرع. أي صف لديه كمية أكبر من صفر سيبقى كما هو.",
+            foreground="#b91c1c",
+        ).grid(row=1, column=0, sticky="w", pady=(0, 8))
+
+        scope_var = tk.StringVar(value="rows")
+        choices = [
+            ("rows", "الصفوف المحددة فقط (نوع/مدرسة/لون/مقاس)"),
+            ("groups", "مجموعات النوع/المدرسة/اللون لكل المقاسات"),
+            ("schools", "حذف المدارس المحددة من هذا الفرع"),
+            ("items", "حذف الأنواع المحددة من هذا الفرع"),
+            ("colors", "حذف الألوان المحددة من هذا الفرع"),
+        ]
+        for row_idx, (value, label) in enumerate(choices, start=2):
+            ttk.Radiobutton(frm, text=label, variable=scope_var, value=value).grid(
+                row=row_idx, column=0, sticky="w", pady=2
+            )
+
+        preview_var = tk.StringVar()
+        ttk.Label(frm, textvariable=preview_var, foreground="#475569").grid(
+            row=7, column=0, sticky="w", pady=(8, 0)
+        )
+
+        def _filters_for_scope() -> List[Dict[str, str]]:
+            scope = scope_var.get()
+            if scope == "schools":
+                return self._distinct_filter_rows(selected_specs, ("school",))
+            if scope == "items":
+                return self._distinct_filter_rows(selected_specs, ("item_type",))
+            if scope == "colors":
+                return self._distinct_filter_rows(selected_specs, ("color",))
+            if scope == "groups":
+                return self._distinct_filter_rows(selected_specs, ("item_type", "school", "color"))
+            return self._distinct_filter_rows(selected_specs, ("item_type", "school", "color", "size"))
+
+        def _update_preview(*_args):
+            count = len(_filters_for_scope())
+            preview_var.set(f"سيتم إرسال {count} نطاق حذف للفرع المحدد.")
+
+        scope_var.trace_add("write", _update_preview)
+        _update_preview()
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=8, column=0, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="إلغاء", command=dlg.destroy).pack(side=tk.RIGHT)
+
+        def _send():
+            filters = _filters_for_scope()
+            if not filters:
+                messagebox.showwarning("لا توجد بيانات", "لا توجد مواصفات صالحة للحذف.", parent=dlg)
+                return
+            if not messagebox.askyesno(
+                "تأكيد الحذف",
+                "هل تريد إرسال حذف هذه التعريفات للفرع؟\n"
+                "سيحذف POS الصفوف الصفرية المطابقة فقط، ولن يلمس الكميات الموجودة.",
+                parent=dlg,
+            ):
+                return
+            try:
+                event_uuid = self.db.record_branch_catalog_delete_event(
+                    branch_device,
+                    filters,
+                    note="Branch catalog delete from monitor",
+                )
+                dlg.destroy()
+                show_toast(
+                    self,
+                    f"تم تسجيل حذف {len(filters)} نطاق للفرع. حدث: {event_uuid[:8]}",
+                )
+                self._reload_stock()
+            except Exception as ex:
+                messagebox.showerror("فشل الحذف", str(ex), parent=dlg)
+
+        ttk.Button(btns, text="حفظ وإرسال للفرع", command=_send).pack(side=tk.RIGHT, padx=6)
+
+    def _repair_selected_spec(self):
+        selected_specs = self._selected_branch_rows()
+        if not selected_specs:
+            messagebox.showwarning("حدد صفاً", "اختر صفاً أو عدة صفوف من مخزون الفرع أولاً.", parent=self)
+            return
+        old_spec = selected_specs[0]
         pick = (self._device_var.get() or "").strip()
         branch_device = getattr(self, "_device_ui_to_raw", {}).get(pick, pick)
         source_name = getattr(self, "_device_source_by_raw", {}).get(branch_device, branch_device)
@@ -15700,24 +18342,27 @@ class BranchStockWindow(tk.Toplevel):
 
         frm = ttk.Frame(dlg, padding=12)
         frm.pack(fill=tk.BOTH, expand=True)
+        title_text = f"{branch_display_name(branch_device)}: {old_spec['item_type']} / {old_spec['school']} / {old_spec['color']} / {old_spec['size']}"
+        if len(selected_specs) > 1:
+            title_text = f"{branch_display_name(branch_device)}: {len(selected_specs)} صف محدد"
         ttk.Label(
             frm,
-            text=f"{branch_display_name(branch_device)}: {old_spec['item_type']} / {old_spec['school']} / {old_spec['color']} / {old_spec['size']}",
+            text=title_text,
             font=("", 10, "bold"),
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
         ttk.Label(frm, text="اكتب القيم الصحيحة. الحقول الفارغة تبقى كما هي.").grid(
             row=1, column=0, columnspan=2, sticky="w", pady=(0, 8)
         )
 
-        item_var = tk.StringVar(value=old_spec["item_type"])
-        school_var = tk.StringVar(value=old_spec["school"])
-        color_var = tk.StringVar(value=old_spec["color"])
+        item_var = tk.StringVar(value="")
+        school_var = tk.StringVar(value="")
+        color_var = tk.StringVar(value="")
         size_var = tk.StringVar(value="")
-        old_item_var = tk.StringVar(value="")
-        old_school_var = tk.StringVar(value="")
-        old_color_var = tk.StringVar(value="")
-        old_size_var = tk.StringVar(value="")
-        all_sizes_var = tk.BooleanVar(value=True)
+        old_item_var = tk.StringVar(value=self._common_selected_value(selected_specs, "item_type"))
+        old_school_var = tk.StringVar(value=self._common_selected_value(selected_specs, "school"))
+        old_color_var = tk.StringVar(value=self._common_selected_value(selected_specs, "color"))
+        old_size_var = tk.StringVar(value=self._common_selected_value(selected_specs, "size"))
+        all_sizes_var = tk.BooleanVar(value=(len(selected_specs) == 1))
 
         fields = [
             ("النوع الصحيح:", item_var),
@@ -15728,7 +18373,7 @@ class BranchStockWindow(tk.Toplevel):
         for row, (label, var) in enumerate(fields, start=2):
             ttk.Label(frm, text=label).grid(row=row, column=0, sticky="e", padx=6, pady=4)
             ttk.Entry(frm, textvariable=var, width=36).grid(row=row, column=1, sticky="ew", padx=6, pady=4)
-        ttk.Label(frm, text="إذا كان الفرع ما زال يعرض قيمة قديمة، اكتبها هنا.").grid(
+        ttk.Label(frm, text="القيم القديمة في الفرع (تم ملؤها من الصف المحدد).").grid(
             row=6, column=0, columnspan=2, sticky="w", pady=(8, 2)
         )
         old_fields = [
@@ -15744,6 +18389,7 @@ class BranchStockWindow(tk.Toplevel):
             frm,
             text="تطبيق على كل المقاسات لنفس النوع/المدرسة/اللون",
             variable=all_sizes_var,
+            state=("normal" if len(selected_specs) == 1 else "disabled"),
         ).grid(row=11, column=0, columnspan=2, sticky="w", padx=6, pady=(6, 2))
         frm.columnconfigure(1, weight=1)
 
@@ -15756,113 +18402,120 @@ class BranchStockWindow(tk.Toplevel):
             return text if text else fallback
 
         def on_ok():
-            new_base = {
-                "item_type": _clean(item_var.get(), old_spec["item_type"]),
-                "school": _clean(school_var.get(), old_spec["school"]),
-                "color": _clean(color_var.get(), old_spec["color"]),
-                "size": _clean(size_var.get(), old_spec["size"]),
-            }
-            if all_sizes_var.get() and str(size_var.get() or "").strip():
+            apply_all_sizes = bool(all_sizes_var.get()) and len(selected_specs) == 1
+            if apply_all_sizes and str(size_var.get() or "").strip():
                 messagebox.showwarning(
                     "نطاق غير مناسب",
                     "عند تطبيق الإصلاح على كل المقاسات، اترك حقل المقاس فارغاً.",
                     parent=dlg,
                 )
                 return
-            value_renames = []
-            for field, old_var, correct_value in (
-                ("item_type", old_item_var, new_base["item_type"]),
-                ("school", old_school_var, new_base["school"]),
-                ("color", old_color_var, new_base["color"]),
-                ("size", old_size_var, new_base["size"]),
-            ):
-                old_value = str(old_var.get() or "").strip()
-                if old_value and old_value != correct_value:
-                    value_renames.append({
-                        "field": field,
-                        "old_value": old_value,
-                        "new_value": correct_value,
-                    })
             scope = f"pos:{branch_device}"
             try:
                 with self.db.conn:
-                    if all_sizes_var.get():
+                    if apply_all_sizes:
+                        old_base = {
+                            "item_type": _clean(old_item_var.get(), old_spec["item_type"]),
+                            "school": _clean(old_school_var.get(), old_spec["school"]),
+                            "color": _clean(old_color_var.get(), old_spec["color"]),
+                            "size": _clean(old_size_var.get(), old_spec["size"]),
+                        }
                         size_rows = self.db.conn.execute(
                             """
-                            SELECT DISTINCT size
+                            SELECT size, unit_price, SUM(count) AS count
                               FROM pos_stocks_mirror
                              WHERE source_device = ?
                                AND item_type = ?
                                AND school = ?
                                AND color = ?
+                             GROUP BY size, unit_price
                             """,
                             (
                                 source_name,
-                                old_spec["item_type"],
-                                old_spec["school"],
-                                old_spec["color"],
+                                old_base["item_type"],
+                                old_base["school"],
+                                old_base["color"],
                             ),
                         ).fetchall()
-                        sizes = [str(r[0] or "").strip() for r in size_rows if str(r[0] or "").strip()]
+                        rows_for_change = [
+                            {
+                                **old_base,
+                                "size": str(r["size"] or "").strip(),
+                                "unit_price": float(r["unit_price"] or 0),
+                                "count": int(r["count"] or 0),
+                            }
+                            for r in size_rows
+                            if str(r["size"] or "").strip()
+                        ]
+                        if not rows_for_change:
+                            rows_for_change = [old_spec]
                     else:
-                        sizes = [old_spec["size"]]
-                    if not sizes:
-                        sizes = [old_spec["size"]]
+                        rows_for_change = selected_specs
 
                     event_count = 0
-                    row_count = 0
-                    for size in sizes:
-                        old_payload = dict(old_spec)
-                        old_payload["size"] = size
-                        new_payload = dict(new_base)
-                        new_payload["size"] = size if all_sizes_var.get() else new_base["size"]
-                        if old_payload == new_payload and not value_renames:
+                    qty_event_count = 0
+                    rename_event_count = 0
+                    for row in rows_for_change:
+                        source_spec = {
+                            "item_type": _clean(old_item_var.get(), row.get("item_type")),
+                            "school": _clean(old_school_var.get(), row.get("school")),
+                            "color": _clean(old_color_var.get(), row.get("color")),
+                            "size": _clean(old_size_var.get(), row.get("size")),
+                            "unit_price": float(row.get("unit_price") or 0),
+                            "count": int(row.get("count") or 0),
+                        }
+                        target = {
+                            "item_type": _clean(item_var.get(), source_spec["item_type"]),
+                            "school": _clean(school_var.get(), source_spec["school"]),
+                            "color": _clean(color_var.get(), source_spec["color"]),
+                            "size": _normalize_size_label(_strip_digit_marks(_clean(size_var.get(), source_spec["size"]))),
+                            "unit_price": float(source_spec.get("unit_price") or 0),
+                        }
+                        source_compare = {
+                            key: source_spec[key]
+                            for key in ("item_type", "school", "color", "size")
+                        }
+                        target_compare = {
+                            key: target[key]
+                            for key in ("item_type", "school", "color", "size")
+                        }
+                        if source_compare == target_compare:
                             continue
-                        changed_fields = [
-                            fld for fld in ("item_type", "school", "color", "size")
-                            if old_payload.get(fld) != new_payload.get(fld)
-                        ]
-                        self.db._record_sync_event_or_raise(
-                            "SPEC_RENAMED",
-                            {
-                                "old_spec": old_payload,
-                                "new_spec": new_payload,
-                                "changed_fields": changed_fields,
-                                "value_renames": value_renames + [
-                                    {"field": fld, "old_value": old_payload[fld], "new_value": new_payload[fld]}
-                                    for fld in changed_fields
-                                ],
-                            },
-                            target_scope=scope,
-                        )
-                        cur = self.db.conn.execute(
-                            """
-                            UPDATE pos_stocks_mirror
-                               SET item_type = ?, school = ?, color = ?, size = ?
-                             WHERE source_device = ?
-                               AND item_type = ?
-                               AND school = ?
-                               AND color = ?
-                               AND size = ?
-                            """,
-                            (
-                                new_payload["item_type"],
-                                new_payload["school"],
-                                new_payload["color"],
-                                new_payload["size"],
+                        qty = int(source_spec.get("count") or 0)
+                        if qty > 0:
+                            self.db.record_branch_stock_reclassification_event(
+                                branch_device,
                                 source_name,
-                                old_payload["item_type"],
-                                old_payload["school"],
-                                old_payload["color"],
-                                old_payload["size"],
-                            ),
-                        )
-                        row_count += int(cur.rowcount or 0)
+                                source_spec,
+                                target,
+                                qty,
+                                "Branch inventory spec repair",
+                            )
+                            qty_event_count += 1
+                        else:
+                            payloads = self._spec_rename_payloads_for_selected_rows(
+                                [source_spec],
+                                new_item_type=target["item_type"],
+                                new_school=target["school"],
+                                new_color=target["color"],
+                                new_size=target["size"],
+                                old_item_type=source_spec["item_type"],
+                                old_school=source_spec["school"],
+                                old_color=source_spec["color"],
+                                old_size=source_spec["size"],
+                            )
+                            for payload in payloads:
+                                self.db._record_sync_event_or_raise(
+                                    "SPEC_RENAMED",
+                                    payload,
+                                    target_scope=scope,
+                                )
+                                rename_event_count += 1
                         event_count += 1
                 dlg.destroy()
                 show_toast(
                     self,
-                    f"تم تسجيل إصلاح {event_count} مقاس وتحديث {row_count} صف. شغّل المزامنة ليصل الإصلاح إلى الفرع.",
+                    f"تم تسجيل إصلاح {event_count} مقاس ({qty_event_count} كمية، {rename_event_count} تعريف).",
                 )
                 self._reload_stock()
             except Exception as ex:
@@ -15870,43 +18523,485 @@ class BranchStockWindow(tk.Toplevel):
 
         ttk.Button(btns, text="حفظ وإرسال للفرع", command=on_ok).pack(side=tk.RIGHT, padx=6)
 
-    def _apply_filter(self):
+    def _filtered_branch_rows(self) -> List[Tuple[str, str, str, str, float, int]]:
         q = (self._filter_var.get() or "").strip().lower()
         item_type = (self._flt_type.get() or "").strip()
         school = (self._flt_school.get() or "").strip()
         color = (self._flt_color.get() or "").strip()
         size = (self._flt_size.get() or "").strip()
-        self._tree.delete(*self._tree.get_children())
-        shown = 0
-        total_qty = 0
-        total_val = 0.0
-        for it, sc, cl, sz, price, count in self._all_rows:
+        rows: List[Tuple[str, str, str, str, float, int]] = []
+        show_low = bool(self._show_low_stock_var.get())
+        show_zero = bool(self._show_zero_var.get()) or show_low
+        seen_specs = set()
+        visible_targets = set()
+        actual_qty_by_spec: Dict[Tuple[str, str, str, str], int] = {}
+        for it, sc, cl, sz, _price, count in getattr(self, "_all_rows", []):
+            key = (
+                str(it or "").strip().casefold(),
+                str(sc or "").strip().casefold(),
+                str(cl or "").strip().casefold(),
+                _normalize_size_label(_strip_digit_marks(sz)).casefold(),
+            )
+            if all(key):
+                actual_qty_by_spec[key] = actual_qty_by_spec.get(key, 0) + int(count or 0)
+
+        for it, sc, cl, sz, price, count in getattr(self, "_all_rows", []):
+            qty = int(count or 0)
+            spec_key = (
+                str(it or "").strip().casefold(),
+                str(sc or "").strip().casefold(),
+                str(cl or "").strip().casefold(),
+                _normalize_size_label(_strip_digit_marks(sz)).casefold(),
+            )
+            actual_qty = actual_qty_by_spec.get(spec_key, qty)
+            if show_low and actual_qty >= self.LOW_STOCK_THRESHOLD:
+                continue
+            if not show_zero and qty == 0:
+                continue
             if item_type and it != item_type:
                 continue
             if school and sc != school:
                 continue
             if color and cl != color:
                 continue
+            if it and sc and cl:
+                visible_targets.add((str(it or "").strip(), str(sc or "").strip(), str(cl or "").strip()))
             if size and sz != size:
                 continue
             if q:
                 blob = (f"{it} {sc} {cl} {sz}").lower()
                 if q not in blob:
                     continue
-            value = price * count
-            total_qty += count
-            total_val += value
-            self._tree.insert(
-                "", tk.END,
-                values=(
-                    it, sc, cl, sz, f"{format_money(price)}", count, f"{format_money(value)}",
+            seen_specs.add(spec_key)
+            rows.append((it, sc, cl, sz, float(price or 0), int(count or 0)))
+
+        if show_zero:
+            _branch_device, source_name = self._current_branch_names()
+            for target_item, target_school, target_color in sorted(
+                visible_targets,
+                key=lambda t: (
+                    str(t[1] or "").casefold(),
+                    warehouse_item_sort_key(t[0], t[2]),
+                    str(t[2] or "").casefold(),
                 ),
+            ):
+                try:
+                    catalog_rows = self._branch_rows_for_size_profile_catalog(
+                        source_name,
+                        target_item,
+                        target_school,
+                        target_color,
+                    )
+                except Exception:
+                    catalog_rows = []
+                for catalog_row in catalog_rows:
+                    cat_size = _normalize_size_label(_strip_digit_marks(catalog_row.get("size") or ""))
+                    if not cat_size:
+                        continue
+                    spec_key = (
+                        str(target_item or "").casefold(),
+                        str(target_school or "").casefold(),
+                        str(target_color or "").casefold(),
+                        cat_size.casefold(),
+                    )
+                    if show_low and actual_qty_by_spec.get(spec_key, 0) >= self.LOW_STOCK_THRESHOLD:
+                        continue
+                    if spec_key in seen_specs:
+                        continue
+                    if size and cat_size != _normalize_size_label(_strip_digit_marks(size)):
+                        continue
+                    if q:
+                        blob = (f"{target_item} {target_school} {target_color} {cat_size}").lower()
+                        if q not in blob:
+                            continue
+                    seen_specs.add(spec_key)
+                    rows.append((
+                        target_item,
+                        target_school,
+                        target_color,
+                        cat_size,
+                        float(catalog_row.get("unit_price") or 0),
+                        0,
+                    ))
+            rows.sort(key=lambda r: (
+                str(r[1] or "").casefold(),
+                warehouse_item_sort_key(r[0], r[2]),
+                warehouse_size_sort_key(r[3]),
+            ))
+        return rows
+
+    def _warehouse_available_qty_by_spec(
+        self,
+        rows: Sequence[Tuple[str, str, str, str, float, int]],
+    ) -> Dict[Tuple[str, str, str, str], int]:
+        requested: Set[Tuple[str, str, str, str]] = set()
+        for it, sc, cl, sz, _price, _count in rows or []:
+            item_type = str(it or "").strip()
+            school = str(sc or "").strip()
+            color = str(cl or "").strip()
+            size = _normalize_size_label(_strip_digit_marks(sz))
+            if item_type and school and color and size:
+                requested.add((
+                    item_type.casefold(),
+                    school.casefold(),
+                    color.casefold(),
+                    size.casefold(),
+                ))
+        if not requested:
+            return {}
+
+        try:
+            stock_rows = self.db.conn.execute(
+                """
+                SELECT item_type, school, color, size,
+                       COALESCE(SUM(COALESCE(count, 0)), 0) AS qty
+                  FROM stocks
+                 GROUP BY item_type, school, color, size
+                HAVING qty > 0
+                """
+            ).fetchall()
+        except Exception:
+            return {}
+
+        available: Dict[Tuple[str, str, str, str], int] = {}
+        for row in stock_rows:
+            key = (
+                str(row["item_type"] or "").strip().casefold(),
+                str(row["school"] or "").strip().casefold(),
+                str(row["color"] or "").strip().casefold(),
+                _normalize_size_label(_strip_digit_marks(row["size"])).casefold(),
             )
-            shown += 1
+            if key in requested:
+                available[key] = int(row["qty"] or 0)
+        return available
+
+    def _branch_reservation_qty_by_spec(
+        self,
+        source_name: str,
+        rows: Sequence[Tuple[str, str, str, str, float, int]],
+    ) -> Dict[Tuple[str, str, str, str], int]:
+        requested: Set[Tuple[str, str, str, str]] = set()
+        for it, sc, cl, sz, _price, _count in rows or []:
+            item_type = str(it or "").strip()
+            school = str(sc or "").strip()
+            color = str(cl or "").strip()
+            size = _normalize_size_label(_strip_digit_marks(sz))
+            if item_type and school and color and size:
+                requested.add((
+                    item_type.casefold(),
+                    school.casefold(),
+                    color.casefold(),
+                    size.casefold(),
+                ))
+        if not requested:
+            return {}
+        try:
+            reservation_rows = self.db.list_pos_reservations_mirror_aggregated(
+                source_device=source_name,
+                active_only=True,
+            )
+        except Exception:
+            reservation_rows = []
+        reserved: Dict[Tuple[str, str, str, str], int] = {}
+        for row in reservation_rows:
+            key = (
+                str(row.get("item_type") or "").strip().casefold(),
+                str(row.get("school") or "").strip().casefold(),
+                str(row.get("color") or "").strip().casefold(),
+                _normalize_size_label(_strip_digit_marks(row.get("size"))).casefold(),
+            )
+            if key in requested:
+                reserved[key] = reserved.get(key, 0) + int(row.get("agg_qty") or 0)
+        return reserved
+
+    def _print_size_sheets(self):
+        rows = self._filtered_branch_rows()
+        if not rows:
+            show_toast(self, "لا توجد صفوف مطابقة للطباعة", bg="#f59e0b")
+            return
+
+        from collections import defaultdict, OrderedDict
+        _branch_device, source_name = self._current_branch_names()
+        warehouse_qty_by_spec = self._warehouse_available_qty_by_spec(rows)
+        reservation_qty_by_spec = self._branch_reservation_qty_by_spec(source_name, rows)
+        show_low = bool(self._show_low_stock_var.get())
+        actual_qty_by_spec: Dict[Tuple[str, str, str, str], int] = {}
+        for it, sc, cl, sz, _price, count in getattr(self, "_all_rows", []):
+            key = (
+                str(it or "").strip().casefold(),
+                str(sc or "").strip().casefold(),
+                str(cl or "").strip().casefold(),
+                _normalize_size_label(_strip_digit_marks(sz)).casefold(),
+            )
+            if all(key):
+                actual_qty_by_spec[key] = actual_qty_by_spec.get(key, 0) + int(count or 0)
+
+        school_groups = OrderedDict()
+        for item, school, color, size, _price, count in rows:
+            sch = str(school or "").strip()
+            it = str(item or "").strip()
+            clr = str(color or "").strip()
+            if not (sch and it and clr):
+                continue
+            school_groups.setdefault(sch, OrderedDict())
+            school_groups[sch].setdefault(clr, OrderedDict())
+            school_groups[sch][clr].setdefault(it, []).append({
+                "item_type": it,
+                "school": sch,
+                "color": clr,
+                "size": str(size or "").strip(),
+                "count": int(count or 0),
+            })
+
+        def build_size_ranges_from_profile(profile):
+            numeric_tables = []
+            alpha_labels = []
+            if profile is None:
+                return numeric_tables, alpha_labels
+            r1_start, r1_end, r2_start, r2_end, has_alpha = profile
+            merged = merged_numeric_size_labels_from_profile(
+                r1_start, r1_end, r2_start, r2_end,
+            )
+            if merged:
+                numeric_tables.append(merged[:])
+            if has_alpha:
+                alpha_labels = ALPHA_SIZES[:]
+            return numeric_tables, alpha_labels
+
+        tables_html = []
+        for sch, color_groups in sorted(school_groups.items(), key=lambda kv: kv[0].casefold()):
+            for clr, item_groups in sorted(color_groups.items(), key=lambda kv: kv[0].casefold()):
+                ordered_item_groups = sorted(
+                    item_groups.items(),
+                    key=lambda kv: warehouse_item_sort_key(kv[0], clr),
+                )
+                for item_type, items in ordered_item_groups:
+                    size_counts = defaultdict(int)
+                    for row in items:
+                        sz = _normalize_size_label(row.get("size") or "")
+                        if sz:
+                            size_counts[sz] += int(row.get("count") or 0)
+
+                    profile = self.db.get_size_profile(item_type, sch, clr)
+                    numeric_tables, alpha_labels = build_size_ranges_from_profile(profile)
+
+                    if not numeric_tables and not alpha_labels:
+                        all_sizes = sorted(
+                            {_normalize_size_label(r.get("size") or "") for r in items if _normalize_size_label(r.get("size") or "")},
+                            key=warehouse_size_sort_key,
+                        )
+                        numeric = [s for s in all_sizes if s.isdigit()]
+                        alpha = [s for s in all_sizes if not s.isdigit()]
+                        if numeric:
+                            numeric_tables = [numeric]
+                        if alpha:
+                            alpha_labels = alpha
+
+                    def _qty_for(label, source):
+                        norm = _normalize_size_label(label)
+                        key = (
+                            str(item_type or "").strip().casefold(),
+                            str(sch or "").strip().casefold(),
+                            str(clr or "").strip().casefold(),
+                            norm.casefold(),
+                        )
+                        if show_low and actual_qty_by_spec.get(key, 0) >= self.LOW_STOCK_THRESHOLD:
+                            return None
+                        if source == "branch":
+                            return int(size_counts.get(norm, 0))
+                        if source == "reservation":
+                            return int(reservation_qty_by_spec.get(key, 0))
+                        if source == "warehouse":
+                            return int(warehouse_qty_by_spec.get(key, 0))
+                        return 0
+
+                    def row_counts(labels, source):
+                        out = []
+                        for lbl in labels:
+                            v = _qty_for(lbl, source)
+                            if v is None:
+                                out.append("—")
+                                continue
+                            out.append("" if v == 0 else str(v))
+                        return out
+
+                    head = f"""
+                    <div class="hdr">
+                        <span>المدرسة: {_html(sch)}</span>
+                        <span>اللون: {_html(clr)}</span>
+                        <span>النوع: {_html(item_type)}</span>
+                    </div>
+                    """
+
+                    def build_table(chunk):
+                        branch_cells = row_counts(chunk, "branch")
+                        reservation_cells = row_counts(chunk, "reservation")
+                        warehouse_cells = row_counts(chunk, "warehouse")
+                        return f"""
+                        <table class="grid">
+                        <tbody>
+                            <tr><th class="row-label">البيان</th>{''.join(f'<th>{_html(x)}</th>' for x in chunk)}</tr>
+                            <tr><td class="row-label">الفرع</td>{''.join(f'<td class="num">{v}</td>' for v in branch_cells)}</tr>
+                            <tr><td class="row-label">الحجوزات</td>{''.join(f'<td class="num">{v}</td>' for v in reservation_cells)}</tr>
+                            <tr><td class="row-label">المخزن</td>{''.join(f'<td class="num">{v}</td>' for v in warehouse_cells)}</tr>
+                        </tbody>
+                        </table>
+                        """
+
+                    tables = []
+                    for numeric_labels in numeric_tables:
+                        for i in range(0, len(numeric_labels), 15):
+                            tables.append(build_table(numeric_labels[i:i + 15]))
+                    if alpha_labels:
+                        tables.append("""
+                        <div style="margin-top:6px;font-weight:600">المقاسات بالحروف</div>
+                        """ + build_table(alpha_labels))
+                    tables_html.append(f'<section class="sheet">{head}{"".join(tables)}</section>')
+
+        if not tables_html:
+            show_toast(self, "لا توجد بيانات صالحة للطباعة", bg="#f59e0b")
+            return
+
+        html = f"""<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<title>جداول المقاسات</title>
+<style>
+@page {{ size: A4; margin: 12mm; }}
+* {{ box-sizing: border-box; }}
+body {{
+    font-family: "Segoe UI", Tahoma, Arial, "Noto Sans Arabic", sans-serif;
+    margin: 0;
+    direction: rtl;
+}}
+.sheet {{ page-break-inside: avoid; margin-bottom: 10mm; }}
+.hdr {{ display:flex; justify-content:space-between; font-weight:600; margin: 6px 2px 8px; }}
+.grid {{ border-collapse: collapse; width: 100%; table-layout: fixed; margin-bottom: 6px; }}
+.grid th, .grid td {{
+    border: 1px solid #555;
+    padding: 6px 4px;
+    text-align: center;
+}}
+.grid th {{ background: #eee; }}
+.row-label {{ width: 78px; background: #f8fafc; font-weight: 600; }}
+.num {{ font-variant-numeric: tabular-nums; }}
+</style>
+</head>
+<body>
+{''.join(tables_html)}
+<script>
+window.onload = function() {{
+try {{ window.print(); }} catch(e) {{}}
+}};
+</script>
+</body>
+</html>
+"""
+        path = os.path.join(
+            tempfile.gettempdir(),
+            f"branch_size_sheets_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+        )
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html)
+        _print_html_auto(path, copies=1, parent=self)
+
+    def _force_source_of_truth_sync(self):
+        ok = messagebox.askyesno(
+            "فرض مطابقة الفروع",
+            (
+                "سيتم إرسال آخر إصلاحات أسماء/مواصفات وأسعار المخزن الحالية إلى فروع POS المعروفة.\n"
+                "الأسعار تُرسل فقط للأصناف التي يملكها الفرع بالفعل من شحنات أو حجوزات أو لقطة مخزون.\n\n"
+                "هل تريد المتابعة؟"
+            ),
+            parent=self,
+        )
+        if not ok:
+            return
+        try:
+            result = self.db.force_pos_source_of_truth_sync()
+            messagebox.showinfo(
+                "تم تجهيز المطابقة",
+                (
+                    "تم إنشاء أحداث المزامنة المطلوبة.\n"
+                    f"الفروع: {int(result.get('branches') or 0)}\n"
+                    f"المواصفات: {int(result.get('specs') or 0)}\n"
+                    f"تنظيف ملكية الفروع: {int(result.get('ownership_events') or 0)}\n"
+                    f"إصلاحات الأسماء/المواصفات: {int(result.get('rename_events') or 0)}\n"
+                    f"تحديثات الأسعار: {int(result.get('price_events') or 0)}\n"
+                    f"بدون سعر في المخزن: {int(result.get('skipped_missing_price') or 0)}\n\n"
+                    "اضغط مزامنة الآن لإرسالها للسيرفر."
+                ),
+                parent=self,
+            )
+        except Exception as ex:
+            messagebox.showerror("فشل فرض المطابقة", str(ex), parent=self)
+
+    def _apply_filter(self):
+        started = time.time()
+        if self._render_job is not None:
+            try:
+                self.after_cancel(self._render_job)
+            except Exception:
+                pass
+            self._render_job = None
+        self._tree.delete(*self._tree.get_children())
+        rows = self._filtered_branch_rows()
+        warehouse_available = self._warehouse_available_qty_by_spec(rows)
+        total_qty = sum(int(row[5] or 0) for row in rows)
+        total_val = sum(float(row[4] or 0) * int(row[5] or 0) for row in rows)
         self._status_var.set(
-            f"يُعرض {shown} صف  |  الكمية: {total_qty}  |  "
+            f"يُعرض {len(rows)} صف  |  الكمية: {total_qty}  |  "
             f"القيمة: {format_money(total_val)}"
         )
+
+        generation = self._load_generation
+        chunk_size = 250
+
+        def render_chunk(start: int = 0) -> None:
+            if generation != self._load_generation:
+                return
+            end = min(start + chunk_size, len(rows))
+            for it, sc, cl, sz, price, count in rows[start:end]:
+                value = price * count
+                spec_key = (
+                    str(it or "").strip().casefold(),
+                    str(sc or "").strip().casefold(),
+                    str(cl or "").strip().casefold(),
+                    _normalize_size_label(_strip_digit_marks(sz)).casefold(),
+                )
+                warehouse_qty = int(warehouse_available.get(spec_key, 0) or 0)
+                if warehouse_qty > 0:
+                    tags = ("warehouse_available",)
+                elif int(count or 0) == 0:
+                    tags = ("zero_stock",)
+                elif int(count or 0) < self.LOW_STOCK_THRESHOLD:
+                    tags = ("low_stock",)
+                else:
+                    tags = ()
+                self._tree.insert(
+                    "", tk.END,
+                    values=(
+                        it, sc, cl, sz, f"{format_money(price)}", count, warehouse_qty, f"{format_money(value)}",
+                    ),
+                    tags=tags,
+                )
+            if end < len(rows):
+                self._render_job = self.after(1, lambda: render_chunk(end))
+                return
+            self._render_job = None
+            apply_zebra_tags(self._tree, skip_tags={"zero_stock", "low_stock", "warehouse_available"})
+            try:
+                if logging_setup is not None:  # type: ignore[name-defined]
+                    logging_setup.log_event(
+                        "ui.branch_stock.render",
+                        rows=len(rows),
+                        elapsed_ms=int((time.time() - started) * 1000),
+                    )  # type: ignore[union-attr]
+            except Exception:
+                pass
+
+        render_chunk(0)
 
     def _run_sync_and_reload(self):
         # Open the existing sync dialog so the user sees the live log
@@ -17599,6 +20694,7 @@ class PosBranchMonitorWindow(tk.Toplevel):
     def __init__(self, master, db: "SqliteDatabase"):
         super().__init__(master)
         self.db = db
+        self._refresh_generation = 0
         self.title("لوحة متابعة الفروع")
         self.geometry("1540x660")
         self._build()
@@ -17616,11 +20712,8 @@ class PosBranchMonitorWindow(tk.Toplevel):
         ttk.Button(top, text="مزامنة الآن…", command=self._run_sync_and_reload).pack(side=tk.LEFT, padx=(8, 0))
 
         cols = (
-            "branch", "status", "last_sync", "app_version", "stock_qty", "stock_value",
-            "day_total",
-            "sales", "reservation_cash", "returns", "voids", "exchange", "cash", "visa",
-            "audit_qty", "audit_value",
-            "res_count", "res_qty", "res_total", "res_paid",
+            "branch", "status", "last_sync", "app_version",
+            "day_total", "cash", "visa",
             "shift_status", "shift_start", "shift_end", "errors", "notes",
         )
         wrap = ttk.Frame(self)
@@ -17629,24 +20722,11 @@ class PosBranchMonitorWindow(tk.Toplevel):
         for col, txt, w in [
             ("branch", "الفرع", 150),
             ("status", "الحالة", 70),
-            ("last_sync", "آخر مزامنة", 145),
+            ("last_sync", "آخر اتصال/لقطة", 145),
             ("app_version", "إصدار البرنامج", 110),
-            ("stock_qty", "كمية المخزون", 90),
-            ("stock_value", "قيمة المخزون", 105),
             ("day_total", "إجمالي اليوم", 110),
-            ("sales", "مبيعات", 95),
-            ("reservation_cash", "نقد حجوزات", 95),
-            ("returns", "مرتجعات", 85),
-            ("voids", "إلغاء", 80),
-            ("exchange", "استبدال", 85),
             ("cash", "إجمالي كاش", 105),
             ("visa", "إجمالي فيزا", 105),
-            ("audit_qty", "فرق الجرد", 85),
-            ("audit_value", "قيمة الجرد", 95),
-            ("res_count", "حجوزات", 75),
-            ("res_qty", "كمية حجز", 80),
-            ("res_total", "قيمة الحجز", 95),
-            ("res_paid", "مدفوع حجز", 95),
             ("shift_status", "الوردية", 75),
             ("shift_start", "بداية الوردية", 125),
             ("shift_end", "نهاية الوردية", 125),
@@ -17683,7 +20763,7 @@ class PosBranchMonitorWindow(tk.Toplevel):
         ttk.Button(actions, text="فتح الحجوزات", command=lambda: PosReservationsMirrorWindow(self, self.db)).pack(side=tk.LEFT, padx=6)
         ttk.Button(actions, text="فتح ملخص الدورة", command=lambda: BranchCycleSummaryWindow(self, self.db)).pack(side=tk.LEFT, padx=6)
 
-        self._refresh()
+        self.after(50, self._refresh)
 
     def _run_sync_and_reload(self):
         try:
@@ -17695,38 +20775,79 @@ class PosBranchMonitorWindow(tk.Toplevel):
         self.after(500, self._refresh)
 
     def _refresh(self):
+        self._refresh_generation += 1
+        generation = self._refresh_generation
         self._tree.delete(*self._tree.get_children())
         df = (self._df.get() or "").strip() or None
         dt = (self._dt.get() or "").strip() or None
-        rows = self.db.list_pos_branch_monitor(df, dt)
+        self._sum.set("جارٍ تحميل بيانات الفروع...")
+        self._security_var.set("")
+
+        def worker() -> None:
+            started = time.time()
+            rows: List[Dict[str, Any]] = []
+            sec: Dict[str, Any] = {}
+            err = ""
+            worker_db = None
+            try:
+                conn = sqlite3.connect(self.db.path, timeout=8.0, isolation_level=None, check_same_thread=False)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA busy_timeout=8000;")
+                conn.execute("PRAGMA temp_store=MEMORY;")
+                conn.execute("PRAGMA cache_size=-12000;")
+                worker_db = object.__new__(SqliteDatabase)
+                worker_db.path = self.db.path
+                worker_db.conn = conn
+                rows = worker_db.list_pos_branch_monitor(df, dt, read_only=False)
+                sec = worker_db.admin_security_summary(days=7)
+            except Exception as ex:
+                err = str(ex)
+            finally:
+                try:
+                    if worker_db is not None:
+                        worker_db.conn.close()
+                except Exception:
+                    pass
+
+            def done() -> None:
+                if generation != self._refresh_generation:
+                    return
+                if err:
+                    self._sum.set(f"فشل تحميل لوحة الفروع: {err}")
+                    return
+                self._render_rows(rows, sec, started)
+
+            try:
+                self.after(0, done)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _render_rows(self, rows: List[Dict[str, Any]], sec: Dict[str, Any], started: float):
+        self._tree.delete(*self._tree.get_children())
         totals = {
-            "stock_qty": 0,
-            "stock_value": 0.0,
-            "audit_qty": 0,
-            "audit_value": 0.0,
-            "sales": 0.0,
-            "reservation_cash": 0.0,
             "cash": 0.0,
             "visa": 0.0,
             "day_total": 0.0,
-            "res_qty": 0,
-            "res_total": 0.0,
             "errors": 0,
         }
         for r in rows:
             err_count = int(r.get("inbox_errors") or 0) + int(r.get("dead_letters") or 0)
-            totals["stock_qty"] += int(r.get("stock_qty") or 0)
-            totals["stock_value"] += float(r.get("stock_value") or 0.0)
-            totals["audit_qty"] += int(r.get("audit_adjust_qty") or 0)
-            totals["audit_value"] += float(r.get("audit_adjust_value") or 0.0)
-            totals["sales"] += float(r.get("sales_amt") or 0.0)
-            totals["reservation_cash"] += float(r.get("reservation_cash") or 0.0)
             totals["cash"] += float(r.get("cash_net") or 0.0)
             totals["visa"] += float(r.get("visa_net") or 0.0)
             totals["day_total"] += float(r.get("total_collected") or 0.0)
-            totals["res_qty"] += int(r.get("reserved_qty") or 0)
-            totals["res_total"] += float(r.get("reserved_total") or 0.0)
             totals["errors"] += err_count
+            raw_shift_status = str(r.get("shift_status") or "").upper()
+            shift_status_text = ""
+            if raw_shift_status == "OPEN":
+                shift_status_text = "مفتوحة"
+                if "لم يصل حدث إغلاق" in str(r.get("notes") or ""):
+                    shift_status_text = "مفتوحة - لا إغلاق"
+            elif raw_shift_status == "CLOSED":
+                shift_status_text = "مغلقة"
+            elif raw_shift_status:
+                shift_status_text = raw_shift_status
             self._tree.insert(
                 "",
                 tk.END,
@@ -17735,23 +20856,10 @@ class PosBranchMonitorWindow(tk.Toplevel):
                     r.get("status") or "",
                     fmt_local_ts(r.get("last_sync_at") or r.get("snapshot_at") or "", ""),
                     r.get("app_version") or "",
-                    int(r.get("stock_qty") or 0),
-                    f"{format_money(float(r.get('stock_value') or 0.0))}",
                     f"{format_money(float(r.get('total_collected') or 0.0))}",
-                    f"{format_money(float(r.get('sales_amt') or 0.0))}",
-                    f"{format_money(float(r.get('reservation_cash') or 0.0))}",
-                    f"{format_money(float(r.get('returns_amt') or 0.0))}",
-                    f"{format_money(float(r.get('voids_amt') or 0.0))}",
-                    f"{format_money(float(r.get('exchange_amt') or 0.0))}",
                     f"{format_money(float(r.get('cash_net') or 0.0))}",
                     f"{format_money(float(r.get('visa_net') or 0.0))}",
-                    f"{int(r.get('audit_adjust_qty') or 0):+d}",
-                    f"{format_money(float(r.get('audit_adjust_value') or 0.0))}",
-                    int(r.get("active_reservations") or 0),
-                    int(r.get("reserved_qty") or 0),
-                    f"{format_money(float(r.get('reserved_total') or 0.0))}",
-                    f"{format_money(float(r.get('reserved_paid') or 0.0))}",
-                    r.get("shift_status") or "",
+                    shift_status_text,
                     fmt_local_ts(r.get("shift_started_at") or "", ""),
                     fmt_local_ts(r.get("shift_ended_at") or "", ""),
                     err_count,
@@ -17760,17 +20868,12 @@ class PosBranchMonitorWindow(tk.Toplevel):
             )
         apply_zebra_tags(self._tree)
         self._sum.set(
-            f"الفروع: {len(rows)}  |  إجمالي المبيعات: {format_money(totals['sales'])}  |  "
-            f"نقد الحجوزات: {format_money(totals['reservation_cash'])}  |  "
+            f"الفروع: {len(rows)}  |  "
             f"إجمالي كاش: {format_money(totals['cash'])}  |  "
             f"إجمالي فيزا: {format_money(totals['visa'])}  |  "
             f"إجمالي اليوم: {format_money(totals['day_total'])}  |  "
-            f"كمية المخزون: {totals['stock_qty']}  |  قيمة المخزون: {format_money(totals['stock_value'])}  |  "
-            f"فرق الجرد: {totals['audit_qty']:+d} / {format_money(totals['audit_value'])}  |  "
-            f"كمية الحجوزات: {totals['res_qty']}  |  قيمة الحجوزات: {format_money(totals['res_total'])}  |  "
             f"أخطاء المزامنة: {totals['errors']}"
         )
-        sec = self.db.admin_security_summary(days=7)
         failed = int(sec.get("failed_count") or 0)
         if failed:
             last_at = fmt_local_ts(sec.get("last_at") or "", "")
@@ -17780,6 +20883,15 @@ class PosBranchMonitorWindow(tk.Toplevel):
             self._security_var.set(f"تحذير أمني: {failed} محاولة كلمة مرور مدير غير صحيحة خلال آخر 7 أيام" + (f" | آخر محاولة: {details}" if details else ""))
         else:
             self._security_var.set("")
+        try:
+            if logging_setup is not None:  # type: ignore[name-defined]
+                logging_setup.log_event(
+                    "ui.pos_branch_monitor.refresh",
+                    rows=len(rows),
+                    elapsed_ms=int((time.time() - started) * 1000),
+                )  # type: ignore[union-attr]
+        except Exception:
+            pass
 
 
 class PosReservationsMirrorWindow(tk.Toplevel):
@@ -17814,7 +20926,7 @@ class PosReservationsMirrorWindow(tk.Toplevel):
             state="readonly",
         )
         self._stock_source_cb.pack(side=tk.RIGHT)
-        self._active_only = tk.BooleanVar(value=False)
+        self._active_only = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             top, text="المعلقة فقط", variable=self._active_only,
             command=self._refresh,
@@ -17870,29 +20982,21 @@ class PosReservationsMirrorWindow(tk.Toplevel):
         tab_a = ttk.Frame(nb)
         nb.add(tab_a, text="مجمّع حسب المنتج")
         hint = (
-            "تُجمّع كل الأسطر ذات نفس (النوع، المدرسة، اللون، المقاس). "
-            "عند اختيار نقطة بيع يُحسب المجموع لهذا الفرع فقط (بما يتوافق مع الاسم أو المعرّف المخزّن). "
-            "عند ترك «نقطة البيع» فارغاً يُجمع عبر كل الفروع."
+            "يعرض إجمالي القطع المحجوزة حالياً لكل صنف، مرتبة بحيث تظهر مقاسات نفس الصنف معاً. "
+            "اترك نقطة البيع فارغة لجمع كل الفروع، أو اختر فرعاً لرؤية حجوزاته فقط."
         )
         ttk.Label(tab_a, text=hint, wraplength=1100).pack(anchor="w", padx=6, pady=(4, 2))
         agg_wrap = ttk.Frame(tab_a)
         agg_wrap.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-        acols = (
-            "type", "school", "color", "size", "qty", "lines", "branches",
-            "avg_price", "sum_total", "sum_paid", "updated",
-        )
+        acols = ("type", "school", "color", "size", "qty", "lines", "updated")
         self._tree_agg = ttk.Treeview(agg_wrap, columns=acols, show="headings", height=16)
         ahead = [
-            ("type", "النوع", 120),
-            ("school", "المدرسة", 120),
-            ("color", "اللون", 80),
+            ("type", "النوع", 160),
+            ("school", "المدرسة", 160),
+            ("color", "اللون", 130),
             ("size", "المقاس", 60),
-            ("qty", "إجمالي الكمية", 90),
-            ("lines", "عدد الحجوزات", 95),
-            ("branches", "عدد الفروع", 85),
-            ("avg_price", "سعر وسيط", 80),
-            ("sum_total", "إجمالي المبالغ", 95),
-            ("sum_paid", "إجمالي المدفوع", 95),
+            ("qty", "إجمالي المحجوز", 110),
+            ("lines", "عدد السطور", 90),
             ("updated", "آخر تحديث", 130),
         ]
         for col, txt, w in ahead:
@@ -17947,7 +21051,15 @@ class PosReservationsMirrorWindow(tk.Toplevel):
             source_device=dev,
             active_only=bool(self._active_only.get()),
         )
-        for r in rows:
+        def _sort_key(r: Dict[str, Any]) -> Tuple[Any, ...]:
+            return (
+                str(r.get("school") or "").casefold(),
+                warehouse_item_sort_key(r.get("item_type") or "", r.get("color") or ""),
+                str(r.get("color") or "").casefold(),
+                warehouse_size_sort_key(r.get("size") or ""),
+            )
+
+        for r in sorted(rows, key=_sort_key):
             self._tree_agg.insert(
                 "", tk.END,
                 values=(
@@ -17957,10 +21069,6 @@ class PosReservationsMirrorWindow(tk.Toplevel):
                     r.get("size") or "",
                     int(r.get("agg_qty") or 0),
                     int(r.get("reservation_line_count") or 0),
-                    int(r.get("pos_device_count") or 0),
-                    f"{format_money(float(r.get('avg_unit_price') or 0))}",
-                    f"{format_money(float(r.get('sum_total_amount') or 0))}",
-                    f"{format_money(float(r.get('sum_paid_amount') or 0))}",
                     r.get("last_updated") or "",
                 ),
             )
@@ -18181,7 +21289,7 @@ class PosBranchFinancialWindow(tk.Toplevel):
         ttk.Combobox(top, textvariable=self._dev, values=ui_names, width=30, state="readonly").pack(side=tk.RIGHT, padx=4)
         ttk.Button(top, text="تحديث", command=self._refresh_summary).pack(side=tk.LEFT)
 
-        self._totals_var = tk.StringVar(value="إجمالي المبيعات المعروضة: 0")
+        self._totals_var = tk.StringVar(value="إجمالي اليوم المعروض: 0")
         totals_bar = ttk.Frame(self)
         totals_bar.pack(fill=tk.X, padx=8, pady=(0, 4))
         ttk.Label(totals_bar, textvariable=self._totals_var, font=("Segoe UI", 10, "bold")).pack(side=tk.RIGHT)
@@ -18192,13 +21300,15 @@ class PosBranchFinancialWindow(tk.Toplevel):
         sum_frame = ttk.Frame(mid)
         mid.add(sum_frame, weight=2)
         cols = (
-            "branch", "day", "sales", "returns", "voids", "exch", "rdep", "rpay", "rcoll", "net",
+            "branch", "day", "cash", "visa", "day_total", "returns", "voids", "exch", "rdep", "rpay", "rcoll", "net",
         )
         self._sum_tree = ttk.Treeview(sum_frame, columns=cols, show="headings", height=10)
         for col, txt, w in [
             ("branch", "الفرع", 150),
             ("day", "اليوم", 100),
-            ("sales", "مبيعات", 90),
+            ("cash", "كاش", 90),
+            ("visa", "فيزا", 90),
+            ("day_total", "إجمالي اليوم", 100),
             ("returns", "مرتجعات", 90),
             ("voids", "إلغاء", 80),
             ("exch", "استبدال", 90),
@@ -18260,10 +21370,10 @@ class PosBranchFinancialWindow(tk.Toplevel):
         df = (self._df.get() or "").strip() or None
         dt = (self._dt.get() or "").strip() or None
         rows = self.db.list_pos_financial_summary_by_day(dev, df, dt)
-        total_sales = sum(float(r.get("sales_amt") or 0) for r in rows)
+        total_day = sum(float(r.get("day_total_amt") or 0) for r in rows)
         total_net = sum(float(r.get("net_amt") or 0) for r in rows)
         self._totals_var.set(
-            f"إجمالي المبيعات المعروضة: {format_money(total_sales)}    |    إجمالي الصافي: {format_money(total_net)}"
+            f"إجمالي اليوم المعروض: {format_money(total_day)}    |    إجمالي كاش: {format_money(total_net)}"
         )
         first_iid = ""
         for r in rows:
@@ -18276,7 +21386,9 @@ class PosBranchFinancialWindow(tk.Toplevel):
                 values=(
                     r.get("branch_name") or self.db.display_name_for_sync_source(r.get("source_device")),
                     r.get("day") or "",
-                    f"{format_money(float(r.get('sales_amt') or 0))}",
+                    f"{format_money(float(r.get('net_amt') or 0))}",
+                    f"{format_money(float(r.get('visa_amt') or 0))}",
+                    f"{format_money(float(r.get('day_total_amt') or 0))}",
                     f"{format_money(float(r.get('returns_amt') or 0))}",
                     f"{format_money(float(r.get('voids_amt') or 0))}",
                     f"{format_money(float(r.get('exchange_amt') or 0))}",
@@ -18326,6 +21438,7 @@ class BranchCycleSummaryWindow(tk.Toplevel):
         super().__init__(master)
         self.db = db
         self._row_branch_by_iid: Dict[str, str] = {}
+        self._refresh_generation = 0
         self.title("ملخص دورة الفروع")
         self.geometry("1400x760")
         self._build()
@@ -18344,20 +21457,15 @@ class BranchCycleSummaryWindow(tk.Toplevel):
         ttk.Button(top, text="حذف المتحصل المحدد", command=self._delete_selected_receipt).pack(side=tk.LEFT, padx=(8, 0))
 
         cols = (
-            "branch", "bills", "ship_qty", "ship_value", "audit_qty", "audit_value", "cash_net",
-            "actual_received", "stock_qty", "stock_value", "gap", "actual_gap",
+            "branch", "ship_value", "cash_net",
+            "actual_received", "stock_value", "gap", "actual_gap",
         )
         self._tree = ttk.Treeview(self, columns=cols, show="headings", height=14)
         for col, txt, w in [
             ("branch", "الفرع", 160),
-            ("bills", "عدد فواتير الشحن", 110),
-            ("ship_qty", "كمية الشحنات بعد الجرد", 135),
-            ("ship_value", "قيمة الشحنات بعد الجرد", 150),
-            ("audit_qty", "فرق الجرد", 85),
-            ("audit_value", "قيمة الجرد", 95),
+            ("ship_value", "قيمة الشحنات الحالية", 150),
             ("cash_net", "صافي المتحصل", 110),
             ("actual_received", "المستلم فعلياً", 110),
-            ("stock_qty", "كمية المخزون الحالي", 120),
             ("stock_value", "قيمة المخزون الحالي", 130),
             ("gap", "فجوة حسب POS", 120),
             ("actual_gap", "الفجوة الفعلية", 120),
@@ -18397,7 +21505,7 @@ class BranchCycleSummaryWindow(tk.Toplevel):
         self._sum = tk.StringVar(value="")
         ttk.Label(self, textvariable=self._sum).pack(fill=tk.X, padx=10, pady=(0, 8))
 
-        self._refresh()
+        self.after(50, self._refresh)
 
     def _selected_branch_device(self) -> Optional[str]:
         sel = self._tree.selection()
@@ -18508,13 +21616,57 @@ class BranchCycleSummaryWindow(tk.Toplevel):
         apply_zebra_tags(self._receipt_tree)
 
     def _refresh(self):
+        self._refresh_generation += 1
+        generation = self._refresh_generation
         self._tree.delete(*self._tree.get_children())
         df = (self._df.get() or "").strip() or None
         dt = (self._dt.get() or "").strip() or None
-        rows = self.db.list_branch_cycle_reconciliation(df, dt)
+        self._row_branch_by_iid.clear()
+        self._sum.set("جارٍ تحميل ملخص دورة الفروع...")
+
+        def worker() -> None:
+            started = time.time()
+            rows: List[Dict[str, Any]] = []
+            err = ""
+            worker_db = None
+            try:
+                conn = sqlite3.connect(self.db.path, timeout=8.0, isolation_level=None, check_same_thread=False)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA busy_timeout=8000;")
+                conn.execute("PRAGMA query_only=ON;")
+                conn.execute("PRAGMA temp_store=MEMORY;")
+                conn.execute("PRAGMA cache_size=-12000;")
+                worker_db = object.__new__(SqliteDatabase)
+                worker_db.path = self.db.path
+                worker_db.conn = conn
+                rows = worker_db.list_branch_cycle_reconciliation(df, dt)
+            except Exception as ex:
+                err = str(ex)
+            finally:
+                try:
+                    if worker_db is not None:
+                        worker_db.conn.close()
+                except Exception:
+                    pass
+
+            def done() -> None:
+                if generation != self._refresh_generation:
+                    return
+                if err:
+                    self._sum.set(f"فشل تحميل ملخص الدورة: {err}")
+                    return
+                self._render_rows(rows, started)
+
+            try:
+                self.after(0, done)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _render_rows(self, rows: List[Dict[str, Any]], started: float) -> None:
+        self._tree.delete(*self._tree.get_children())
         t_ship = 0.0
-        t_audit_value = 0.0
-        t_audit_qty = 0
         t_cash = 0.0
         t_actual = 0.0
         t_stock = 0.0
@@ -18523,8 +21675,6 @@ class BranchCycleSummaryWindow(tk.Toplevel):
         self._row_branch_by_iid.clear()
         for r in rows:
             t_ship += float(r.get("shipment_value") or 0.0)
-            t_audit_qty += int(r.get("audit_adjust_qty") or 0)
-            t_audit_value += float(r.get("audit_adjust_value") or 0.0)
             t_cash += float(r.get("cash_net") or 0.0)
             t_actual += float(r.get("actual_received") or 0.0)
             t_stock += float(r.get("stock_value") or 0.0)
@@ -18535,14 +21685,9 @@ class BranchCycleSummaryWindow(tk.Toplevel):
                 tk.END,
                 values=(
                     r.get("branch_name") or "",
-                    int(r.get("shipment_bills_count") or 0),
-                    int(r.get("shipment_qty") or 0),
                     f"{format_money(float(r.get('shipment_value') or 0.0))}",
-                    f"{int(r.get('audit_adjust_qty') or 0):+d}",
-                    f"{format_money(float(r.get('audit_adjust_value') or 0.0))}",
                     f"{format_money(float(r.get('cash_net') or 0.0))}",
                     f"{format_money(float(r.get('actual_received') or 0.0))}",
-                    int(r.get("stock_qty") or 0),
                     f"{format_money(float(r.get('stock_value') or 0.0))}",
                     f"{format_money(float(r.get('cycle_gap') or 0.0))}",
                     f"{format_money(float(r.get('actual_gap') or 0.0))}",
@@ -18552,11 +21697,19 @@ class BranchCycleSummaryWindow(tk.Toplevel):
         apply_zebra_tags(self._tree)
         self._sum.set(
             f"إجمالي قيمة الشحنات: {format_money(t_ship)}  |  إجمالي صافي المتحصل (POS): {format_money(t_cash)}  |  "
-            f"فرق الجرد: {t_audit_qty:+d} / {format_money(t_audit_value)}  |  "
             f"إجمالي المستلم فعلياً: {format_money(t_actual)}  |  إجمالي قيمة المخزون الحالي: {format_money(t_stock)}  |  "
             f"فجوة POS: {format_money(t_gap)}  |  الفجوة الفعلية: {format_money(t_actual_gap)}"
         )
         self._refresh_receipts()
+        try:
+            if logging_setup is not None:  # type: ignore[name-defined]
+                logging_setup.log_event(
+                    "ui.branch_cycle_summary.refresh",
+                    rows=len(rows),
+                    elapsed_ms=int((time.time() - started) * 1000),
+                )  # type: ignore[union-attr]
+        except Exception:
+            pass
 
 
 # ------------------- App -------------------
@@ -19124,6 +22277,68 @@ class WarehouseApp(tk.Tk):
         except Exception:
             pass
 
+    def _auto_queue_pos_source_of_truth_for_version(self) -> None:
+        if getattr(self, "_auto_source_truth_thread", None) is not None:
+            return
+
+        def _worker() -> None:
+            result: Dict[str, Any] = {}
+            err: Optional[Exception] = None
+            db = None
+            try:
+                db = SqliteDatabase(DB_PATH, run_startup_maintenance=False)
+                result = db.auto_queue_pos_source_of_truth_for_version()
+            except Exception as ex:
+                err = ex
+            finally:
+                try:
+                    if db is not None:
+                        db.conn.close()
+                except Exception:
+                    pass
+
+            def _finish() -> None:
+                self._auto_source_truth_thread = None
+                if err is not None:
+                    try:
+                        logging_setup.log_exception("auto_pos_source_truth.failed")  # type: ignore[union-attr]
+                    except Exception:
+                        pass
+                    try:
+                        show_toast(self, f"فشل تجهيز مطابقة الفروع تلقائياً: {err}", bg="#b91c1c", fg="#fee2e2")
+                    except Exception:
+                        pass
+                    return
+                if result.get("skipped"):
+                    return
+                queued = int(result.get("queued") or 0)
+                if queued <= 0:
+                    return
+                try:
+                    logging_setup.log_event(  # type: ignore[union-attr]
+                        "auto_pos_source_truth.queued",
+                        **{k: v for k, v in result.items() if isinstance(v, (str, int, float, bool))},
+                    )
+                except Exception:
+                    pass
+                try:
+                    show_toast(
+                        self,
+                        f"تم تجهيز مطابقة الفروع تلقائياً ({queued} حدث). ستُرسل مع المزامنة.",
+                        bg="#166534",
+                        fg="#dcfce7",
+                    )
+                except Exception:
+                    pass
+
+            try:
+                self.after(0, _finish)
+            except Exception:
+                pass
+
+        self._auto_source_truth_thread = threading.Thread(target=_worker, daemon=True)
+        self._auto_source_truth_thread.start()
+
     def _poll_shipment_receipt_reviews(self):
         try:
             review = self.db.get_next_shipment_receipt_review()
@@ -19294,8 +22509,21 @@ class WarehouseApp(tk.Tk):
             pass
 
     def _on_sync_completed(self, *_args):
-        """Refresh visible warehouse views after a manual or background sync."""
-        self._refresh_current_tab()
+        """Refresh visible warehouse views after a manual sync."""
+        try:
+            job = getattr(self, "_manual_sync_refresh_job", None)
+            if job is not None:
+                self.after_cancel(job)
+        except Exception:
+            pass
+        try:
+            self._manual_sync_refresh_job = self.after(350, self._run_manual_sync_refresh)
+        except Exception:
+            self._run_manual_sync_refresh()
+
+    def _run_manual_sync_refresh(self):
+        started = time.time()
+        self._manual_sync_refresh_job = None
         callbacks = (
             "_handle_sync_completed",
             "_refresh",
@@ -19303,6 +22531,7 @@ class WarehouseApp(tk.Tk):
             "_refresh_summary",
             "_fill_branch_bills",
         )
+        jobs = [self._refresh_current_tab]
         for child in list(self.winfo_children()):
             try:
                 if not isinstance(child, tk.Toplevel) or not child.winfo_exists():
@@ -19313,16 +22542,71 @@ class WarehouseApp(tk.Tk):
                 fn = getattr(child, name, None)
                 if not callable(fn):
                     continue
+                jobs.append(fn)
+                break
+
+        def run_one(index: int = 0) -> None:
+            if index >= len(jobs):
                 try:
-                    fn()
-                except TypeError:
-                    try:
-                        fn(None)
-                    except Exception:
-                        pass
+                    if logging_setup is not None:  # type: ignore[name-defined]
+                        logging_setup.log_event(
+                            "ui.sync_refresh.done",
+                            callbacks=len(jobs),
+                            elapsed_ms=int((time.time() - started) * 1000),
+                        )  # type: ignore[union-attr]
                 except Exception:
                     pass
-                break
+                return
+            fn = jobs[index]
+            cb_started = time.time()
+            try:
+                fn()
+            except TypeError:
+                try:
+                    fn(None)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            try:
+                if logging_setup is not None:  # type: ignore[name-defined]
+                    logging_setup.log_event(
+                        "ui.sync_refresh.callback",
+                        callback=getattr(fn, "__name__", str(fn)),
+                        elapsed_ms=int((time.time() - cb_started) * 1000),
+                    )  # type: ignore[union-attr]
+            except Exception:
+                pass
+            self.after(80, lambda: run_one(index + 1))
+
+        run_one(0)
+
+    def _on_background_sync_completed(self, summary=None):
+        """Lightweight periodic-sync completion hook.
+
+        The periodic sync already runs on a worker thread. Avoid the heavy
+        manual-sync refresh cascade here so the warehouse UI does not pause
+        every cycle.
+        """
+        try:
+            idx = self.notebook.index(self.notebook.select())
+        except Exception:
+            return
+        if idx != 4 or not hasattr(self, "_sync_diagnostics"):
+            return
+        try:
+            job = getattr(self, "_background_sync_refresh_job", None)
+            if job is not None:
+                self.after_cancel(job)
+        except Exception:
+            pass
+        try:
+            self._background_sync_refresh_job = self.after(
+                1200,
+                lambda: getattr(self, "_sync_diagnostics", None) and self._sync_diagnostics._refresh(),
+            )
+        except Exception:
+            pass
 
     def _open_income(self):
         """Switch to the Income tab instead of opening a separate window."""
@@ -19460,14 +22744,12 @@ class WarehouseApp(tk.Tk):
         pricing_menu = tk.Menu(menubar, tearoff=False)
         pricing_menu.add_command(label="إنشاء بروفايلات الأسعار…", command=self._open_price_profiles)
         pricing_menu.add_command(label="أصناف بدون بروفايل سعر…", command=self._open_missing_price_profiles)
-        pricing_menu.add_command(label="سجل تعديلات أسعار الفروع…", command=self._open_price_sync_audit)
         menubar.add_cascade(label="بروفايلات الأسعار", menu=pricing_menu)
 
         sync_menu = tk.Menu(menubar, tearoff=False)
         sync_menu.add_command(label="مزامنة الآن…", command=self._open_sync_dialog)
         sync_menu.add_command(label="إعدادات المزامنة…", command=self._open_sync_setup)
         sync_menu.add_separator()
-        sync_menu.add_command(label="سجل تعديلات أسعار الفروع…", command=self._open_price_sync_audit)
         sync_menu.add_command(label="تشخيص المزامنة (F11)", command=lambda: self._switch_tab("sync_diagnostics"))
         menubar.add_cascade(label="إدارة المزامنة", menu=sync_menu)
 
@@ -19687,12 +22969,6 @@ class WarehouseApp(tk.Tk):
             MissingPriceProfilesWindow(self, self.db)
         except Exception as e:
             messagebox.showerror("أصناف بدون بروفايل سعر", f"تعذّر فتح النافذة:\n{e}", parent=self)
-
-    def _open_price_sync_audit(self):
-        try:
-            open_price_sync_audit_dialog(self, self.db)
-        except Exception as e:
-            messagebox.showerror("سجل أسعار الفروع", f"تعذّر فتح السجل:\n{e}", parent=self)
 
     def _open_branch_bills_sync_log(self):
         try:

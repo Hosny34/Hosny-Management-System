@@ -39,8 +39,7 @@ INCLUDE_FILES = {
     "requirements-win7-x86.txt",
 }
 
-
-def _iter_files(pos_dir: Path):
+def _iter_files(pos_dir: Path, include_prebuilt: bool = False):
     dist_cert = pos_dir / "dist" / "cacert.pem"
     live_cert = pos_dir / "cacert.pem"
     if dist_cert.is_file():
@@ -77,6 +76,11 @@ def main(argv=None) -> int:
     parser.add_argument("--server-dir", default=str(repo_dir / "sync_server" / "Hosny-sync-server"))
     parser.add_argument("--version", required=True)
     parser.add_argument("--notes", default="")
+    parser.add_argument(
+        "--include-prebuilt",
+        action="store_true",
+        help="Deprecated; POS updates always build locally on the branch PC.",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
     if not VERSION_RE.match(str(args.version or "").strip()):
@@ -90,7 +94,9 @@ def main(argv=None) -> int:
 
     package_name = "HosnyPOS-%s.zip" % args.version
     package_path = out_dir / package_name
-    files_to_package = list(_iter_files(pos_dir))
+    files_to_package = list(_iter_files(pos_dir, include_prebuilt=bool(args.include_prebuilt)))
+    if args.include_prebuilt:
+        print("warning: --include-prebuilt is ignored; POS updates build locally on each branch PC", flush=True)
     forbidden = [
         str(rel).replace("\\", "/")
         for _, rel in files_to_package

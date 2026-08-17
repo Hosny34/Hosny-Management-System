@@ -22,8 +22,12 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import os
+import platform
+import socket
 import sys
-from typing import Optional
+import time
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, Optional
 
 
 _INSTALLED = False
@@ -31,6 +35,8 @@ _APP_NAME = "app"
 _LOG_PATH: Optional[str] = None
 _LOGGER: Optional[logging.Logger] = None
 _CRASH_POPUP_SHOWN = False
+_CONTEXT: Dict[str, Any] = {}
+_SENSITIVE_KEYS = {"password", "api_key", "apikey", "token", "secret", "authorization", "key"}
 
 
 def _resolve_base_dir() -> str:
@@ -125,7 +131,101 @@ def _show_crash_popup(exc_type, exc_value) -> None:
             pass
 
 
-def install_crash_logging(app_name: str) -> str:
+def _safe_detail(value: Any, depth: int = 0) -> Any:
+    if depth > 4:
+        return "<max-depth>"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text.strip().lower() in _SENSITIVE_KEYS:
+                out[key_text] = "<redacted>"
+            else:
+                out[key_text] = _safe_detail(item, depth + 1)
+        return out
+    if isinstance(value, (list, tuple, set)):
+        seq = list(value)
+        out = [_safe_detail(item, depth + 1) for item in seq[:80]]
+        if len(seq) > 80:
+            out.append({"truncated": len(seq) - 80})
+        return out
+    text = str(value)
+    return text if len(text) <= 500 else text[:500] + "...<truncated>"
+
+
+def _format_details(details: Dict[str, Any]) -> str:
+    if not details:
+        return ""
+    try:
+        import json
+
+        return " | " + json.dumps(_safe_detail(details), ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        return " | " + str(details)
+
+
+def configure_context(**context: Any) -> None:
+    clean = {str(k): _safe_detail(v) for k, v in context.items() if v not in (None, "")}
+    _CONTEXT.update(clean)
+    get_logger().info("context updated%s", _format_details(clean))
+
+
+def log_event(event: str, **details: Any) -> None:
+    payload = dict(_CONTEXT)
+    payload.update(details)
+    get_logger().info("event=%s%s", event, _format_details(payload))
+
+
+def log_exception(event: str, **details: Any) -> None:
+    payload = dict(_CONTEXT)
+    payload.update(details)
+    get_logger().exception("event=%s%s", event, _format_details(payload))
+
+
+@contextmanager
+def log_operation(event: str, **details: Any) -> Iterator[None]:
+    started = time.time()
+    log_event(event + ".start", **details)
+    try:
+        yield
+    except Exception:
+        log_exception(event + ".failed", elapsed_ms=int((time.time() - started) * 1000), **details)
+        raise
+    else:
+        log_event(event + ".done", elapsed_ms=int((time.time() - started) * 1000), **details)
+
+
+def _show_crash_popup(exc_type, exc_value) -> None:
+    """Best-effort error popup. Silent if Tk is not available yet."""
+    global _CRASH_POPUP_SHOWN
+    if _CRASH_POPUP_SHOWN:
+        return
+    summary = f"{getattr(exc_type, '__name__', 'Error')}: {exc_value}"
+    path = _LOG_PATH or "logs"
+    title = "خطأ غير متوقع"
+    body = f"حدث خطأ غير متوقع:\n{summary}\n\nتم حفظ التفاصيل في:\n{path}"
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk._default_root  # type: ignore[attr-defined]
+        if root is None or not bool(root.winfo_exists()):
+            raise RuntimeError("Tk root is unavailable")
+        messagebox.showerror(title, body, parent=root)
+        _CRASH_POPUP_SHOWN = True
+    except Exception:
+        try:
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(0, body, title, 0x10)
+            _CRASH_POPUP_SHOWN = True
+        except Exception:
+            pass
+
+
+def install_crash_logging(app_name: str, **context: Any) -> str:
     """Install file logging + global exception hooks. Returns the log path."""
     global _INSTALLED, _APP_NAME, _LOG_PATH, _LOGGER
     if _INSTALLED:
@@ -153,14 +253,14 @@ def install_crash_logging(app_name: str) -> str:
         try:
             handler = logging.handlers.RotatingFileHandler(
                 _LOG_PATH,
-                maxBytes=2_000_000,
-                backupCount=5,
+                maxBytes=10_000_000,
+                backupCount=10,
                 encoding="utf-8",
                 delay=True,
             )
             handler.setFormatter(
                 logging.Formatter(
-                    "%(asctime)s %(levelname)s %(name)s: %(message)s",
+                    "%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s",
                     datefmt="%Y-%m-%d %H:%M:%S",
                 )
             )
@@ -171,14 +271,23 @@ def install_crash_logging(app_name: str) -> str:
             pass
 
     _LOGGER = logger
+    if context:
+        configure_context(**context)
     logger.info("=" * 60)
     logger.info(
-        "%s starting up (frozen=%s, pid=%s, cwd=%s)",
+        "%s starting up (frozen=%s, pid=%s, cwd=%s, exe=%s, python=%s, platform=%s, host=%s, log=%s)",
         _APP_NAME,
         bool(getattr(sys, "frozen", False)),
         os.getpid(),
         os.getcwd(),
+        getattr(sys, "executable", ""),
+        sys.version.replace("\n", " "),
+        platform.platform(),
+        socket.gethostname(),
+        _LOG_PATH,
     )
+    if sys.argv:
+        logger.info("argv=%s", sys.argv)
 
     try:
         sys.stdout = _LogStream(logger, logging.INFO)
