@@ -7,7 +7,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from .config import BotConfig
+try:
+    from .config import BotConfig
+except ImportError:
+    from config import BotConfig
 
 
 BRANCH_NAMES = {

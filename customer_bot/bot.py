@@ -4,7 +4,10 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from .queries import BRANCH_NAMES, WarehouseCustomerQueries, canonical_branch
+try:
+    from .queries import BRANCH_NAMES, WarehouseCustomerQueries, canonical_branch
+except ImportError:
+    from queries import BRANCH_NAMES, WarehouseCustomerQueries, canonical_branch
 
 
 def money(value: Any) -> str:
@@ -162,4 +165,3 @@ class ArabicCustomerBot:
         if len(rows) > 10:
             lines.append(f"ويوجد {len(rows) - 10} نتيجة أخرى. ممكن تحدد اللون أو المقاس أكثر.")
         return "\n".join(lines)
-

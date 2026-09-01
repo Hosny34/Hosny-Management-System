@@ -7,8 +7,12 @@ from typing import Any, Dict, List
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
-from .config import BotConfig
-from .queries import branch_display_name, canonical_branch, clean
+try:
+    from .config import BotConfig
+    from .queries import branch_display_name, canonical_branch, clean
+except ImportError:
+    from config import BotConfig
+    from queries import branch_display_name, canonical_branch, clean
 
 
 def _parse_dt(value: Any) -> datetime | None:

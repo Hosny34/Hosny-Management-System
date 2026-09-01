@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from .cloud_queries import CloudCustomerQueries
-from .config import BotConfig, load_config
-from .queries import WarehouseCustomerQueries
+try:
+    from .cloud_queries import CloudCustomerQueries
+    from .config import BotConfig, load_config
+    from .queries import WarehouseCustomerQueries
+except ImportError:
+    from cloud_queries import CloudCustomerQueries
+    from config import BotConfig, load_config
+    from queries import WarehouseCustomerQueries
 
 
 def make_queries(config: BotConfig | None = None) -> Any:

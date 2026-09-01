@@ -7,10 +7,16 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
-from .bot import ArabicCustomerBot
-from .config import load_config
-from .runtime import make_queries
-from .whatsapp import extract_incoming_messages, send_text
+try:
+    from .bot import ArabicCustomerBot
+    from .config import load_config
+    from .runtime import make_queries
+    from .whatsapp import extract_incoming_messages, send_text
+except ImportError:
+    from bot import ArabicCustomerBot
+    from config import load_config
+    from runtime import make_queries
+    from whatsapp import extract_incoming_messages, send_text
 
 
 config = load_config()
