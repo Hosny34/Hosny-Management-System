@@ -17,7 +17,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta   # +date for calendar
 import calendar                       # ADD
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
@@ -137,6 +137,18 @@ def parse_int_text(value: Any, default: int = 0) -> int:
     except Exception:
         nums = re.findall(r"-?\d+", text)
         return int(nums[0]) if nums else default
+
+
+def parse_float_text(value: Any, default: Optional[float] = None) -> Optional[float]:
+    text = _strip_digit_marks(value).strip()
+    if not text:
+        return default
+    text = text.replace(",", "")
+    try:
+        return float(text)
+    except Exception:
+        nums = re.findall(r"-?\d+(?:\.\d+)?", text)
+        return float(nums[0]) if nums else default
 
 
 PREFERRED_ITEM_TYPE_ORDER = {
@@ -2194,6 +2206,10 @@ class SqliteDatabase:
         price_updates = 0
         inbox_specs = 0
         seen: Set[Tuple[str, str, str, str]] = set()
+        timing: Dict[str, int] = {}
+
+        def _mark_timing(name: str, started_at: float) -> None:
+            timing[name] = int((time.time() - started_at) * 1000)
 
         def _clean_local(value: Any) -> str:
             return _strip_digit_marks(value).strip()
@@ -2207,7 +2223,15 @@ class SqliteDatabase:
             }
             return spec if all(spec.values()) else None
 
-        def _load_rename_history() -> List[Tuple[Dict[str, str], Dict[str, str]]]:
+        SpecKey = Tuple[str, str, str, str]
+
+        def _spec_key(spec: Dict[str, str]) -> SpecKey:
+            return tuple(
+                _clean_local(spec.get(k)).casefold()
+                for k in ("item_type", "school", "color", "size")
+            )  # type: ignore[return-value]
+
+        def _load_rename_map() -> Dict[SpecKey, Dict[str, str]]:
             try:
                 rows = self.conn.execute(
                     """
@@ -2218,8 +2242,8 @@ class SqliteDatabase:
                     """
                 ).fetchall()
             except sqlite3.OperationalError:
-                return []
-            history: List[Tuple[Dict[str, str], Dict[str, str]]] = []
+                return {}
+            rename_map: Dict[SpecKey, Dict[str, str]] = {}
             for row in rows:
                 try:
                     payload = json.loads(row["payload_json"] or "{}")
@@ -2234,19 +2258,25 @@ class SqliteDatabase:
                     for k in ("item_type", "school", "color", "size")
                 }
                 if all(new_spec.values()) and old_spec != new_spec:
-                    history.append((old_spec, new_spec))
-            return history
+                    rename_map[_spec_key(old_spec)] = new_spec
+            return rename_map
 
-        rename_history = _load_rename_history()
+        _step = time.time()
+        rename_map = _load_rename_map()
+        _mark_timing("rename_map_ms", _step)
 
         def _apply_local_renames(spec: Dict[str, str]) -> Dict[str, str]:
             current = {k: _clean_local(spec.get(k)) for k in ("item_type", "school", "color", "size")}
-            for old_spec, new_spec in rename_history:
-                if all(
-                    current.get(k, "").casefold() == old_spec.get(k, "").casefold()
-                    for k in ("item_type", "school", "color", "size")
-                ):
-                    current = dict(new_spec)
+            seen_keys: Set[SpecKey] = set()
+            while True:
+                key = _spec_key(current)
+                if key in seen_keys:
+                    break
+                seen_keys.add(key)
+                new_spec = rename_map.get(key)
+                if not new_spec:
+                    break
+                current = dict(new_spec)
             return current
 
         def _load_delete_filters() -> List[Dict[str, str]]:
@@ -2308,6 +2338,35 @@ class SqliteDatabase:
                     return True
             return False
 
+        def _current_catalog_price(spec: Dict[str, str]) -> Optional[float]:
+            try:
+                row = self.conn.execute(
+                    """
+                    SELECT unit_price
+                      FROM branch_catalog_definitions
+                     WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                       AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                       AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                       AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+                     ORDER BY id DESC
+                     LIMIT 1
+                    """,
+                    (
+                        spec["item_type"],
+                        spec["school"],
+                        spec["color"],
+                        spec["size"],
+                    ),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None
+            if row is None:
+                return None
+            try:
+                return float(row["unit_price"] or 0)
+            except (TypeError, ValueError):
+                return None
+
         def _remember(
             specs: Dict[str, Any],
             unit_price: Any,
@@ -2336,6 +2395,9 @@ class SqliteDatabase:
                 price = float(unit_price or 0)
             except (TypeError, ValueError):
                 price = 0.0
+            catalog_price = _current_catalog_price(spec)
+            if catalog_price is not None and catalog_price > 0:
+                price = catalog_price
             existing = self.conn.execute(
                 """
                 SELECT id, unit_price
@@ -2371,6 +2433,7 @@ class SqliteDatabase:
         try:
             with self.conn:
                 try:
+                    _step = time.time()
                     rows = self.conn.execute(
                         """
                         SELECT item_type, school, color, size, unit_price
@@ -2384,32 +2447,37 @@ class SqliteDatabase:
                     ).fetchall()
                 except sqlite3.OperationalError:
                     rows = []
+                _mark_timing("pending_shipments_ms", _step)
                 for row in rows:
                     _remember(dict(row), row["unit_price"])
 
                 try:
+                    _step = time.time()
                     rows = self.conn.execute(
                         """
-                        SELECT item_type, school, color, size, unit_price, source_event_uuid
-                          FROM branch_catalog_definitions
+                        SELECT b.item_type,
+                               b.school,
+                               b.color,
+                               b.size,
+                               b.unit_price,
+                               i.server_seq AS source_server_seq
+                          FROM branch_catalog_definitions b
+                          LEFT JOIN sync_inbox i ON i.event_uuid = b.source_event_uuid
                         """
                     ).fetchall()
                 except sqlite3.OperationalError:
                     rows = []
+                _mark_timing("catalog_defs_ms", _step)
                 for row in rows:
-                    source_uuid = _clean_local(row["source_event_uuid"])
-                    seq_row = self.conn.execute(
-                        "SELECT server_seq FROM sync_inbox WHERE event_uuid = ? LIMIT 1",
-                        (source_uuid,),
-                    ).fetchone() if source_uuid else None
                     try:
-                        event_seq = int(seq_row["server_seq"]) if seq_row else None
+                        event_seq = int(row["source_server_seq"]) if row["source_server_seq"] is not None else None
                     except (TypeError, ValueError):
                         event_seq = None
                     _remember(dict(row), row["unit_price"], event_seq=event_seq)
 
                 cancelled_shipments: Set[str] = set()
                 try:
+                    _step = time.time()
                     rows = self.conn.execute(
                         """
                         SELECT payload_json
@@ -2419,6 +2487,7 @@ class SqliteDatabase:
                     ).fetchall()
                 except sqlite3.OperationalError:
                     rows = []
+                _mark_timing("cancelled_shipments_ms", _step)
                 for row in rows:
                     try:
                         payload = json.loads(row["payload_json"] or "{}")
@@ -2429,6 +2498,7 @@ class SqliteDatabase:
                         cancelled_shipments.add(shipment_uuid.casefold())
 
                 try:
+                    _step = time.time()
                     rows = self.conn.execute(
                         """
                         SELECT payload_json, server_seq
@@ -2438,6 +2508,7 @@ class SqliteDatabase:
                     ).fetchall()
                 except sqlite3.OperationalError:
                     rows = []
+                _mark_timing("transfer_out_ms", _step)
                 for row in rows:
                     try:
                         payload = json.loads(row["payload_json"] or "{}")
@@ -2465,6 +2536,7 @@ class SqliteDatabase:
                         _remember(item, item.get("unit_price"), from_inbox=True, event_seq=event_seq)
 
                 try:
+                    _step = time.time()
                     rows = self.conn.execute(
                         """
                         SELECT payload_json, server_seq
@@ -2474,6 +2546,7 @@ class SqliteDatabase:
                     ).fetchall()
                 except sqlite3.OperationalError:
                     rows = []
+                _mark_timing("reclassified_ms", _step)
                 for row in rows:
                     try:
                         payload = json.loads(row["payload_json"] or "{}")
@@ -2489,7 +2562,7 @@ class SqliteDatabase:
                     _remember(to_spec, to_spec.get("unit_price"), from_inbox=True, event_seq=event_seq)
 
                 stale_renamed_zero_rows = 0
-            return {
+            result = {
                 "created": created,
                 "price_updates": price_updates,
                 "owned_specs": len(seen),
@@ -2497,6 +2570,8 @@ class SqliteDatabase:
                 "stale_renamed_zero_rows": stale_renamed_zero_rows,
                 "stale_renamed_zero_cleanup": "manual_delete_definition_only",
             }
+            result.update(timing)
+            return result
         except Exception:
             import traceback
             traceback.print_exc()
@@ -3099,7 +3174,8 @@ class SqliteDatabase:
                 created_at TEXT NOT NULL,
                 customer TEXT,
                 customer_phone TEXT,
-                total REAL NOT NULL
+                total REAL NOT NULL,
+                note TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_bills_created ON bills(created_at DESC);
 
@@ -3313,6 +3389,8 @@ class SqliteDatabase:
                 self.conn.execute("ALTER TABLE bills ADD COLUMN bill_type TEXT NOT NULL DEFAULT 'SALE'")
             if "payment_method" not in cols:
                 self.conn.execute("ALTER TABLE bills ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'CASH'")
+            if "note" not in cols:
+                self.conn.execute("ALTER TABLE bills ADD COLUMN note TEXT")
         except Exception:
             pass
 
@@ -4339,12 +4417,23 @@ class SqliteDatabase:
                 return 0.0, value
             return value, 0.0
 
+        def date_in_selected_range(value: Any) -> bool:
+            text = str(value or "").strip()[:10]
+            if not text:
+                return False
+            if date_from and text < date_from:
+                return False
+            if date_to and text > date_to:
+                return False
+            return True
+
         def add_row(
             *,
             key: str,
             event_at: Any,
             bill_no: Any,
             bill_type: str,
+            category: str,
             customer: Any,
             phone: Any = "",
             schools_text: Any,
@@ -4358,6 +4447,7 @@ class SqliteDatabase:
                 "event_at": str(event_at or ""),
                 "bill_no": str(bill_no or ""),
                 "bill_type": bill_type,
+                "category": category,
                 "customer": str(customer or ""),
                 "customer_phone": str(phone or ""),
                 "schools": str(schools_text or ""),
@@ -4394,6 +4484,38 @@ class SqliteDatabase:
                     COALESCE(b.bill_type, 'SALE') AS bill_type,
                     COALESCE(b.status, 'CONFIRMED') AS status,
                     COALESCE(b.payment_method, '{PAYMENT_METHOD_CASH}') AS payment_method,
+                    COALESCE((
+                        SELECT SUM(COALESCE(bi_sel.line_total, 0))
+                          FROM bill_items bi_sel
+                         WHERE bi_sel.bill_id = b.id
+                           AND LOWER(TRIM(bi_sel.school)) IN ({placeholders})
+                    ), 0) AS selected_line_total,
+                    COALESCE((
+                        SELECT SUM(ABS(COALESCE(bi_sel.line_total, 0)))
+                          FROM bill_items bi_sel
+                         WHERE bi_sel.bill_id = b.id
+                           AND UPPER(COALESCE(bi_sel.origin, 'STOCK')) <> 'RETURN'
+                           AND LOWER(TRIM(bi_sel.school)) IN ({placeholders})
+                    ), 0) AS selected_stock_total,
+                    COALESCE((
+                        SELECT SUM(ABS(COALESCE(bi_all.line_total, 0)))
+                          FROM bill_items bi_all
+                         WHERE bi_all.bill_id = b.id
+                           AND UPPER(COALESCE(bi_all.origin, 'STOCK')) <> 'RETURN'
+                    ), 0) AS total_stock_total,
+                    COALESCE((
+                        SELECT SUM(ABS(COALESCE(bi_sel.line_total, 0)))
+                          FROM bill_items bi_sel
+                         WHERE bi_sel.bill_id = b.id
+                           AND UPPER(COALESCE(bi_sel.origin, '')) = 'RETURN'
+                           AND LOWER(TRIM(bi_sel.school)) IN ({placeholders})
+                    ), 0) AS selected_return_total,
+                    COALESCE((
+                        SELECT SUM(ABS(COALESCE(bi_all.line_total, 0)))
+                          FROM bill_items bi_all
+                         WHERE bi_all.bill_id = b.id
+                           AND UPPER(COALESCE(bi_all.origin, '')) = 'RETURN'
+                    ), 0) AS total_return_total,
                     (
                         SELECT GROUP_CONCAT(school_name)
                           FROM (
@@ -4410,22 +4532,38 @@ class SqliteDatabase:
                   AND UPPER(COALESCE(b.status, 'CONFIRMED')) != 'VOID'
                 ORDER BY b.created_at DESC, b.id DESC
                 """,
-                list(schools_lower) + bill_base_args + bill_date_args,
+                list(schools_lower)
+                + list(schools_lower)
+                + list(schools_lower)
+                + list(schools_lower)
+                + bill_base_args
+                + bill_date_args,
             )
             for b in cur.fetchall():
                 bt = str(b["bill_type"] or "SALE").upper()
                 total = float(b["total"] or 0.0)
                 if bt == "RETURN":
-                    amount = -abs(total)
+                    amount = -abs(float(b["selected_line_total"] or 0.0))
                 elif bt == "EXCHANGE":
-                    amount = total
+                    if total > 0:
+                        denom = float(b["total_stock_total"] or 0.0)
+                        selected = float(b["selected_stock_total"] or 0.0)
+                    elif total < 0:
+                        denom = float(b["total_return_total"] or 0.0)
+                        selected = float(b["selected_return_total"] or 0.0)
+                    else:
+                        denom = selected = 0.0
+                    amount = (total * (selected / denom)) if denom > 1e-9 else 0.0
                 else:
-                    amount = total
+                    amount = float(b["selected_line_total"] or 0.0)
+                if abs(amount) <= 1e-9:
+                    continue
                 add_row(
                     key=f"bill:{bt}:{b['id']}",
                     event_at=b["created_at"],
                     bill_no=b["id"],
                     bill_type=bt,
+                    category="exchange" if bt == "EXCHANGE" else ("returns" if bt == "RETURN" else "sales"),
                     customer=b["customer"],
                     phone=b["customer_phone"],
                     schools_text=b["schools_text"],
@@ -4436,7 +4574,7 @@ class SqliteDatabase:
 
             void_date, void_date_args = date_parts("b", "voided_at")
             void_where = bill_base + [
-                "COALESCE(b.bill_type, 'SALE') = 'SALE'",
+                "COALESCE(b.bill_type, 'SALE') IN ('SALE', 'RETURN')",
                 "UPPER(COALESCE(b.status, 'CONFIRMED')) = 'VOID'",
                 "COALESCE(TRIM(b.voided_at), '') <> ''",
             ] + void_date
@@ -4444,11 +4582,19 @@ class SqliteDatabase:
                 f"""
                 SELECT
                     b.id,
+                    b.created_at,
                     b.voided_at AS event_at,
                     COALESCE(b.customer, '') AS customer,
                     COALESCE(b.customer_phone, '') AS customer_phone,
                     COALESCE(b.total, 0) AS total,
+                    COALESCE(b.bill_type, 'SALE') AS bill_type,
                     COALESCE(b.payment_method, '{PAYMENT_METHOD_CASH}') AS payment_method,
+                    COALESCE((
+                        SELECT SUM(COALESCE(bi_sel.line_total, 0))
+                          FROM bill_items bi_sel
+                         WHERE bi_sel.bill_id = b.id
+                           AND LOWER(TRIM(bi_sel.school)) IN ({placeholders})
+                    ), 0) AS selected_line_total,
                     (
                         SELECT GROUP_CONCAT(school_name)
                           FROM (
@@ -4463,81 +4609,136 @@ class SqliteDatabase:
                 WHERE {' AND '.join(void_where)}
                 ORDER BY b.voided_at DESC, b.id DESC
                 """,
-                list(schools_lower) + bill_base_args + void_date_args,
+                list(schools_lower) + list(schools_lower) + bill_base_args + void_date_args,
             )
             for b in cur.fetchall():
+                if date_in_selected_range(b["created_at"]):
+                    continue
+                bt = str(b["bill_type"] or "SALE").upper()
+                selected_total = abs(float(b["selected_line_total"] or 0.0))
+                amount = selected_total if bt == "RETURN" else -selected_total
+                if abs(amount) <= 1e-9:
+                    continue
                 add_row(
                     key=f"bill:VOID:{b['id']}",
                     event_at=b["event_at"],
                     bill_no=b["id"],
-                    bill_type="VOID",
+                    bill_type="VOID_RETURN" if bt == "RETURN" else "VOID",
+                    category="void_return" if bt == "RETURN" else "void_sale",
                     customer=b["customer"],
                     phone=b["customer_phone"],
                     schools_text=b["schools_text"],
                     payment_method=b["payment_method"],
-                    amount=-abs(float(b["total"] or 0.0)),
+                    amount=amount,
                     status="VOID",
                 )
 
-            movement_date, movement_date_args = date_parts("m", "ts")
-            movement_where = [
+            reservation_date, reservation_date_args = date_parts("m", "ts")
+            reservation_where = [
                 "m.direction IN ('RESERVE_PAY', 'DELIVER_PAY', 'RESERVE_REFUND')",
                 f"LOWER(TRIM(m.school)) IN ({placeholders})",
-            ] + movement_date
+            ] + reservation_date
             cur.execute(
                 f"""
                 SELECT
-                    m.id,
-                    m.ts,
-                    m.direction,
-                    COALESCE(m.note, '') AS note,
-                    TRIM(m.school) AS school,
-                    COALESCE(m.unit_price, 0) AS amount,
+                    m.direction AS direction,
+                    MIN(m.id) AS first_id,
+                    MIN(m.ts) AS event_at,
                     COALESCE(m.payment_method, '{PAYMENT_METHOD_CASH}') AS payment_method,
-                    COALESCE((
-                        SELECT MAX(NULLIF(TRIM(r.customer), ''))
-                          FROM reservations r
-                         WHERE LOWER(TRIM(r.school)) = LOWER(TRIM(m.school))
-                           AND LOWER(TRIM(r.item_type)) = LOWER(TRIM(m.item_type))
-                           AND LOWER(TRIM(r.color)) = LOWER(TRIM(m.color))
-                           AND LOWER(TRIM(r.size)) = LOWER(TRIM(m.size))
-                           AND (m.note LIKE '%' || '#' || r.id || '%' OR date(r.created_at) <= date(m.ts))
-                    ), '') AS customer,
-                    COALESCE((
-                        SELECT MAX(NULLIF(TRIM(r.customer_phone), ''))
-                          FROM reservations r
-                         WHERE LOWER(TRIM(r.school)) = LOWER(TRIM(m.school))
-                           AND LOWER(TRIM(r.item_type)) = LOWER(TRIM(m.item_type))
-                           AND LOWER(TRIM(r.color)) = LOWER(TRIM(m.color))
-                           AND LOWER(TRIM(r.size)) = LOWER(TRIM(m.size))
-                           AND (m.note LIKE '%' || '#' || r.id || '%' OR date(r.created_at) <= date(m.ts))
-                    ), '') AS customer_phone
+                    GROUP_CONCAT(DISTINCT TRIM(m.school)) AS schools_text,
+                    SUM(COALESCE(m.unit_price, 0)) AS amount
                 FROM movements m
-                WHERE {' AND '.join(movement_where)}
-                ORDER BY m.ts DESC, m.id DESC
+                WHERE {' AND '.join(reservation_where)}
+                GROUP BY
+                    m.direction,
+                    COALESCE(m.payment_method, '{PAYMENT_METHOD_CASH}'),
+                    COALESCE(NULLIF(TRIM(m.note), ''), 'movement-' || m.id)
+                ORDER BY MIN(m.ts) DESC, MIN(m.id) DESC
                 """,
-                list(schools_lower) + movement_date_args,
+                list(schools_lower) + reservation_date_args,
             )
-            reservation_labels = {
-                "RESERVE_PAY": "RESERVATION",
-                "DELIVER_PAY": "RESERVATION_DELIVERY",
-                "RESERVE_REFUND": "RESERVATION_REFUND",
-            }
-            for m in cur.fetchall():
-                direction = str(m["direction"] or "").upper()
-                amount = float(m["amount"] or 0.0)
+            for r in cur.fetchall():
+                direction = str(r["direction"] or "").upper()
+                amount = float(r["amount"] or 0.0)
                 if direction == "RESERVE_REFUND":
                     amount = -abs(amount)
-                bill_no = str(m["note"] or "").strip() or str(m["id"])
+                if abs(amount) <= 1e-9:
+                    continue
                 add_row(
-                    key=f"movement:{m['id']}",
-                    event_at=m["ts"],
-                    bill_no=bill_no,
-                    bill_type=reservation_labels.get(direction, direction),
-                    customer=m["customer"],
-                    phone=m["customer_phone"],
-                    schools_text=m["school"],
-                    payment_method=m["payment_method"],
+                    key=f"movement:{direction}:{r['first_id']}:{r['payment_method']}",
+                    event_at=r["event_at"],
+                    bill_no=f"حركة #{r['first_id']}",
+                    bill_type=direction,
+                    category=(
+                        "reservation_delivered" if direction == "DELIVER_PAY"
+                        else "reservation_refund" if direction == "RESERVE_REFUND"
+                        else "reservation_paid"
+                    ),
+                    customer="",
+                    phone="",
+                    schools_text=r["schools_text"],
+                    payment_method=r["payment_method"],
+                    amount=amount,
+                    status="",
+                )
+
+            # Match shift-summary recovery for older/corrupted rows where the
+            # reservation paid amount exists but the money movement is missing.
+            missing_reservation_date, missing_reservation_date_args = date_parts("r", "created_at")
+            missing_reservation_where = [
+                f"LOWER(TRIM(r.school)) IN ({placeholders})",
+                "COALESCE(r.paid_amount, 0) > 0",
+            ] + missing_reservation_date
+            cur.execute(
+                f"""
+                SELECT
+                    MIN(r.id) AS first_id,
+                    MIN(r.created_at) AS event_at,
+                    COALESCE(MAX(NULLIF(TRIM(r.customer), '')), '') AS customer,
+                    COALESCE(MAX(NULLIF(TRIM(r.customer_phone), '')), '') AS customer_phone,
+                    COALESCE(r.payment_method, '{PAYMENT_METHOD_CASH}') AS payment_method,
+                    GROUP_CONCAT(DISTINCT TRIM(r.school)) AS schools_text,
+                    SUM(
+                        CASE
+                            WHEN COALESCE(r.paid_amount, 0) > COALESCE((
+                                SELECT SUM(m.unit_price)
+                                  FROM movements m
+                                 WHERE m.direction IN ('RESERVE_PAY', 'DELIVER_PAY')
+                                   AND (m.note = 'عربون حجز #' || r.id OR m.note LIKE '%' || '#' || r.id)
+                            ), 0)
+                            THEN COALESCE(r.paid_amount, 0) - COALESCE((
+                                SELECT SUM(m.unit_price)
+                                  FROM movements m
+                                 WHERE m.direction IN ('RESERVE_PAY', 'DELIVER_PAY')
+                                   AND (m.note = 'عربون حجز #' || r.id OR m.note LIKE '%' || '#' || r.id)
+                            ), 0)
+                            ELSE 0
+                        END
+                    ) AS amount
+                FROM reservations r
+                WHERE {' AND '.join(missing_reservation_where)}
+                GROUP BY
+                    COALESCE(r.payment_method, '{PAYMENT_METHOD_CASH}'),
+                    COALESCE(NULLIF(TRIM(r.reservation_group_uuid), ''), 'legacy-' || r.id)
+                HAVING amount > 0.000001
+                ORDER BY MIN(r.created_at) DESC, MIN(r.id) DESC
+                """,
+                list(schools_lower) + missing_reservation_date_args,
+            )
+            for r in cur.fetchall():
+                amount = float(r["amount"] or 0.0)
+                if abs(amount) <= 1e-9:
+                    continue
+                add_row(
+                    key=f"reservation_missing:{r['first_id']}:{r['payment_method']}",
+                    event_at=r["event_at"],
+                    bill_no=f"حجز #{r['first_id']}",
+                    bill_type="RESERVATION_PAYMENT_REPAIR",
+                    category="reservation_paid",
+                    customer=r["customer"],
+                    phone=r["customer_phone"],
+                    schools_text=r["schools_text"],
+                    payment_method=r["payment_method"],
                     amount=amount,
                     status="",
                 )
@@ -4545,11 +4746,26 @@ class SqliteDatabase:
             rows.sort(key=lambda r: (str(r.get("event_at") or ""), str(r.get("key") or "")), reverse=True)
             total_cash = sum(float(r.get("cash_total") or 0.0) for r in rows)
             total_visa = sum(float(r.get("visa_total") or 0.0) for r in rows)
+            breakdown = {
+                "sales": 0.0,
+                "returns": 0.0,
+                "exchange": 0.0,
+                "reservation_paid": 0.0,
+                "reservation_delivered": 0.0,
+                "reservation_refund": 0.0,
+                "void_sale": 0.0,
+                "void_return": 0.0,
+            }
+            for row in rows:
+                cat = str(row.get("category") or "")
+                if cat in breakdown:
+                    breakdown[cat] += float(row.get("total_paid") or 0.0)
             return {
                 "rows": rows,
                 "total_day": total_cash + total_visa,
                 "total_cash": total_cash,
                 "total_visa": total_visa,
+                "breakdown": breakdown,
             }
         finally:
             cur.close()
@@ -5760,8 +5976,8 @@ class SqliteDatabase:
         expected_counts = dict(best_snapshot["counts"])
         expected_prices = dict(best_snapshot.get("prices") or {})
         snapshot_at = _clean(best_snapshot.get("created_at"))
-        plus_dirs = {"IN", "RETURN_IN", "ADJUST_IN", "RECLASS_IN", "TRANSFER_IN"}
-        minus_dirs = {"OUT", "ADJUST_OUT", "RECLASS_OUT", "TRANSFER_OUT", "OUT_FACTORY"}
+        plus_dirs = {"IN", "RETURN_IN", "ADJUST_IN", "RECLASS_IN", "TRANSFER_IN", "VOID_IN"}
+        minus_dirs = {"OUT", "ADJUST_OUT", "RECLASS_OUT", "TRANSFER_OUT", "OUT_FACTORY", "VOID_OUT"}
         if snapshot_at:
             movement_rows = self.conn.execute(
                 """
@@ -6022,8 +6238,8 @@ class SqliteDatabase:
 
         expected_counts = dict(best_snapshot["counts"])
         expected_prices = dict(best_snapshot["prices"])
-        plus_dirs = {"IN", "RETURN", "RETURN_IN", "ADJUST_IN", "RECLASS_IN", "TRANSFER_IN", "SHIPMENT_RECEIVED"}
-        minus_dirs = {"OUT", "SALE", "RESERVE", "SHIPMENT_CANCEL", "ADJUST_OUT", "RECLASS_OUT", "TRANSFER_OUT", "OUT_FACTORY"}
+        plus_dirs = {"IN", "RETURN", "RETURN_IN", "ADJUST_IN", "RECLASS_IN", "TRANSFER_IN", "SHIPMENT_RECEIVED", "VOID_IN"}
+        minus_dirs = {"OUT", "SALE", "RESERVE", "SHIPMENT_CANCEL", "ADJUST_OUT", "RECLASS_OUT", "TRANSFER_OUT", "OUT_FACTORY", "VOID_OUT"}
         invalid_shipment_cancel_notes: Set[str] = set()
         try:
             cancel_rows = self.conn.execute(
@@ -7083,6 +7299,7 @@ class SqliteDatabase:
         bill_lines: List[Dict[str, Any]],
         payment_method: str = PAYMENT_METHOD_CASH,
         customer_phone: str = "",
+        note: str = "",
     ) -> int:
         self._require_shift()
         if not bill_lines:
@@ -7094,6 +7311,7 @@ class SqliteDatabase:
         if payment_method not in (PAYMENT_METHOD_CASH, PAYMENT_METHOD_VISA):
             raise ValueError("طريقة الدفع غير مدعومة.")
         customer_phone = _normalize_customer_phone(customer_phone)
+        clean_note = (note or "").strip()
 
         def _candidates_for_line(line: Dict[str, Any]) -> List[sqlite3.Row]:
             cur = self.conn.cursor()
@@ -7118,8 +7336,18 @@ class SqliteDatabase:
 
         with self.conn:
             bill_cur = self.conn.execute(
-                "INSERT INTO bills(created_at,customer,customer_phone,total,bill_type,status,payment_method,shift_id) VALUES(?,?,?,?,?,?,?,?)",
-                (now_iso(), (customer or "").strip() or None, customer_phone or None, 0.0, "SALE", "CONFIRMED", payment_method, self.active_shift_id),
+                "INSERT INTO bills(created_at,customer,customer_phone,total,bill_type,status,payment_method,shift_id,note) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    now_iso(),
+                    (customer or "").strip() or None,
+                    customer_phone or None,
+                    0.0,
+                    "SALE",
+                    "CONFIRMED",
+                    payment_method,
+                    self.active_shift_id,
+                    clean_note or None,
+                ),
             )
             bill_id = int(bill_cur.lastrowid)
             total = 0.0
@@ -7260,7 +7488,7 @@ class SqliteDatabase:
             if warehouse_target:
                 self._record_warehouse_return_event(
                     return_uuid=bill_uuid or "",
-                    note=f"bill #{bill_id}",
+                    note=clean_note or f"bill #{bill_id}",
                     lines=[
                         {
                             "item_type": it["item_type"],
@@ -7282,7 +7510,7 @@ class SqliteDatabase:
                 self._record_transfer_via_warehouse_event(
                     request_uuid=bill_uuid or "",
                     target_device=branch_target,
-                    note=f"bill #{bill_id}",
+                    note=clean_note or f"bill #{bill_id}",
                     lines=[
                         {
                             "item_type": it["item_type"],
@@ -7301,6 +7529,7 @@ class SqliteDatabase:
                     "bill_id": bill_id,
                     "customer": (customer or "").strip() or None,
                     "customer_phone": customer_phone or None,
+                    "note": clean_note or None,
                     "total": float(total),
                     "payment_method": payment_method,
                     "items": items_payload,
@@ -7316,6 +7545,7 @@ class SqliteDatabase:
                 "bill_type": bill_type_row[0] if bill_type_row else "SALE",
                 "customer": (customer or "").strip() or None,
                 "customer_phone": customer_phone or None,
+                "note": clean_note or None,
                 "total": float(total),
                 "payment_method": payment_method,
                 "warehouse_target": warehouse_target,
@@ -8008,7 +8238,17 @@ class SqliteDatabase:
 
         return self.confirm_incoming_shipment(shipment_uuid, payload, note)
 
-    def list_reservations(self, status=None, date_from=None, date_to=None, school=None, item_type=None, color=None):
+    def list_reservations(
+        self,
+        status=None,
+        date_from=None,
+        date_to=None,
+        school=None,
+        item_type=None,
+        color=None,
+        bill_number=None,
+        customer=None,
+    ):
         where = ["1=1"]
         args = []
         if status:
@@ -8029,11 +8269,39 @@ class SqliteDatabase:
         if color:
             where.append("LOWER(TRIM(color)) = LOWER(?)")
             args.append(color.strip())
+        bill_text = str(bill_number or "").strip()
+        if bill_text:
+            group_expr = "COALESCE(NULLIF(TRIM(reservation_group_uuid), ''), 'legacy-' || id)"
+            where.append(
+                f"""
+                {group_expr} IN (
+                    SELECT {group_expr}
+                      FROM reservations
+                     GROUP BY {group_expr}
+                    HAVING CAST(MIN(id) AS TEXT) LIKE ?
+                )
+                """
+            )
+            args.append(f"%{bill_text}%")
+        customer_text = str(customer or "").strip()
+        if customer_text:
+            where.append("LOWER(COALESCE(customer, '')) LIKE LOWER(?)")
+            args.append(f"%{customer_text}%")
         cur = self.conn.execute(
             f"SELECT * FROM reservations WHERE {' AND '.join(where)} ORDER BY id DESC", args)
         return [dict(r) for r in cur.fetchall()]
 
-    def count_reservations(self, status=None, date_from=None, date_to=None, school=None, item_type=None, color=None) -> int:
+    def count_reservations(
+        self,
+        status=None,
+        date_from=None,
+        date_to=None,
+        school=None,
+        item_type=None,
+        color=None,
+        bill_number=None,
+        customer=None,
+    ) -> int:
         where = ["1=1"]
         args = []
         if status:
@@ -8054,6 +8322,24 @@ class SqliteDatabase:
         if color:
             where.append("LOWER(TRIM(color)) = LOWER(?)")
             args.append(color.strip())
+        bill_text = str(bill_number or "").strip()
+        if bill_text:
+            group_expr = "COALESCE(NULLIF(TRIM(reservation_group_uuid), ''), 'legacy-' || id)"
+            where.append(
+                f"""
+                {group_expr} IN (
+                    SELECT {group_expr}
+                      FROM reservations
+                     GROUP BY {group_expr}
+                    HAVING CAST(MIN(id) AS TEXT) LIKE ?
+                )
+                """
+            )
+            args.append(f"%{bill_text}%")
+        customer_text = str(customer or "").strip()
+        if customer_text:
+            where.append("LOWER(COALESCE(customer, '')) LIKE LOWER(?)")
+            args.append(f"%{customer_text}%")
         row = self.conn.execute(
             f"SELECT COUNT(*) AS c FROM reservations WHERE {' AND '.join(where)}",
             args,
@@ -8274,7 +8560,13 @@ class SqliteDatabase:
                 "qty": int(row["qty"] or 0),
             }, actor="cashier")
 
-    def deliver_reservation_items(self, reservation_ids: Sequence[int], collected_amount: float = 0.0, payment_method: str = PAYMENT_METHOD_CASH) -> Dict[str, Any]:
+    def deliver_reservation_items(
+        self,
+        reservation_ids: Sequence[int],
+        collected_amount: float = 0.0,
+        payment_method: str = PAYMENT_METHOD_CASH,
+        replacements: Optional[Dict[int, Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         """Deliver selected reservation items with strict payment rules."""
         payment_method = _normalize_payment_method(payment_method)
         self._require_shift()
@@ -8291,14 +8583,76 @@ class SqliteDatabase:
         pending_rows = [r for r in rows if _is_reservation_active(r["status"])]
         if not pending_rows:
             raise ValueError("العناصر المحددة غير معلقة.")
-        self._ensure_reservation_delivery_stock(pending_rows)
         group_uuid = str((rows[0]["reservation_group_uuid"] or "")).strip()
         selected_ids = {int(r["id"]) for r in pending_rows}
-        selected_total = sum(float(r["total_amount"] or 0.0) for r in pending_rows)
-        selected_credit = sum(float(r["paid_amount"] or 0.0) for r in pending_rows)
+        replacement_map = replacements or {}
 
-        selected_unpaid = max(0.0, selected_total - selected_credit)
-        required_collect = selected_unpaid
+        delivery_rows: List[Dict[str, Any]] = []
+        for r in pending_rows:
+            rid = int(r["id"])
+            repl = replacement_map.get(rid) or replacement_map.get(str(rid)) or {}
+            original_item = str(r["item_type"] or "").strip()
+            school = str(r["school"] or "").strip()
+            original_color = str(r["color"] or "").strip()
+            original_size = str(r["size"] or "").strip()
+            delivered_item = str(repl.get("item_type") or original_item).strip()
+            delivered_color = str(repl.get("color") or original_color).strip()
+            delivered_size = str(repl.get("size") or original_size).strip()
+            if not delivered_item:
+                raise ValueError("اختر النوع المطلوب تسليمه.")
+            if not delivered_color:
+                raise ValueError("اختر اللون المطلوب تسليمه.")
+            if not delivered_size:
+                raise ValueError("اختر المقاس المطلوب تسليمه.")
+            if str(repl.get("school") or school).strip().casefold() != school.casefold():
+                raise ValueError("لا يمكن تغيير المدرسة أثناء تسليم الحجز.")
+            qty = int(r["qty"] or 0)
+            available = self.get_available_qty_for_reservation(delivered_item, school, delivered_color, delivered_size)
+            if available < qty:
+                raise ValueError(
+                    f"المخزون غير كافٍ لتسليم {delivered_item} / {school} / {delivered_color} / {delivered_size}. "
+                    f"المتاح: {available}"
+                )
+            price_raw = repl.get("unit_price")
+            delivered_price: Optional[float] = None
+            if price_raw not in (None, ""):
+                try:
+                    delivered_price = float(price_raw)
+                except (TypeError, ValueError):
+                    delivered_price = None
+            if delivered_price is None:
+                price = self.get_effective_price(delivered_item, school, delivered_color, delivered_size)
+                delivered_price = float(price) if price is not None else None
+            if delivered_price is None or delivered_price < 0:
+                raise ValueError(
+                    f"لا يوجد سعر صالح للصنف {delivered_item} / {school} / {delivered_color} / {delivered_size}."
+                )
+            delivered_total = round(float(delivered_price) * qty, 2)
+            previous_paid = float(r["paid_amount"] or 0.0)
+            delivery_rows.append({
+                "row": r,
+                "reservation_id": rid,
+                "original_item_type": original_item,
+                "original_color": original_color,
+                "original_size": original_size,
+                "item_type": delivered_item,
+                "school": school,
+                "color": delivered_color,
+                "size": delivered_size,
+                "qty": qty,
+                "unit_price": float(delivered_price),
+                "total_amount": delivered_total,
+                "previous_total_amount": float(r["total_amount"] or 0.0),
+                "previous_paid_amount": previous_paid,
+                "collect_amount": max(0.0, delivered_total - previous_paid),
+                "refund_amount": max(0.0, previous_paid - delivered_total),
+            })
+
+        selected_total = sum(float(d["total_amount"] or 0.0) for d in delivery_rows)
+        selected_credit = sum(float(d["previous_paid_amount"] or 0.0) for d in delivery_rows)
+
+        required_collect = sum(float(d["collect_amount"] or 0.0) for d in delivery_rows)
+        refund_amount = sum(float(d["refund_amount"] or 0.0) for d in delivery_rows)
         collect = max(0.0, float(collected_amount))
         if abs(collect - required_collect) > 1e-6:
             raise ValueError(
@@ -8307,26 +8661,57 @@ class SqliteDatabase:
             )
 
         cash_alloc: Dict[int, float] = {}
-        for r in pending_rows:
-            rid = int(r["id"])
-            total = float(r["total_amount"] or 0.0)
-            paid = float(r["paid_amount"] or 0.0)
-            cash_alloc[rid] = max(0.0, total - paid)
+        refund_alloc: Dict[int, float] = {}
+        for d in delivery_rows:
+            rid = int(d["reservation_id"])
+            cash_alloc[rid] = float(d["collect_amount"] or 0.0)
+            refund_alloc[rid] = float(d["refund_amount"] or 0.0)
 
         with self.conn:
-            for r in pending_rows:
-                rid = int(r["id"])
-                row_total = float(r["total_amount"] or 0.0)
+            for d in delivery_rows:
+                r = d["row"]
+                rid = int(d["reservation_id"])
                 add_paid = float(cash_alloc.get(rid, 0.0))
-                new_paid = row_total
+                refund_paid = float(refund_alloc.get(rid, 0.0))
+                new_paid = float(d["total_amount"] or 0.0)
+                changed = (
+                    str(d["original_item_type"]).casefold() != str(d["item_type"]).casefold()
+                    or str(d["original_color"]).casefold() != str(d["color"]).casefold()
+                    or str(d["original_size"]).casefold() != str(d["size"]).casefold()
+                )
+                delivery_note = f"Reservation delivered #{rid}"
+                if changed:
+                    delivery_note += (
+                        f" ({d['original_item_type']} / {d['original_color']} / {d['original_size']} -> "
+                        f"{d['item_type']} / {d['color']} / {d['size']})"
+                    )
                 self.deduct_stock_for_specs(
-                    r["item_type"], r["school"], r["color"], r["size"],
-                    int(r["qty"] or 0),
-                    note=f"Reservation delivered #{rid}",
+                    d["item_type"], d["school"], d["color"], d["size"],
+                    int(d["qty"] or 0),
+                    note=delivery_note,
                 )
                 self.conn.execute(
-                    "UPDATE reservations SET status=?, paid_amount=? WHERE id=?",
-                    (RESERVATION_STATUS_DELIVERED, new_paid, rid),
+                    """
+                    UPDATE reservations
+                       SET status=?,
+                           item_type=?,
+                           color=?,
+                           size=?,
+                           unit_price=?,
+                           total_amount=?,
+                           paid_amount=?
+                     WHERE id=?
+                    """,
+                    (
+                        RESERVATION_STATUS_DELIVERED,
+                        d["item_type"],
+                        d["color"],
+                        d["size"],
+                        float(d["unit_price"]),
+                        float(d["total_amount"]),
+                        new_paid,
+                        rid,
+                    ),
                 )
                 if add_paid > 1e-9:
                     self.conn.execute(
@@ -8334,16 +8719,36 @@ class SqliteDatabase:
                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (now_iso(), "DELIVER_PAY", None, 0,
                          f"تحصيل باقي حجز #{rid}",
-                         None, r["item_type"], r["school"], r["color"], r["size"],
+                         None, d["item_type"], d["school"], d["color"], d["size"],
                          add_paid, self.active_shift_id, payment_method),
+                    )
+                if refund_paid > 1e-9:
+                    self.conn.execute(
+                        """INSERT INTO movements(ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,unit_price,shift_id,payment_method)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (now_iso(), "RESERVE_REFUND", None, 0,
+                         f"استرداد فرق حجز #{rid}",
+                         None, d["item_type"], d["school"], d["color"], d["size"],
+                         refund_paid, self.active_shift_id, payment_method),
                     )
                 self._record_sync_event_or_raise("RESERVATION_DELIVERED", {
                     "reservation_uuid": r["uuid"] if "uuid" in r.keys() else None,
                     "reservation_id":   rid,
                     "collected_amount": add_paid,
+                    "refund_amount": refund_paid,
                     "paid_amount_total": float(new_paid),
+                    "previous_total_amount": float(d["previous_total_amount"]),
+                    "total_amount": float(d["total_amount"]),
                     "payment_method": payment_method,
                     "shift_id": self.active_shift_id,
+                    "original_item_type": d["original_item_type"],
+                    "original_color": d["original_color"],
+                    "original_size": d["original_size"],
+                    "item_type": d["item_type"],
+                    "school": d["school"],
+                    "color": d["color"],
+                    "size": d["size"],
+                    "qty": int(d["qty"] or 0),
                 })
         group_done = False
         if group_uuid:
@@ -8357,30 +8762,38 @@ class SqliteDatabase:
             "group_uuid": group_uuid or None,
             "delivered_items": len(pending_rows),
             "collected_amount": collect,
+            "refund_amount": refund_amount,
             "required_collect": required_collect,
             "payment_method": payment_method,
             "group_completed": group_done,
             "items": [
                 {
-                    "reservation_id": int(r["id"]),
-                    "reservation_uuid": r["uuid"] if "uuid" in r.keys() else None,
-                    "customer": r["customer"] if "customer" in r.keys() else None,
-                    "customer_phone": r["customer_phone"] if "customer_phone" in r.keys() else None,
-                    "item_type": r["item_type"],
-                    "school": r["school"],
-                    "color": r["color"],
-                    "size": r["size"],
-                    "qty": int(r["qty"] or 0),
-                    "total_amount": float(r["total_amount"] or 0.0),
-                    "previous_paid_amount": float(r["paid_amount"] or 0.0),
-                    "collected_amount": float(cash_alloc.get(int(r["id"]), 0.0)),
+                    "reservation_id": int(d["reservation_id"]),
+                    "reservation_uuid": d["row"]["uuid"] if "uuid" in d["row"].keys() else None,
+                    "customer": d["row"]["customer"] if "customer" in d["row"].keys() else None,
+                    "customer_phone": d["row"]["customer_phone"] if "customer_phone" in d["row"].keys() else None,
+                    "original_item_type": d["original_item_type"],
+                    "original_color": d["original_color"],
+                    "original_size": d["original_size"],
+                    "item_type": d["item_type"],
+                    "school": d["school"],
+                    "color": d["color"],
+                    "size": d["size"],
+                    "qty": int(d["qty"] or 0),
+                    "unit_price": float(d["unit_price"] or 0.0),
+                    "total_amount": float(d["total_amount"] or 0.0),
+                    "previous_total_amount": float(d["previous_total_amount"] or 0.0),
+                    "previous_paid_amount": float(d["previous_paid_amount"] or 0.0),
+                    "collected_amount": float(cash_alloc.get(int(d["reservation_id"]), 0.0)),
+                    "refund_amount": float(refund_alloc.get(int(d["reservation_id"]), 0.0)),
                 }
-                for r in pending_rows
+                for d in delivery_rows
             ],
         }, actor="cashier")
         return {
             "delivered_items": len(pending_rows),
             "collected_amount": collect,
+            "refund_amount": refund_amount,
             "group_completed": group_done,
             "group_uuid": group_uuid or None,
         }
@@ -8396,8 +8809,9 @@ class SqliteDatabase:
 
         The selected rows remain as cancelled audit rows. Their allocated
         down-payment is moved onto the still-pending rows in the same visible
-        reservation bill. If no pending rows remain, that money is recorded as a
-        refund for shift totals.
+        reservation bill until those rows are fully paid. Any amount that cannot
+        fit on the remaining pending rows is recorded as a refund for shift
+        totals.
         """
         self._require_shift()
         refund_payment_method = _normalize_payment_method(refund_payment_method)
@@ -8469,11 +8883,16 @@ class SqliteDatabase:
                 ).fetchall()
 
             refund_amount = 0.0
+            redistributed_amount = 0.0
             if remaining_rows and cancelled_paid > 1e-9:
                 existing_paid = sum(float(r["paid_amount"] or 0.0) for r in remaining_rows)
                 total_paid_to_allocate = round(existing_paid + cancelled_paid, 2)
                 remaining_totals = [float(r["total_amount"] or 0.0) for r in remaining_rows]
-                allocations = _allocate_reservation_down_payments(remaining_totals, total_paid_to_allocate)
+                remaining_total_due = round(sum(remaining_totals), 2)
+                allocatable_paid = min(total_paid_to_allocate, remaining_total_due)
+                refund_amount = round(max(0.0, total_paid_to_allocate - allocatable_paid), 2)
+                redistributed_amount = round(max(0.0, allocatable_paid - existing_paid), 2)
+                allocations = _allocate_reservation_down_payments(remaining_totals, allocatable_paid)
                 for r, alloc in zip(remaining_rows, allocations):
                     self.conn.execute(
                         "UPDATE reservations SET paid_amount=? WHERE id=?",
@@ -8481,6 +8900,7 @@ class SqliteDatabase:
                     )
             elif cancelled_paid > 1e-9:
                 refund_amount = cancelled_paid
+            if refund_amount > 1e-9:
                 first = active_rows[0]
                 self.conn.execute(
                     """INSERT INTO movements(ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,unit_price,shift_id,payment_method)
@@ -8495,7 +8915,7 @@ class SqliteDatabase:
 
         summary = {
             "cancelled_items": len(active_rows),
-            "redistributed_amount": 0.0 if refund_amount > 1e-9 else cancelled_paid,
+            "redistributed_amount": redistributed_amount,
             "refund_amount": refund_amount,
             "group_uuid": None if group_uuid.startswith("legacy-") else group_uuid,
         }
@@ -8631,6 +9051,39 @@ class SqliteDatabase:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_expenses(
+        self,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        shift_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        sql = """
+            SELECT e.id,
+                   e.created_at,
+                   e.amount,
+                   e.note,
+                   e.shift_id,
+                   s.started_at AS shift_started_at,
+                   s.ended_at AS shift_ended_at,
+                   COALESCE(s.status, '') AS shift_status
+              FROM expenses e
+              LEFT JOIN shifts s ON s.id = e.shift_id
+             WHERE 1=1
+        """
+        args: List[Any] = []
+        if shift_id:
+            sql += " AND e.shift_id = ?"
+            args.append(int(shift_id))
+        if date_from:
+            sql += " AND date(e.created_at) >= date(?)"
+            args.append(str(date_from))
+        if date_to:
+            sql += " AND date(e.created_at) <= date(?)"
+            args.append(str(date_to))
+        sql += " ORDER BY e.created_at DESC, e.id DESC"
+        rows = self.conn.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]
+
     def get_shift_expense_summary(self, shift_id: int) -> Dict[str, Any]:
         items = self.list_shift_expenses(int(shift_id))
         total = sum(float(r.get("amount") or 0.0) for r in items)
@@ -8677,7 +9130,13 @@ class SqliteDatabase:
 
         # Returns
         cur = self.conn.execute(
-            f"SELECT COUNT(*) as cnt, COALESCE(SUM(total),0) as total FROM bills WHERE {bill_scope} AND bill_type='RETURN'",
+            f"""
+            SELECT COUNT(*) as cnt, COALESCE(SUM(total),0) as total
+            FROM bills
+            WHERE {bill_scope}
+              AND bill_type='RETURN'
+              AND UPPER(COALESCE(status,'CONFIRMED')) != 'VOID'
+            """,
             bill_params)
         returns = dict(cur.fetchone())
         cur = self.conn.execute(
@@ -8686,7 +9145,9 @@ class SqliteDatabase:
                 COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_CASH}' THEN total ELSE 0 END),0) as cash_total,
                 COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_VISA}' THEN total ELSE 0 END),0) as visa_total
             FROM bills
-            WHERE {bill_scope} AND bill_type='RETURN'
+            WHERE {bill_scope}
+              AND bill_type='RETURN'
+              AND UPPER(COALESCE(status,'CONFIRMED')) != 'VOID'
             """,
             bill_params,
         )
@@ -8694,7 +9155,13 @@ class SqliteDatabase:
 
         # Exchanges (total can be positive=customer paid or negative=refund)
         cur = self.conn.execute(
-            f"SELECT COUNT(*) as cnt, COALESCE(SUM(total),0) as total FROM bills WHERE {bill_scope} AND bill_type='EXCHANGE'",
+            f"""
+            SELECT COUNT(*) as cnt, COALESCE(SUM(total),0) as total
+            FROM bills
+            WHERE {bill_scope}
+              AND bill_type='EXCHANGE'
+              AND UPPER(COALESCE(status,'CONFIRMED')) != 'VOID'
+            """,
             bill_params)
         exchanges = dict(cur.fetchone())
         cur = self.conn.execute(
@@ -8703,7 +9170,9 @@ class SqliteDatabase:
                 COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_CASH}' THEN total ELSE 0 END),0) as cash_total,
                 COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_VISA}' THEN total ELSE 0 END),0) as visa_total
             FROM bills
-            WHERE {bill_scope} AND bill_type='EXCHANGE'
+            WHERE {bill_scope}
+              AND bill_type='EXCHANGE'
+              AND UPPER(COALESCE(status,'CONFIRMED')) != 'VOID'
             """,
             bill_params,
         )
@@ -8755,16 +9224,28 @@ class SqliteDatabase:
             movement_params,
         )
         delivery_pay = dict(cur.fetchone())
+        void_method_scope = movement_scope.replace("shift_id", "m.shift_id").replace("ts", "m.ts")
+        same_shift_void_sql = """
+                  AND NOT (
+                        b.id IS NOT NULL
+                    AND (
+                           (b.shift_id IS NOT NULL AND m.shift_id IS NOT NULL AND b.shift_id = m.shift_id)
+                        OR (b.shift_id IS NULL AND b.created_at >= ? AND b.created_at <= ?)
+                    )
+                  )
+        """
+        void_params = (*movement_params, started, ended)
         cur = self.conn.execute(
             f"""
-            SELECT COUNT(*) as cnt, COALESCE(SUM(unit_price),0) as total
-            FROM movements
-            WHERE direction='VOID_PAY' AND {movement_scope}
+            SELECT COUNT(*) as cnt, COALESCE(SUM(m.unit_price),0) as total
+            FROM movements m
+            LEFT JOIN bills b ON b.id = m.bill_id
+            WHERE m.direction='VOID_PAY' AND {void_method_scope}
+            {same_shift_void_sql}
             """,
-            movement_params,
+            void_params,
         )
         voids = dict(cur.fetchone())
-        void_method_scope = movement_scope.replace("shift_id", "m.shift_id").replace("ts", "m.ts")
         cur = self.conn.execute(
             f"""
             SELECT
@@ -8773,8 +9254,9 @@ class SqliteDatabase:
             FROM movements m
             LEFT JOIN bills b ON b.id = m.bill_id
             WHERE m.direction='VOID_PAY' AND {void_method_scope}
+            {same_shift_void_sql}
             """,
-            movement_params,
+            void_params,
         )
         voids_by_method = dict(cur.fetchone())
         if self._allow_legacy_shift_time_fallback(dict(shift)):
@@ -8783,13 +9265,15 @@ class SqliteDatabase:
                 SELECT COUNT(*) as cnt, COALESCE(SUM(total),0) as total
                 FROM bills b
                 WHERE UPPER(COALESCE(b.status,'CONFIRMED'))='VOID'
+                  AND COALESCE(b.bill_type,'SALE')='SALE'
                   AND b.voided_at >= ? AND b.voided_at <= ?
+                  AND NOT (b.created_at >= ? AND b.created_at <= ?)
                   AND NOT EXISTS (
                       SELECT 1 FROM movements m
                       WHERE m.direction='VOID_PAY' AND m.bill_id=b.id
                   )
                 """,
-                (started, ended),
+                (started, ended, started, ended),
             )
             legacy_voids = dict(cur.fetchone())
             cur = self.conn.execute(
@@ -8799,13 +9283,15 @@ class SqliteDatabase:
                     COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_VISA}' THEN total ELSE 0 END),0) as visa_total
                 FROM bills b
                 WHERE UPPER(COALESCE(b.status,'CONFIRMED'))='VOID'
+                  AND COALESCE(b.bill_type,'SALE')='SALE'
                   AND b.voided_at >= ? AND b.voided_at <= ?
+                  AND NOT (b.created_at >= ? AND b.created_at <= ?)
                   AND NOT EXISTS (
                       SELECT 1 FROM movements m
                       WHERE m.direction='VOID_PAY' AND m.bill_id=b.id
                   )
                 """,
-                (started, ended),
+                (started, ended, started, ended),
             )
             legacy_voids_by_method = dict(cur.fetchone())
         else:
@@ -8905,7 +9391,13 @@ class SqliteDatabase:
             sales_by_method = dict(cur.fetchone())
             # returns
             cur = self.conn.execute(
-                f"SELECT COUNT(*) as cnt, COALESCE(SUM(total),0) as total FROM bills WHERE {bill_scope} AND bill_type='RETURN'",
+                f"""
+                SELECT COUNT(*) as cnt, COALESCE(SUM(total),0) as total
+                FROM bills
+                WHERE {bill_scope}
+                  AND bill_type='RETURN'
+                  AND UPPER(COALESCE(status,'CONFIRMED')) != 'VOID'
+                """,
                 bill_params)
             returns = dict(cur.fetchone())
             cur = self.conn.execute(
@@ -8914,14 +9406,22 @@ class SqliteDatabase:
                     COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_CASH}' THEN total ELSE 0 END),0) as cash_total,
                     COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_VISA}' THEN total ELSE 0 END),0) as visa_total
                 FROM bills
-                WHERE {bill_scope} AND bill_type='RETURN'
+                WHERE {bill_scope}
+                  AND bill_type='RETURN'
+                  AND UPPER(COALESCE(status,'CONFIRMED')) != 'VOID'
                 """,
                 bill_params,
             )
             returns_by_method = dict(cur.fetchone())
             # exchanges
             cur = self.conn.execute(
-                f"SELECT COUNT(*) as cnt, COALESCE(SUM(total),0) as total FROM bills WHERE {bill_scope} AND bill_type='EXCHANGE'",
+                f"""
+                SELECT COUNT(*) as cnt, COALESCE(SUM(total),0) as total
+                FROM bills
+                WHERE {bill_scope}
+                  AND bill_type='EXCHANGE'
+                  AND UPPER(COALESCE(status,'CONFIRMED')) != 'VOID'
+                """,
                 bill_params)
             exchanges = dict(cur.fetchone())
             cur = self.conn.execute(
@@ -8930,7 +9430,9 @@ class SqliteDatabase:
                     COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_CASH}' THEN total ELSE 0 END),0) as cash_total,
                     COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_VISA}' THEN total ELSE 0 END),0) as visa_total
                 FROM bills
-                WHERE {bill_scope} AND bill_type='EXCHANGE'
+                WHERE {bill_scope}
+                  AND bill_type='EXCHANGE'
+                  AND UPPER(COALESCE(status,'CONFIRMED')) != 'VOID'
                 """,
                 bill_params,
             )
@@ -8982,16 +9484,28 @@ class SqliteDatabase:
                 movement_params,
             )
             delivery_pay = dict(cur.fetchone())
+            void_method_scope = movement_scope.replace("shift_id", "m.shift_id").replace("ts", "m.ts")
+            same_shift_void_sql = """
+                      AND NOT (
+                            b.id IS NOT NULL
+                        AND (
+                               (b.shift_id IS NOT NULL AND m.shift_id IS NOT NULL AND b.shift_id = m.shift_id)
+                            OR (b.shift_id IS NULL AND b.created_at >= ? AND b.created_at <= ?)
+                        )
+                      )
+            """
+            void_params = (*movement_params, started, ended)
             cur = self.conn.execute(
                 f"""
-                SELECT COUNT(*) as cnt, COALESCE(SUM(unit_price),0) as total
-                FROM movements
-                WHERE direction='VOID_PAY' AND {movement_scope}
+                SELECT COUNT(*) as cnt, COALESCE(SUM(m.unit_price),0) as total
+                FROM movements m
+                LEFT JOIN bills b ON b.id = m.bill_id
+                WHERE m.direction='VOID_PAY' AND {void_method_scope}
+                {same_shift_void_sql}
                 """,
-                movement_params,
+                void_params,
             )
             voids = dict(cur.fetchone())
-            void_method_scope = movement_scope.replace("shift_id", "m.shift_id").replace("ts", "m.ts")
             cur = self.conn.execute(
                 f"""
                 SELECT
@@ -9000,8 +9514,9 @@ class SqliteDatabase:
                 FROM movements m
                 LEFT JOIN bills b ON b.id = m.bill_id
                 WHERE m.direction='VOID_PAY' AND {void_method_scope}
+                {same_shift_void_sql}
                 """,
-                movement_params,
+                void_params,
             )
             voids_by_method = dict(cur.fetchone())
             if self._allow_legacy_shift_time_fallback(r):
@@ -9010,13 +9525,15 @@ class SqliteDatabase:
                     SELECT COUNT(*) as cnt, COALESCE(SUM(total),0) as total
                     FROM bills b
                     WHERE UPPER(COALESCE(b.status,'CONFIRMED'))='VOID'
+                      AND COALESCE(b.bill_type,'SALE')='SALE'
                       AND b.voided_at >= ? AND b.voided_at <= ?
+                      AND NOT (b.created_at >= ? AND b.created_at <= ?)
                       AND NOT EXISTS (
                           SELECT 1 FROM movements m
                           WHERE m.direction='VOID_PAY' AND m.bill_id=b.id
                       )
                     """,
-                    (started, ended),
+                    (started, ended, started, ended),
                 )
                 legacy_voids = dict(cur.fetchone())
                 cur = self.conn.execute(
@@ -9026,13 +9543,15 @@ class SqliteDatabase:
                         COALESCE(SUM(CASE WHEN UPPER(COALESCE(payment_method,'{PAYMENT_METHOD_CASH}'))='{PAYMENT_METHOD_VISA}' THEN total ELSE 0 END),0) as visa_total
                     FROM bills b
                     WHERE UPPER(COALESCE(b.status,'CONFIRMED'))='VOID'
+                      AND COALESCE(b.bill_type,'SALE')='SALE'
                       AND b.voided_at >= ? AND b.voided_at <= ?
+                      AND NOT (b.created_at >= ? AND b.created_at <= ?)
                       AND NOT EXISTS (
                           SELECT 1 FROM movements m
                           WHERE m.direction='VOID_PAY' AND m.bill_id=b.id
                       )
                     """,
-                    (started, ended),
+                    (started, ended, started, ended),
                 )
                 legacy_voids_by_method = dict(cur.fetchone())
             else:
@@ -9502,7 +10021,7 @@ class SqliteDatabase:
             " COALESCE(status,'CONFIRMED') AS status,"
             " COALESCE(bill_type,'SALE') AS bill_type,"
             f" COALESCE(payment_method,'{PAYMENT_METHOD_CASH}') AS payment_method,"
-            " void_reason, voided_at"
+            " void_reason, voided_at, COALESCE(note, '') AS note"
             " FROM bills ORDER BY id DESC"
         )
         rows = [dict(r) for r in cur.fetchall()]
@@ -9529,6 +10048,7 @@ class SqliteDatabase:
                 COALESCE(SUM(CASE WHEN status != ? THEN total_amount ELSE 0 END), 0) AS total,
                 COALESCE(SUM(CASE WHEN status != ? THEN paid_amount ELSE 0 END), 0) AS paid_amount,
                 COALESCE(MAX(NULLIF(TRIM(payment_method), '')), ?) AS payment_method,
+                COALESCE(MAX(NULLIF(TRIM(note), '')), '') AS note,
                 SUM(CASE WHEN status NOT IN (?, ?) THEN 1 ELSE 0 END) AS pending_count,
                 SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS cancelled_count,
                 COUNT(*) AS item_count
@@ -9591,8 +10111,9 @@ class SqliteDatabase:
                 raise ValueError("الفاتورة غير موجودة.")
             if str(bill["status"]).upper() == "VOID":
                 raise ValueError("تم إلغاء هذه الفاتورة بالفعل.")
-            if str(bill["bill_type"]).upper() != "SALE":
-                raise ValueError("الإلغاء المباشر متاح لفواتير البيع فقط. استخدم المرتجع للأنواع الأخرى.")
+            bill_type = str(bill["bill_type"] or "SALE").upper()
+            if bill_type not in ("SALE", "RETURN"):
+                raise ValueError("الإلغاء المباشر متاح لفواتير البيع والمرتجع فقط.")
 
             items = self.conn.execute(
                 "SELECT item_type, school, color, size, unit_price, qty, origin "
@@ -9603,22 +10124,62 @@ class SqliteDatabase:
                 raise ValueError("لا توجد بنود في هذه الفاتورة.")
 
             for item in items:
-                if str(item["origin"] or "STOCK").upper() != "STOCK":
+                item_origin = str(item["origin"] or "STOCK").upper()
+                qty = int(item["qty"] or 0)
+                if qty <= 0:
                     continue
-                stock_id = self.add_or_update_stock_row(
-                    item["item_type"], item["school"], item["color"], item["size"],
-                    float(item["unit_price"]), int(item["qty"]),
-                )
+                if bill_type == "SALE":
+                    if item_origin != "STOCK":
+                        continue
+                    stock_id = self.add_or_update_stock_row(
+                        item["item_type"], item["school"], item["color"], item["size"],
+                        float(item["unit_price"]), qty,
+                    )
+                    move_direction = "VOID_IN"
+                    move_note = f"Bill void: {reason}"
+                else:
+                    if item_origin != "RETURN":
+                        continue
+                    stock_row = self.conn.execute(
+                        """
+                        SELECT id, count
+                          FROM stocks
+                         WHERE TRIM(item_type)=TRIM(?)
+                           AND TRIM(school)=TRIM(?)
+                           AND TRIM(color)=TRIM(?)
+                           AND TRIM(size)=TRIM(?)
+                           AND ABS(COALESCE(unit_price,0)-?) < 0.001
+                         ORDER BY id ASC
+                         LIMIT 1
+                        """,
+                        (
+                            item["item_type"],
+                            item["school"],
+                            item["color"],
+                            item["size"],
+                            float(item["unit_price"]),
+                        ),
+                    ).fetchone()
+                    if stock_row is None:
+                        raise ValueError("لا يمكن إلغاء المرتجع لأن الصنف غير موجود في المخزون.")
+                    stock_id = int(stock_row["id"])
+                    available = int(stock_row["count"] or 0)
+                    if available < qty:
+                        raise ValueError("لا يمكن إلغاء المرتجع لأن الكمية لم تعد موجودة بالكامل في المخزون.")
+                    self.conn.execute("UPDATE stocks SET count = count - ? WHERE id = ?", (qty, int(stock_id)))
+                    move_direction = "VOID_OUT"
+                    move_note = f"Return void: {reason}"
+
                 self.conn.execute(
                     """INSERT INTO movements
                        (ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,unit_price,shift_id)
                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         now_iso(),
-                        "VOID_IN",
-                        stock_id,
-                        int(item["qty"]),
-                        f"Bill void: {reason}",
+                        move_direction,
+                        int(stock_id),
+                        qty,
+                        move_note,
                         int(bill_id),
                         item["item_type"],
                         item["school"],
@@ -9634,8 +10195,10 @@ class SqliteDatabase:
                    (ts,direction,stock_id,qty,note,bill_id,item_type,school,color,size,unit_price,shift_id,payment_method)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    now_iso(), "VOID_PAY", None, 0, f"Void refund: {reason}",
-                    int(bill_id), None, None, None, None, float(bill["total"] or 0.0),
+                    now_iso(), "VOID_PAY", None, 0,
+                    f"{'Void refund' if bill_type == 'SALE' else 'Void return cash-in'}: {reason}",
+                    int(bill_id), None, None, None, None,
+                    (float(bill["total"] or 0.0) if bill_type == "SALE" else -float(bill["total"] or 0.0)),
                     self.active_shift_id,
                     bill["payment_method"] if "payment_method" in bill.keys() else PAYMENT_METHOD_CASH,
                 ),
@@ -9649,6 +10212,7 @@ class SqliteDatabase:
             self._record_sync_event_or_raise("SALE_VOIDED", {
                 "bill_uuid": bill["uuid"] if "uuid" in bill.keys() else None,
                 "bill_id": int(bill_id),
+                "bill_type": bill_type,
                 "customer": bill["customer"],
                 "total": float(bill["total"] or 0),
                 "payment_method": bill["payment_method"] if "payment_method" in bill.keys() else PAYMENT_METHOD_CASH,
@@ -9658,6 +10222,7 @@ class SqliteDatabase:
             self._audit("sale_voided", {
                 "bill_id": int(bill_id),
                 "bill_uuid": bill["uuid"] if "uuid" in bill.keys() else None,
+                "bill_type": bill_type,
                 "customer": bill["customer"],
                 "total": float(bill["total"] or 0),
                 "reason": reason,
@@ -10985,9 +11550,10 @@ class DateField(ttk.Frame):
 class SizesGrid(ttk.Frame):
     COLS = 6
 
-    def __init__(self, master, sizes: List[str], **kwargs):
+    def __init__(self, master, sizes: List[str], on_qty_enter: Optional[Callable[[], None]] = None, **kwargs):
         super().__init__(master, **kwargs)
 
+        self._on_qty_enter = on_qty_enter
         self.fixed_sizes = sizes[:]
         self.extra_sizes = ["__custom1__", "__custom2__"]
         self.sizes = self.fixed_sizes + self.extra_sizes
@@ -11006,6 +11572,7 @@ class SizesGrid(ttk.Frame):
         ))
 
         self._vars = {}
+        self._qty_entries = {}
 
         for i, sz in enumerate(self.sizes):
             r = i // self.COLS
@@ -11018,20 +11585,45 @@ class SizesGrid(ttk.Frame):
 
             if is_custom:
                 v_label = tk.StringVar(value="" if sz.startswith("__") else sz)
-                ttk.Entry(cell, textvariable=v_label, width=7, justify="center").pack()
+                label_widget = ttk.Entry(cell, textvariable=v_label, width=7, justify="center")
+                label_widget.pack()
             else:
                 v_label = tk.StringVar(value=sz)
-                ttk.Label(cell, text=sz, anchor="center").pack()
+                label_widget = ttk.Label(cell, text=sz, anchor="center")
+                label_widget.pack()
 
-            ttk.Label(cell, text="الكمية", font=("", 8)).pack()
+            qty_label = ttk.Label(cell, text="الكمية", font=("", 8))
+            qty_label.pack()
             v_qty = tk.StringVar()
-            ttk.Entry(cell, textvariable=v_qty, width=6).pack()
+            qty_entry = ttk.Entry(cell, textvariable=v_qty, width=6)
+            qty_entry.pack()
 
             ttk.Label(cell, text="السعر", font=("", 8)).pack()
             v_price = tk.StringVar()
             ttk.Entry(cell, textvariable=v_price, width=8).pack()
 
             self._vars[sz] = (v_qty, v_price, v_label, is_custom)
+            self._qty_entries[sz] = qty_entry
+
+            def _focus_qty(_event=None, key=sz):
+                entry = self._qty_entries.get(key)
+                if entry is not None:
+                    entry.focus_set()
+                    try:
+                        entry.selection_range(0, tk.END)
+                    except Exception:
+                        pass
+                return None
+
+            def _submit_qty(_event=None):
+                if self._on_qty_enter is not None:
+                    self._on_qty_enter()
+                return "break"
+
+            for widget in (cell, label_widget, qty_label):
+                widget.bind("<Button-1>", _focus_qty, add="+")
+            qty_entry.bind("<Return>", _submit_qty, add="+")
+            qty_entry.bind("<KP_Enter>", _submit_qty, add="+")
 
         for c in range(self.COLS):
             self.columnconfigure(c, weight=1)
@@ -11424,62 +12016,107 @@ class IncomeFrame(ttk.Frame):
         self._income_r1 = tk.StringVar()
         self._income_r2 = tk.StringVar()
         self._income_has_alpha = tk.BooleanVar(value=False)
+        self._income_view_mode = tk.StringVar(value="undefined")
+        self._defined_school: Optional[str] = None
+        self._defined_item_type: Optional[str] = None
+        self._defined_color: Optional[str] = None
+        self._defined_size: Optional[str] = None
+        self._defined_qty_var = tk.StringVar(value="1")
+        self._defined_price_var = tk.StringVar(value="")
+        self._defined_path_var = tk.StringVar(value="")
+        self._supplier_var = tk.StringVar(value="")
         self._staging_lines: List[Dict[str, Any]] = []
 
         self._build()
 
     def _build(self):
-        ttk.Label(self, text="وارد (إضافة أصناف جديدة)", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 8))
+        ttk.Label(self, text="وارد (إضافة أصناف جديدة)", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 4))
 
         self._income_r1.trace_add("write", lambda *_: self._rebuild_sizes_grid())
         self._income_r2.trace_add("write", lambda *_: self._rebuild_sizes_grid())
         self._income_has_alpha.trace_add("write", lambda *_: self._rebuild_sizes_grid())
 
+        view_bar = ttk.Frame(self)
+        view_bar.pack(fill=tk.X, pady=(0, 6))
+        self._btn_undefined_view = ttk.Button(
+            view_bar,
+            text="أصناف غير معرفة",
+            command=lambda: self._switch_income_view("undefined"),
+        )
+        self._btn_undefined_view.pack(side=tk.LEFT, padx=(0, 6))
+        self._btn_defined_view = ttk.Button(
+            view_bar,
+            text="أصناف معرفة",
+            command=lambda: self._switch_income_view("defined"),
+        )
+        self._btn_defined_view.pack(side=tk.LEFT)
+
+        self._income_views = ttk.Frame(self)
+        self._income_views.pack(fill=tk.BOTH, expand=True)
+
         # Main horizontal split
-        vsplit = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
+        vsplit = ttk.PanedWindow(self._income_views, orient=tk.HORIZONTAL)
         vsplit.pack(fill=tk.BOTH, expand=True)
 
         # LEFT side: existing form
         left = ttk.Frame(vsplit)
         vsplit.add(left, weight=6)
+        self._left_income_views = ttk.Frame(left)
+        self._left_income_views.pack(fill=tk.BOTH, expand=True)
+        self._undefined_income_view = ttk.Frame(self._left_income_views)
+        self._defined_income_view = ttk.Frame(self._left_income_views)
 
-        grid = ttk.LabelFrame(left, text="بيانات الصنف")
+        self._income_specs_frame = ttk.LabelFrame(self._undefined_income_view, text="إضافة صنف غير معرف")
+        grid = self._income_specs_frame
         grid.pack(fill=tk.BOTH, expand=True)
 
-        self.item_type = LabeledCombobox(grid, "النوع", self.db, "item_type")
-        self.school    = LabeledCombobox(grid, "المدرسة", self.db, "school")
-        self.color     = LabeledCombobox(grid, "اللون", self.db, "color")
+        ttk.Label(grid, text="اختر المدرسة ثم النوع ثم اللون، ثم أدخل الكمية والسعر للمقاسات المطلوبة.").grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 4)
+        )
+
+        filters = ttk.LabelFrame(grid, text="فلاتر سريعة")
+        filters.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
+        filters.columnconfigure(0, weight=1)
+        filters.columnconfigure(1, weight=1)
+        filters.columnconfigure(2, weight=1)
+
+        self.school = LabeledCombobox(filters, "المدرسة", self.db, "school")
+        self.item_type = LabeledCombobox(filters, "النوع", self.db, "item_type")
+        self.color = LabeledCombobox(filters, "اللون", self.db, "color")
+        self.school.grid(row=0, column=0, padx=6, pady=6, sticky="ew")
+        self.item_type.grid(row=0, column=1, padx=6, pady=6, sticky="ew")
+        self.color.grid(row=0, column=2, padx=6, pady=6, sticky="ew")
 
         self.item_type.set_supplier(lambda: self.db.get_distinct_filtered("item_type", self._build_income_filter_constraints("item_type")))
         self.school.set_supplier(lambda: self.db.get_distinct_filtered("school", self._build_income_filter_constraints("school")))
         self.color.set_supplier(lambda: self.db.get_distinct_filtered("color", self._build_income_filter_constraints("color")))
 
-        ranges_box = ttk.LabelFrame(grid, text="نطاقات المقاسات (للوارد فقط)")
-        ranges_box.grid(row=2, column=0, columnspan=2, sticky="ew", padx=6, pady=6)
+        ranges_box = ttk.Frame(grid)
+        ranges_box.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 4))
 
-        ttk.Label(ranges_box, text="النطاق الأول").grid(row=0, column=0, sticky="w")
+        ttk.Label(ranges_box, text="النطاق الأول").pack(side=tk.LEFT, padx=(0, 2))
         ttk.Combobox(
             ranges_box,
             textvariable=self._income_r1,
             values=[""] + NUMERIC_RANGE_LABELS,
             state="readonly",
-            width=18
-        ).grid(row=0, column=1, sticky="w", padx=4)
+            width=14
+        ).pack(side=tk.LEFT, padx=(0, 8))
 
-        ttk.Label(ranges_box, text="النطاق الثاني").grid(row=1, column=0, sticky="w")
+        ttk.Label(ranges_box, text="النطاق الثاني").pack(side=tk.LEFT, padx=(0, 2))
         ttk.Combobox(
             ranges_box,
             textvariable=self._income_r2,
             values=[""] + NUMERIC_RANGE_LABELS,
             state="readonly",
-            width=18
-        ).grid(row=1, column=1, sticky="w", padx=4)
+            width=14
+        ).pack(side=tk.LEFT, padx=(0, 8))
 
         ttk.Checkbutton(
             ranges_box,
             text="مقاسات حرفية (S إلى 5XL)",
             variable=self._income_has_alpha
-        ).grid(row=2, column=0, columnspan=2, sticky="w")
+        ).pack(side=tk.LEFT)
 
         for w in (self.item_type.cb, self.school.cb, self.color.cb):
             w.bind("<<ComboboxSelected>>", lambda e: (self._on_income_filter_changed(), self._auto_load_size_profile(), self._auto_fill_price_for_grid()), add="+")
@@ -11510,11 +12147,7 @@ class IncomeFrame(ttk.Frame):
         self._sizes_inner.bind("<Configure>", _on_sizes_config)
         sizes_canvas.bind("<Configure>", _on_sizes_config)
 
-        _bind_mousewheel(sizes_canvas)
-
-        self.item_type.grid(row=0, column=0, padx=6, pady=6, sticky="ew")
-        self.school.grid(   row=0, column=1, padx=6, pady=6, sticky="ew")
-        self.color.grid(    row=1, column=0, padx=6, pady=6, sticky="ew")
+        _bind_mousewheel(sizes_container, sizes_canvas)
 
         for c in range(2):
             grid.columnconfigure(c, weight=1)
@@ -11532,16 +12165,11 @@ class IncomeFrame(ttk.Frame):
         ttk.Button(add_btns, text="إضافة للقائمة", command=self._add_to_staging).pack(side=tk.LEFT)
         ttk.Button(add_btns, text="تفريغ", command=self._on_reset_keep_pkg).pack(side=tk.LEFT, padx=8)
 
+        self._build_defined_income_view(self._defined_income_view)
+
         # RIGHT side: staging area
         right = ttk.LabelFrame(vsplit, text="فاتورة الوارد")
         vsplit.add(right, weight=4)
-
-        # Supplier field
-        sup_row = ttk.Frame(right)
-        sup_row.pack(fill=tk.X, padx=4, pady=(4, 2))
-        ttk.Label(sup_row, text="المورد:").pack(side=tk.LEFT)
-        self._supplier_var = tk.StringVar()
-        ttk.Entry(sup_row, textvariable=self._supplier_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
 
         # Staging treeview
         tree_wrap = ttk.Frame(right)
@@ -11587,6 +12215,421 @@ class IncomeFrame(ttk.Frame):
 
         # Finalize button
         ttk.Button(right, text="تأكيد فاتورة الوارد", command=self._finalize_income).pack(fill=tk.X, padx=4, pady=(4, 4))
+        self._switch_income_view("undefined")
+        self._sync_income_status()
+
+    def _switch_income_view(self, mode: str) -> None:
+        mode = "defined" if mode == "defined" else "undefined"
+        self._income_view_mode.set(mode)
+        try:
+            self._undefined_income_view.pack_forget()
+            self._defined_income_view.pack_forget()
+            if mode == "defined":
+                self._defined_income_view.pack(fill=tk.BOTH, expand=True)
+                if not self._defined_school:
+                    self._defined_render_schools()
+            else:
+                self._undefined_income_view.pack(fill=tk.BOTH, expand=True)
+        except Exception:
+            pass
+        try:
+            self._income_specs_frame.configure(
+                text="إضافة صنف غير معرف"
+            )
+        except Exception:
+            pass
+        for btn, is_active in (
+            (getattr(self, "_btn_undefined_view", None), mode == "undefined"),
+            (getattr(self, "_btn_defined_view", None), mode == "defined"),
+        ):
+            if btn is None:
+                continue
+            try:
+                btn.state(["disabled"] if is_active else ["!disabled"])
+            except Exception:
+                pass
+
+    def _sync_income_status(self) -> None:
+        return
+
+    def _build_defined_income_view(self, parent: ttk.Frame) -> None:
+        wrap = ttk.LabelFrame(parent, text="إضافة إلى صنف معرف")
+        wrap.pack(fill=tk.BOTH, expand=True)
+        wrap.columnconfigure(0, weight=3)
+        wrap.columnconfigure(1, weight=2)
+        wrap.rowconfigure(3, weight=1)
+
+        self._defined_crumb_var = tk.StringVar(value="اختر المدرسة")
+        ttk.Label(
+            wrap,
+            text="اختر المدرسة ثم النوع ثم اللون ثم المقاس لإضافة كمية على صنف موجود بالفعل.",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 4))
+        ttk.Label(wrap, textvariable=self._defined_crumb_var, font=("Segoe UI", 10, "bold")).grid(
+            row=1, column=0, sticky="w", padx=8, pady=(0, 6)
+        )
+
+        filters = ttk.LabelFrame(wrap, text="فلاتر سريعة")
+        filters.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
+        filters.columnconfigure(0, weight=1)
+        filters.columnconfigure(1, weight=1)
+        filters.columnconfigure(2, weight=1)
+
+        self._defined_filter_school = LabeledCombobox(filters, "المدرسة", self.db, "school")
+        self._defined_filter_item = LabeledCombobox(filters, "النوع", self.db, "item_type")
+        self._defined_filter_color = LabeledCombobox(filters, "اللون", self.db, "color")
+        self._defined_filter_school.grid(row=0, column=0, padx=6, pady=6, sticky="ew")
+        self._defined_filter_item.grid(row=0, column=1, padx=6, pady=6, sticky="ew")
+        self._defined_filter_color.grid(row=0, column=2, padx=6, pady=6, sticky="ew")
+
+        self._defined_filter_school.set_supplier(lambda: self.db.get_distinct_filtered("school", self._defined_filter_constraints("school")) or [])
+        self._defined_filter_item.set_supplier(lambda: self.db.get_distinct_filtered("item_type", self._defined_filter_constraints("item_type")) or [])
+        self._defined_filter_color.set_supplier(lambda: self.db.get_distinct_filtered("color", self._defined_filter_constraints("color")) or [])
+
+        for w in (self._defined_filter_school.cb, self._defined_filter_item.cb, self._defined_filter_color.cb):
+            w.bind("<<ComboboxSelected>>", lambda _e: self._defined_on_filter_changed(), add="+")
+            w.bind("<KeyRelease>", lambda _e: self._defined_on_filter_changed(), add="+")
+
+        grid_wrap = ttk.Frame(wrap)
+        grid_wrap.grid(row=3, column=0, sticky="nsew", padx=(8, 4), pady=(0, 8))
+        grid_wrap.columnconfigure(0, weight=1)
+        grid_wrap.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(grid_wrap, highlightthickness=0)
+        scroll = ttk.Scrollbar(grid_wrap, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        self._defined_canvas = canvas
+        self._defined_grid_host = ttk.Frame(canvas)
+        self._defined_grid_window = canvas.create_window((0, 0), window=self._defined_grid_host, anchor="nw")
+
+        def _sync_canvas(_event=None):
+            try:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                canvas.itemconfigure(self._defined_grid_window, width=canvas.winfo_width())
+            except Exception:
+                pass
+
+        self._defined_grid_host.bind("<Configure>", _sync_canvas)
+        canvas.bind("<Configure>", _sync_canvas)
+        _bind_mousewheel(grid_wrap, canvas)
+
+        side = ttk.LabelFrame(wrap, text="بيانات الإضافة")
+        side.grid(row=3, column=1, sticky="nsew", padx=(4, 8), pady=(0, 8))
+        side.columnconfigure(1, weight=1)
+
+        ttk.Label(side, text="الاختيار").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
+        ttk.Label(side, textvariable=self._defined_path_var, wraplength=260, justify="left").grid(
+            row=0, column=1, sticky="ew", padx=8, pady=(8, 4)
+        )
+        ttk.Label(side, text="السعر الحالي").grid(row=1, column=0, sticky="w", padx=8, pady=4)
+        ttk.Label(side, textvariable=self._defined_price_var).grid(row=1, column=1, sticky="w", padx=8, pady=4)
+        ttk.Label(side, text="الكمية المضافة").grid(row=2, column=0, sticky="w", padx=8, pady=4)
+        self._defined_qty_entry = ttk.Entry(side, textvariable=self._defined_qty_var, width=12)
+        self._defined_qty_entry.grid(row=2, column=1, sticky="w", padx=8, pady=4)
+        def _submit_defined(_event=None):
+            self._on_add_defined()
+            return "break"
+
+        self._defined_qty_entry.bind("<Return>", _submit_defined, add="+")
+        self._defined_qty_entry.bind("<KP_Enter>", _submit_defined, add="+")
+
+        action_bar = ttk.Frame(side)
+        action_bar.grid(row=3, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 4))
+        ttk.Button(action_bar, text="إضافة للقائمة", command=self._on_add_defined).pack(side=tk.LEFT)
+        ttk.Button(action_bar, text="تفريغ الاختيار", command=self._defined_reset_selection).pack(side=tk.LEFT, padx=(6, 0))
+
+        self._defined_size_rows: Dict[str, Dict[str, Any]] = {}
+        self._defined_update_summary()
+
+    def _defined_clear_grid(self) -> None:
+        for child in self._defined_grid_host.winfo_children():
+            child.destroy()
+        try:
+            self._defined_canvas.yview_moveto(0)
+        except Exception:
+            pass
+
+    def _defined_make_buttons(self, values: List[str], command, *, cols: int = 4) -> None:
+        self._defined_clear_grid()
+        if not values:
+            ttk.Label(self._defined_grid_host, text="لا توجد بيانات مطابقة.").pack(anchor="w", padx=8, pady=8)
+            return
+        row_frame = None
+        for i, value in enumerate(values):
+            if i % cols == 0:
+                row_frame = ttk.Frame(self._defined_grid_host)
+                row_frame.pack(fill=tk.X, padx=4, pady=2)
+            ttk.Button(row_frame, text=value, command=lambda v=value: command(v)).pack(
+                side=tk.LEFT, padx=3, pady=3, fill=tk.X, expand=True
+            )
+
+    def _defined_add_back_button(self, text: str, command) -> None:
+        ttk.Button(self._defined_grid_host, text=text, command=command).pack(anchor="w", padx=8, pady=(6, 8))
+
+    def _defined_filter_constraints(self, exclude_field: str) -> Dict[str, Any]:
+        constraints: Dict[str, Any] = {}
+        school = (self._defined_filter_school.get() or "").strip()
+        item_type = (self._defined_filter_item.get() or "").strip()
+        color = (self._defined_filter_color.get() or "").strip()
+        if exclude_field != "school" and school:
+            constraints["school"] = school
+        if exclude_field != "item_type" and item_type:
+            constraints["item_type"] = item_type
+        if exclude_field != "color" and color:
+            constraints["color"] = color
+        return constraints
+
+    def _defined_filter_texts(self) -> Dict[str, str]:
+        return {
+            "school": (self._defined_filter_school.get() or "").strip(),
+            "item_type": (self._defined_filter_item.get() or "").strip(),
+            "color": (self._defined_filter_color.get() or "").strip(),
+        }
+
+    def _defined_filtered_inventory_rows(
+        self,
+        *,
+        school: Optional[str] = None,
+        item_type: Optional[str] = None,
+        color: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        rows = self.db.current_inventory({}) or []
+        texts = self._defined_filter_texts()
+        school_exact = (school or "").strip()
+        item_exact = (item_type or "").strip()
+        color_exact = (color or "").strip()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            row_school = str(row.get("school") or "").strip()
+            row_item = str(row.get("item_type") or "").strip()
+            row_color = str(row.get("color") or "").strip()
+            if not (row_school and row_item and row_color):
+                continue
+            if school_exact and row_school.casefold() != school_exact.casefold():
+                continue
+            if item_exact and row_item.casefold() != item_exact.casefold():
+                continue
+            if color_exact and row_color.casefold() != color_exact.casefold():
+                continue
+            if texts["school"] and texts["school"].casefold() not in row_school.casefold():
+                continue
+            if texts["item_type"] and texts["item_type"].casefold() not in row_item.casefold():
+                continue
+            if texts["color"] and texts["color"].casefold() not in row_color.casefold():
+                continue
+            out.append(row)
+        return out
+
+    @staticmethod
+    def _defined_unique_values(rows: List[Dict[str, Any]], field: str) -> List[str]:
+        seen = set()
+        values: List[str] = []
+        for row in rows:
+            value = str(row.get(field) or "").strip()
+            key = value.casefold()
+            if value and key not in seen:
+                seen.add(key)
+                values.append(value)
+        values.sort(key=lambda s: s.casefold())
+        return sort_item_type_values(values) if field == "item_type" else values
+
+    def _defined_refresh_filter_combos(self) -> None:
+        for w in (self._defined_filter_school, self._defined_filter_item, self._defined_filter_color):
+            try:
+                w.refresh_values()
+            except Exception:
+                pass
+
+    def _defined_on_filter_changed(self) -> None:
+        self._defined_refresh_filter_combos()
+        school_filter = (self._defined_filter_school.get() or "").strip()
+        item_filter = (self._defined_filter_item.get() or "").strip()
+        color_filter = (self._defined_filter_color.get() or "").strip()
+        if school_filter and self._defined_school and school_filter.casefold() != self._defined_school.casefold():
+            self._defined_school = None
+            self._defined_item_type = None
+            self._defined_color = None
+            self._defined_size = None
+        elif item_filter and self._defined_item_type and item_filter.casefold() != self._defined_item_type.casefold():
+            self._defined_item_type = None
+            self._defined_color = None
+            self._defined_size = None
+        elif color_filter and self._defined_color and color_filter.casefold() != self._defined_color.casefold():
+            self._defined_color = None
+            self._defined_size = None
+        if self._defined_color:
+            self._defined_render_sizes()
+        elif self._defined_item_type:
+            self._defined_select_item(self._defined_item_type)
+        elif self._defined_school:
+            self._defined_select_school(self._defined_school)
+        else:
+            self._defined_render_schools()
+
+    def _defined_update_summary(self) -> None:
+        parts = []
+        if self._defined_school:
+            parts.append(self._defined_school)
+        if self._defined_item_type:
+            parts.append(self._defined_item_type)
+        if self._defined_color:
+            parts.append(self._defined_color)
+        if self._defined_size:
+            parts.append(self._defined_size)
+        self._defined_path_var.set(" / ".join(parts) if parts else "لم يتم اختيار صنف بعد")
+
+    def _defined_reset_selection(self) -> None:
+        self._defined_school = None
+        self._defined_item_type = None
+        self._defined_color = None
+        self._defined_size = None
+        self._defined_filter_school.set("")
+        self._defined_filter_item.set("")
+        self._defined_filter_color.set("")
+        self._defined_qty_var.set("1")
+        self._defined_price_var.set("")
+        self._defined_size_rows = {}
+        self._defined_update_summary()
+        self._defined_refresh_filter_combos()
+        self._defined_render_schools()
+
+    def _defined_render_schools(self) -> None:
+        self._defined_school = None
+        self._defined_item_type = None
+        self._defined_color = None
+        self._defined_size = None
+        self._defined_price_var.set("")
+        self._defined_crumb_var.set("اختر المدرسة")
+        self._defined_update_summary()
+        schools = self._defined_unique_values(self._defined_filtered_inventory_rows(), "school")
+        self._defined_make_buttons(schools, self._defined_select_school)
+
+    def _defined_select_school(self, school: str) -> None:
+        if not school:
+            self._defined_render_schools()
+            return
+        self._defined_school = school
+        self._defined_item_type = None
+        self._defined_color = None
+        self._defined_size = None
+        self._defined_price_var.set("")
+        self._defined_crumb_var.set(f"{school} ← اختر النوع")
+        self._defined_update_summary()
+        items = self._defined_unique_values(self._defined_filtered_inventory_rows(school=school), "item_type")
+        self._defined_make_buttons(items, self._defined_select_item)
+        self._defined_add_back_button("رجوع إلى المدارس", self._defined_render_schools)
+
+    def _defined_select_item(self, item_type: str) -> None:
+        if not item_type:
+            self._defined_select_school(self._defined_school or "")
+            return
+        self._defined_item_type = item_type
+        self._defined_color = None
+        self._defined_size = None
+        self._defined_price_var.set("")
+        self._defined_crumb_var.set(f"{self._defined_school} / {item_type} ← اختر اللون")
+        self._defined_update_summary()
+        colors = self._defined_unique_values(
+            self._defined_filtered_inventory_rows(school=self._defined_school, item_type=item_type),
+            "color",
+        )
+        self._defined_make_buttons(colors, self._defined_select_color)
+        self._defined_add_back_button("رجوع إلى الأنواع", lambda: self._defined_select_school(self._defined_school or ""))
+
+    def _defined_select_color(self, color: str) -> None:
+        if not color:
+            self._defined_select_item(self._defined_item_type or "")
+            return
+        self._defined_color = color
+        self._defined_size = None
+        self._defined_price_var.set("")
+        self._defined_crumb_var.set(f"{self._defined_school} / {self._defined_item_type} / {color} ← اختر المقاس")
+        self._defined_update_summary()
+        self._defined_render_sizes()
+
+    def _defined_collect_size_rows(self, school: str, item_type: str, color: str) -> List[Dict[str, Any]]:
+        try:
+            return list(self.db.list_sizes_for_item(school, item_type, color) or [])
+        except Exception:
+            return []
+
+    def _defined_render_sizes(self) -> None:
+        school = self._defined_school or ""
+        item_type = self._defined_item_type or ""
+        color = self._defined_color or ""
+        size_rows = self._defined_collect_size_rows(school, item_type, color)
+        self._defined_size_rows = {str(r.get("size") or "").strip(): r for r in size_rows}
+        labels = []
+        for row in size_rows:
+            size = str(row.get("size") or "").strip()
+            if not size:
+                continue
+            labels.append(f"{size} ({int(row.get('count') or 0)})")
+        self._defined_make_buttons(labels, self._defined_select_size)
+        self._defined_add_back_button("رجوع إلى الألوان", lambda: self._defined_select_item(self._defined_item_type or ""))
+
+    def _defined_select_size(self, label: str) -> None:
+        size = label.split(" (", 1)[0].strip()
+        self._defined_size = size
+        self._defined_update_summary()
+        row = self._defined_size_rows.get(size, {})
+        price = row.get("last_price")
+        if price is None:
+            try:
+                price = self.db.get_effective_price(
+                    self._defined_item_type or "",
+                    self._defined_school or "",
+                    self._defined_color or "",
+                    size,
+                )
+            except Exception:
+                price = None
+        if price is None:
+            self._defined_price_var.set("غير معروف")
+        else:
+            self._defined_price_var.set(format_money(float(price)))
+        try:
+            self._defined_qty_entry.focus_set()
+            self._defined_qty_entry.selection_range(0, tk.END)
+        except Exception:
+            pass
+
+    def _on_add_defined(self) -> None:
+        if not all([self._defined_school, self._defined_item_type, self._defined_color, self._defined_size]):
+            messagebox.showwarning("بيانات ناقصة", "اختر المدرسة والنوع واللون والمقاس أولاً.", parent=self)
+            return
+        qty = parse_int_text(self._defined_qty_var.get(), 0) or 0
+        if qty <= 0:
+            messagebox.showwarning("كمية غير صالحة", "أدخل كمية أكبر من صفر.", parent=self)
+            return
+        price_txt = (self._defined_price_var.get() or "").strip()
+        price = None
+        if price_txt and price_txt != "غير معروف":
+            price = parse_float_text(price_txt)
+        if price is None:
+            try:
+                price = self.db.get_effective_price(
+                    self._defined_item_type or "",
+                    self._defined_school or "",
+                    self._defined_color or "",
+                    self._defined_size or "",
+                )
+            except Exception:
+                price = None
+        if price is None:
+            messagebox.showwarning("السعر غير معروف", "لا يوجد سعر معروف لهذا المقاس.", parent=self)
+            return
+        self._merge_staging_line(
+            item_type=self._defined_item_type or "",
+            school=self._defined_school or "",
+            color=self._defined_color or "",
+            size=self._defined_size or "",
+            price=float(price),
+            qty=int(qty),
+        )
+        self._sync_staging_table()
+        self._defined_qty_var.set("1")
 
     def _build_income_filter_constraints(self, exclude_field: str) -> Dict[str, Any]:
         c: Dict[str, Any] = {}
@@ -11673,7 +12716,7 @@ class IncomeFrame(ttk.Frame):
         if self._income_has_alpha.get():
             sizes.extend(ALPHA_SIZES)
 
-        self.sizes_grid = SizesGrid(self._sizes_inner, sizes)
+        self.sizes_grid = SizesGrid(self._sizes_inner, sizes, on_qty_enter=self._add_to_staging)
         self.sizes_grid.pack(fill="both", expand=False)
 
         self._sizes_inner.update_idletasks()
@@ -11729,7 +12772,31 @@ class IncomeFrame(ttk.Frame):
             messagebox.showwarning("فارغ", "لم تُدخل أي كميات في شبكة المقاسات.", parent=self)
             return
 
-        rows = self.sizes_grid.get_rows()
+        self._add_grid_rows_to_staging(
+            item_type=item_type,
+            school=school,
+            color=color,
+            grid=self.sizes_grid,
+        )
+
+    def _merge_staging_line(self, *, item_type: str, school: str, color: str, size: str, price: float, qty: int) -> None:
+        for line in self._staging_lines:
+            if (line["item_type"] == item_type and line["school"] == school
+                    and line["color"] == color and line["size"] == size
+                    and abs(float(line["unit_price"]) - float(price)) < 0.001):
+                line["qty"] += int(qty)
+                return
+        self._staging_lines.append({
+            "item_type": item_type,
+            "school": school,
+            "color": color,
+            "size": size,
+            "unit_price": float(price),
+            "qty": int(qty),
+        })
+
+    def _add_grid_rows_to_staging(self, *, item_type: str, school: str, color: str, grid: SizesGrid) -> None:
+        rows = grid.get_rows()
         added = 0
         for r in rows:
             sz = str(r["size"]).strip()
@@ -11746,25 +12813,14 @@ class IncomeFrame(ttk.Frame):
             else:
                 price = float(price)
 
-            # Merge with existing staging line if same specs
-            merged = False
-            for line in self._staging_lines:
-                if (line["item_type"] == item_type and line["school"] == school
-                        and line["color"] == color and line["size"] == sz
-                        and abs(line["unit_price"] - price) < 0.001):
-                    line["qty"] += qty
-                    merged = True
-                    break
-
-            if not merged:
-                self._staging_lines.append({
-                    "item_type": item_type,
-                    "school": school,
-                    "color": color,
-                    "size": sz,
-                    "unit_price": price,
-                    "qty": qty,
-                })
+            self._merge_staging_line(
+                item_type=item_type,
+                school=school,
+                color=color,
+                size=sz,
+                price=price,
+                qty=qty,
+            )
             added += 1
 
         if added == 0:
@@ -11773,7 +12829,7 @@ class IncomeFrame(ttk.Frame):
 
         self._sync_staging_table()
         # Clear the size grid quantities but keep the prices
-        self.sizes_grid.clear_quantities()
+        grid.clear_quantities()
 
     def _sync_staging_table(self):
         """Refresh the staging treeview from in-memory list."""
@@ -11792,6 +12848,7 @@ class IncomeFrame(ttk.Frame):
         self._staging_total_var.set(f"{format_money(total_value)}")
         self._staging_qty_var.set(str(total_qty))
         _apply_zebra_tags(self._staging_table)
+        self._sync_income_status()
 
     def _remove_staging_line(self):
         sel = self._staging_table.selection()
@@ -11851,6 +12908,10 @@ class POSFrame(ttk.Frame):
         self.bills = {1: [], 2: [], 3: [], 4: [], 5: [], 6: [], 7: []}
         self.customers = {1: "", 2: "", 3: "", 4: "", 5: "", 6: "", 7: ""}
         self.customer_phones = {1: "", 2: "", 3: "", 4: "", 5: "", 6: "", 7: ""}
+        self.bill_notes = {1: "", 2: "", 3: "", 4: "", 5: "", 6: "", 7: ""}
+        self.reservation_paid_values = {5: "0", 7: "0"}
+        self.reservation_paid_manual = {5: False, 7: False}
+        self._updating_reservation_paid = False
         self.active_bill = 1
         self._exchange_mode = "return"  # "return" or "take" — for bill 6
 
@@ -12059,6 +13120,15 @@ class POSFrame(ttk.Frame):
         self._cust_phone_entry.bind("<KeyRelease>", lambda e: self._save_customer(), add="+")
         self._cust_listbox = None
 
+        note_row = ttk.Frame(right)
+        note_row.pack(fill=tk.X, padx=4, pady=(0, 2))
+        ttk.Label(note_row, text="ملاحظة:").pack(side=tk.LEFT)
+        self._bill_note_var = tk.StringVar()
+        self._bill_note_entry = ttk.Entry(note_row, textvariable=self._bill_note_var)
+        self._bill_note_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
+        self._bill_note_entry.bind("<FocusOut>", lambda e: self._save_customer(), add="+")
+        self._bill_note_entry.bind("<KeyRelease>", lambda e: self._save_customer(), add="+")
+
         # Bill items treeview
         tree_wrap = ttk.Frame(right)
         tree_wrap.pack(fill=tk.BOTH, expand=True, padx=4, pady=(2, 2))
@@ -12108,6 +13178,7 @@ class POSFrame(ttk.Frame):
         self._res_frame.pack(fill=tk.X, padx=4, pady=(2, 2))
         ttk.Label(self._res_frame, text="المبلغ المدفوع:").grid(row=0, column=0, padx=4, pady=4, sticky="e")
         self._paid_var = tk.StringVar(value="0")
+        self._paid_var.trace_add("write", self._on_reservation_paid_changed)
         ttk.Entry(self._res_frame, textvariable=self._paid_var, width=12).grid(row=0, column=1, padx=4, pady=4, sticky="w")
         ttk.Label(self._res_frame, text="ملاحظة:").grid(row=1, column=0, padx=4, pady=4, sticky="e")
         self._res_note_var = tk.StringVar()
@@ -12515,6 +13586,7 @@ class POSFrame(ttk.Frame):
             })
 
         cols = 4
+        size_cell_width = 14
         row = None
         for i, r in enumerate(self._sizes_cache):
             if i % cols == 0:
@@ -12525,12 +13597,29 @@ class POSFrame(ttk.Frame):
             cnt = int(r.get("count") or 0)
             label = f"{sz} ({cnt})"
             style = "SizeZero.TButton" if cnt == 0 else ("SizeLow.TButton" if cnt <= 5 else "Size.TButton")
+            price = self._compute_price_for_size(sz)
+            price_text = format_money(float(price or 0.0)) if price is not None else "-"
 
-            btn = ttk.Button(row, text=label, style=style)
+            cell = ttk.Frame(row)
+            cell.pack(side=tk.LEFT, padx=3, pady=3)
+
+            btn = ttk.Button(cell, text=label, style=style, width=size_cell_width)
             # Double-click adds to active bill directly
             btn.configure(command=lambda v=label, b=btn: self._on_size_click(v, b))
             btn.bind("<Double-Button-1>", lambda e, v=label, b=btn: self._on_size_double_click(v, b))
-            btn.pack(side=tk.LEFT, padx=3, pady=3)
+            btn.pack(fill=tk.X)
+            tk.Label(
+                cell,
+                text=price_text,
+                width=size_cell_width,
+                height=1,
+                anchor="center",
+                bg="#ffffff",
+                fg="#334155",
+                bd=1,
+                relief="solid",
+                font=("Segoe UI", 8),
+            ).pack(fill=tk.X, pady=(1, 0))
 
             self._size_btns[label] = (btn, cnt == 0)
 
@@ -12924,15 +14013,62 @@ class POSFrame(ttk.Frame):
             pass
 
     # ------------------------------------------------------------------ bill management
+    def _reservation_bill_total(self, bill_no: Optional[int] = None) -> float:
+        n = int(bill_no or self.active_bill)
+        return round(
+            sum(float(ln.get("unit_price") or 0.0) * int(ln.get("qty") or 0) for ln in self.bills.get(n, [])),
+            2,
+        )
+
+    def _set_reservation_paid_value(self, value: Any, *, manual: Optional[bool] = None) -> None:
+        if self.active_bill not in self.RESERVATION_BILLS:
+            return
+        text = str(value if value is not None else "0").strip() or "0"
+        self.reservation_paid_values[self.active_bill] = text
+        if manual is not None:
+            self.reservation_paid_manual[self.active_bill] = bool(manual)
+        self._updating_reservation_paid = True
+        try:
+            self._paid_var.set(text)
+        finally:
+            self._updating_reservation_paid = False
+
+    def _on_reservation_paid_changed(self, *_args) -> None:
+        if getattr(self, "_updating_reservation_paid", False):
+            return
+        if getattr(self, "active_bill", None) not in self.RESERVATION_BILLS:
+            return
+        self.reservation_paid_values[self.active_bill] = self._paid_var.get()
+        self.reservation_paid_manual[self.active_bill] = True
+
+    def _save_reservation_paid_for_active_bill(self) -> None:
+        if self.active_bill in self.RESERVATION_BILLS:
+            self.reservation_paid_values[self.active_bill] = self._paid_var.get()
+
+    def _refresh_reservation_paid_default(self, total: Optional[float] = None, *, force: bool = False) -> None:
+        if self.active_bill not in self.RESERVATION_BILLS:
+            return
+        total_value = self._reservation_bill_total() if total is None else float(total or 0.0)
+        if force or not self.reservation_paid_manual.get(self.active_bill, False):
+            self._set_reservation_paid_value(format_money(total_value), manual=False)
+
     def _switch_bill(self, n: int):
         # Save current customer
         self.customers[self.active_bill] = self._customer_var.get()
         self.customer_phones[self.active_bill] = _normalize_customer_phone(self._customer_phone_var.get())
+        self.bill_notes[self.active_bill] = self._bill_note_var.get()
+        self._save_reservation_paid_for_active_bill()
         previous_requires_stock = self._active_add_requires_stock()
         self.active_bill = n
         # Restore customer for this bill
         self._customer_var.set(self.customers[n])
         self._customer_phone_var.set(self.customer_phones[n])
+        self._bill_note_var.set(self.bill_notes[n])
+        if n in self.RESERVATION_BILLS:
+            if not self.reservation_paid_manual.get(n, False):
+                self._refresh_reservation_paid_default(self._reservation_bill_total(n), force=True)
+            else:
+                self._set_reservation_paid_value(self.reservation_paid_values.get(n, "0"))
         self._update_bill_btn_styles()
         self._sync_bill_table()
         self._update_res_frame_visibility()
@@ -12973,14 +14109,17 @@ class POSFrame(ttk.Frame):
     def _save_customer(self):
         self.customers[self.active_bill] = self._customer_var.get()
         self.customer_phones[self.active_bill] = _normalize_customer_phone(self._customer_phone_var.get())
+        self.bill_notes[self.active_bill] = self._bill_note_var.get()
 
     def _clear_customer_for_bill(self, bill_no: Optional[int] = None) -> None:
         n = int(bill_no or self.active_bill)
         self.customers[n] = ""
         self.customer_phones[n] = ""
+        self.bill_notes[n] = ""
         if self.active_bill == n:
             self._customer_var.set("")
             self._customer_phone_var.set("")
+            self._bill_note_var.set("")
 
     def _choose_branch_target(self):
         current_device = (self.db.conn.execute(
@@ -13175,6 +14314,8 @@ class POSFrame(ttk.Frame):
             self.total_var.set(f"{format_money(diff)}")
         else:
             self.total_var.set(f"{format_money(total)}")
+            if self.active_bill in self.RESERVATION_BILLS:
+                self._refresh_reservation_paid_default(total)
 
         _apply_zebra_tags(self.bill_table)
 
@@ -13229,6 +14370,9 @@ class POSFrame(ttk.Frame):
 
     def _clear_bill(self):
         self.bills[self.active_bill].clear()
+        if self.active_bill in self.RESERVATION_BILLS:
+            self.reservation_paid_manual[self.active_bill] = False
+            self.reservation_paid_values[self.active_bill] = "0"
         self._sync_bill_table()
         self._refresh_size_grid_if_current(preserve_size=self._sel_size)
 
@@ -13444,7 +14588,8 @@ class POSFrame(ttk.Frame):
                                        f"تم إنشاء فاتورة حجز #{bill_no} بنجاح", toast_type="success")
                 self.bills[self.active_bill].clear()
                 self._clear_customer_for_bill(self.active_bill)
-                self._paid_var.set("0")
+                self.reservation_paid_manual[self.active_bill] = False
+                self._set_reservation_paid_value("0", manual=False)
                 self._res_note_var.set("")
                 self._sync_bill_table()
                 self._refresh_size_grid_if_current(preserve_size=self._sel_size)
@@ -13455,8 +14600,19 @@ class POSFrame(ttk.Frame):
             payment_method = self._choose_sale_payment_method(total)
             if not payment_method:
                 return
+            bill_note = ""
             try:
-                bill_id = self.db.create_bill(customer, lines, payment_method=payment_method, customer_phone=customer_phone)
+                bill_note = (self.bill_notes.get(self.active_bill) or "").strip()
+            except Exception:
+                bill_note = ""
+            try:
+                bill_id = self.db.create_bill(
+                    customer,
+                    lines,
+                    payment_method=payment_method,
+                    customer_phone=customer_phone,
+                    note=bill_note,
+                )
             except Exception as ex:
                 messagebox.showerror("فشل الحفظ", str(ex), parent=self)
                 return
@@ -14193,6 +15349,13 @@ class SchoolAccountsFrame(ttk.Frame):
         self._sum_day = tk.StringVar(value="0")
         self._sum_cash = tk.StringVar(value="0")
         self._sum_visa = tk.StringVar(value="0")
+        self._sum_sales = tk.StringVar(value="0")
+        self._sum_returns = tk.StringVar(value="0")
+        self._sum_exchange = tk.StringVar(value="0")
+        self._sum_reservation_paid = tk.StringVar(value="0")
+        self._sum_reservation_delivered = tk.StringVar(value="0")
+        self._sum_reservation_refund = tk.StringVar(value="0")
+        self._sum_voids = tk.StringVar(value="0")
         for i, (label, var) in enumerate([
             ("إجمالي اليوم:", self._sum_day),
             ("إجمالي كاش:", self._sum_cash),
@@ -14202,21 +15365,36 @@ class SchoolAccountsFrame(ttk.Frame):
             ttk.Label(summary, textvariable=var, font=("Segoe UI", 12, "bold")).grid(
                 row=0, column=i * 2 + 1, padx=(0, 16), pady=8, sticky="w"
             )
+        for i, (label, var) in enumerate([
+            ("مبيعات:", self._sum_sales),
+            ("مرتجعات:", self._sum_returns),
+            ("استبدال:", self._sum_exchange),
+            ("عربون:", self._sum_reservation_paid),
+            ("تسليم حجز:", self._sum_reservation_delivered),
+            ("استرداد حجز:", self._sum_reservation_refund),
+            ("إلغاء:", self._sum_voids),
+        ]):
+            ttk.Label(summary, text=label).grid(row=1, column=i * 2, padx=6, pady=(0, 8), sticky="e")
+            ttk.Label(summary, textvariable=var, font=("Segoe UI", 10, "bold")).grid(
+                row=1, column=i * 2 + 1, padx=(0, 12), pady=(0, 8), sticky="w"
+            )
 
         table_wrap = ttk.LabelFrame(self, text="فواتير اليوم")
         table_wrap.pack(fill=tk.BOTH, expand=True)
         cols = (
-            "event_at", "bill_no", "bill_type", "schools", "customer",
-            "payment_method", "cash_total", "visa_total", "total_paid",
+            "event_at", "bill_no", "bill_type", "category", "schools", "customer",
+            "payment_method", "status", "cash_total", "visa_total", "total_paid",
         )
         self._tree = ttk.Treeview(table_wrap, columns=cols, show="headings", height=16)
         for col, txt, w in [
             ("event_at", "التاريخ", 150),
             ("bill_no", "رقم الفاتورة", 160),
             ("bill_type", "النوع", 130),
+            ("category", "البند", 120),
             ("schools", "المدارس", 180),
             ("customer", "العميل", 170),
             ("payment_method", "طريقة الدفع", 100),
+            ("status", "الحالة", 100),
             ("cash_total", "كاش", 110),
             ("visa_total", "فيزا", 110),
             ("total_paid", "الإجمالي", 120),
@@ -14269,9 +15447,11 @@ class SchoolAccountsFrame(ttk.Frame):
                     fmt_local_ts(row.get("event_at"), ""),
                     row.get("bill_no") or "",
                     self._bill_type_label(row.get("bill_type")),
+                    self._category_label(row.get("category")),
                     row.get("schools") or "",
                     row.get("customer") or "",
                     _payment_method_label(row.get("payment_method")),
+                    row.get("status") or "",
                     f"{format_money(float(row.get('cash_total') or 0.0))}",
                     f"{format_money(float(row.get('visa_total') or 0.0))}",
                     f"{format_money(float(row.get('total_paid') or 0.0))}",
@@ -14282,6 +15462,15 @@ class SchoolAccountsFrame(ttk.Frame):
         self._sum_day.set(f"{format_money(float(report.get('total_day') or 0.0))}")
         self._sum_cash.set(f"{format_money(float(report.get('total_cash') or 0.0))}")
         self._sum_visa.set(f"{format_money(float(report.get('total_visa') or 0.0))}")
+        breakdown = report.get("breakdown") or {}
+        self._sum_sales.set(f"{format_money(float(breakdown.get('sales') or 0.0))}")
+        self._sum_returns.set(f"{format_money(float(breakdown.get('returns') or 0.0))}")
+        self._sum_exchange.set(f"{format_money(float(breakdown.get('exchange') or 0.0))}")
+        self._sum_reservation_paid.set(f"{format_money(float(breakdown.get('reservation_paid') or 0.0))}")
+        self._sum_reservation_delivered.set(f"{format_money(float(breakdown.get('reservation_delivered') or 0.0))}")
+        self._sum_reservation_refund.set(f"{format_money(float(breakdown.get('reservation_refund') or 0.0))}")
+        voids = float(breakdown.get("void_sale") or 0.0) + float(breakdown.get("void_return") or 0.0)
+        self._sum_voids.set(f"{format_money(voids)}")
 
     @staticmethod
     def _bill_type_label(value: Any) -> str:
@@ -14295,6 +15484,21 @@ class SchoolAccountsFrame(ttk.Frame):
         if code == "RESERVATION_REFUND":
             return "استرداد حجز"
         return _receipt_bill_type_label(code)
+
+    @staticmethod
+    def _category_label(value: Any) -> str:
+        code = str(value or "").strip().lower()
+        labels = {
+            "sales": "مبيعات",
+            "returns": "مرتجعات",
+            "exchange": "استبدال",
+            "reservation_paid": "عربون",
+            "reservation_delivered": "تسليم حجز",
+            "reservation_refund": "استرداد حجز",
+            "void_sale": "إلغاء بيع",
+            "void_return": "إلغاء مرتجع",
+        }
+        return labels.get(code, code)
 
     def _print_day_total(self):
         try:
@@ -14488,11 +15692,12 @@ class ShiftsSummaryFrame(ttk.Frame):
             ended = fmt_local_ts(s["ended_at"], "") if s["ended_at"] else "-"
             status = "مفتوحة" if s["status"] == "OPEN" else "مغلقة"
             day_total = float(s.get("cash_collected") or 0.0) + float(s.get("visa_collected") or 0.0)
+            cancel_total = self._shift_cancel_total(s)
             self._tree.insert("", tk.END, values=(
                 s["id"], started, ended, status,
                 f"{format_money(day_total)}",
                 f"{format_money(s.get('return_total', 0.0))}",
-                f"{format_money(s.get('void_total', 0.0))}",
+                f"{format_money(cancel_total)}",
                 f"{format_money(s.get('exchange_total', 0.0))}",
                 f"{format_money(s.get('expense_total', 0.0))}",
                 f"{format_money(s['cash_collected'])}",
@@ -14542,11 +15747,28 @@ class ShiftsSummaryFrame(ttk.Frame):
         day_total = float(s.get("cash_collected") or 0.0) + float(s.get("visa_collected") or 0.0)
         self._det_sales_var.set(f"{format_money(day_total)}")
         self._det_return_var.set(f"{s.get('return_count', 0)} فاتورة - {format_money(s.get('return_total', 0.0))}")
-        self._det_void_var.set(f"{s.get('void_count', 0)} فاتورة - {format_money(s.get('void_total', 0.0))}")
+        self._det_void_var.set(self._shift_cancel_label(s))
         self._det_exchange_var.set(f"{s.get('exchange_count', 0)} فاتورة - صافي {format_money(s.get('exchange_total', 0.0))}")
         self._det_expense_var.set(f"{s.get('expense_count', 0)} عملية - {format_money(s.get('expense_total', 0.0))}")
         self._det_cash_var.set(f"{format_money(s['cash_collected'])}")
         self._det_visa_var.set(f"{format_money(float(s.get('visa_collected', 0.0)))}")
+
+    @staticmethod
+    def _shift_cancel_total(shift: Dict[str, Any]) -> float:
+        return float(shift.get("void_total") or 0.0) + float(shift.get("res_refund") or 0.0)
+
+    @classmethod
+    def _shift_cancel_label(cls, shift: Dict[str, Any]) -> str:
+        void_count = int(shift.get("void_count", 0) or 0)
+        void_total = float(shift.get("void_total", 0.0) or 0.0)
+        reservation_refund = float(shift.get("res_refund", 0.0) or 0.0)
+        total = cls._shift_cancel_total(shift)
+        if reservation_refund > 1e-9:
+            return (
+                f"{void_count} فاتورة - {format_money(total)} "
+                f"(استرداد حجز {format_money(reservation_refund)})"
+            )
+        return f"{void_count} فاتورة - {format_money(void_total)}"
 
     def _clear_filters(self):
         self._df.set("")
@@ -14569,8 +15791,9 @@ class ShiftsSummaryFrame(ttk.Frame):
         ended = s["ended_at"][:16].replace("T", " ") if s["ended_at"] else "الآن"
         status = "مفتوحة" if s["status"] == "OPEN" else "مغلقة"
         void_html = ""
-        if int(s.get("void_count", 0) or 0) > 0 or float(s.get("void_total", 0.0) or 0.0) > 1e-9:
-            void_html = f'<div><b>الإلغاء:</b> {_num_html(s.get("void_count", 0))} فاتورة - {_money_html(s.get("void_total", 0.0))}</div>\n'
+        cancel_total = self._shift_cancel_total(s)
+        if int(s.get("void_count", 0) or 0) > 0 or cancel_total > 1e-9:
+            void_html = f'<div><b>الإلغاء:</b> {_html(self._shift_cancel_label(s))}</div>\n'
         customer_money = float(s.get("res_paid", 0.0)) + float(s.get("deliver_total", 0.0))
         customer_money_html = ""
         if customer_money > 1e-9 or int(s.get("res_count", 0) or 0) > 0 or int(s.get("deliver_count", 0) or 0) > 0:
@@ -14630,9 +15853,10 @@ h2 {{ font-size: 14px; text-align: center; margin: 4px 0; }}
             ended = s["ended_at"][:16].replace("T", " ") if s["ended_at"] else "-"
             status = "مفتوحة" if s["status"] == "OPEN" else "مغلقة"
             day_total = float(s.get("cash_collected") or 0.0) + float(s.get("visa_collected") or 0.0)
+            cancel_total = self._shift_cancel_total(s)
             rows_html += f"<tr><td>{_num_html(s['id'])}</td><td>{_num_html(started)}</td><td>{_num_html(ended)}</td><td>{_html(status)}</td>"
             rows_html += f"<td>{_money_html(day_total)}</td>"
-            rows_html += f"<td>{_money_html(s.get('return_total', 0.0))}</td><td>{_money_html(s.get('void_total', 0.0))}</td><td>{_money_html(s.get('exchange_total', 0.0))}</td>"
+            rows_html += f"<td>{_money_html(s.get('return_total', 0.0))}</td><td>{_money_html(cancel_total)}</td><td>{_money_html(s.get('exchange_total', 0.0))}</td>"
             rows_html += f"<td>{_money_html(s.get('expense_total', 0.0))}</td>"
             rows_html += f"<td>{_money_html(s['cash_collected'])}</td><td>{_money_html(float(s.get('visa_collected', 0.0)))}</td></tr>\n"
             total_day += day_total
@@ -14693,6 +15917,16 @@ class ReservationsFrame(ttk.Frame):
         self._rf_color.pack(side=tk.RIGHT, padx=4)
         self._rf_color.set_supplier(lambda: self.db.get_distinct_filtered("color", self._build_res_filter_constraints("color")))
 
+        ttk.Label(flt, text="رقم الفاتورة:").pack(side=tk.RIGHT, padx=(8, 2))
+        self._rf_bill_var = tk.StringVar()
+        self._rf_bill_entry = ttk.Entry(flt, textvariable=self._rf_bill_var, width=12, justify="center")
+        self._rf_bill_entry.pack(side=tk.RIGHT, padx=4)
+
+        ttk.Label(flt, text="العميل:").pack(side=tk.RIGHT, padx=(8, 2))
+        self._rf_customer_var = tk.StringVar()
+        self._rf_customer_entry = ttk.Entry(flt, textvariable=self._rf_customer_var, width=18, justify="right")
+        self._rf_customer_entry.pack(side=tk.RIGHT, padx=4)
+
         # Status filter
         ttk.Label(flt, text="الحالة:").pack(side=tk.RIGHT, padx=(4, 0))
         self._rf_status = ttk.Combobox(flt, values=["", "معلق", "تم التسليم"], state="readonly", width=12)
@@ -14710,6 +15944,8 @@ class ReservationsFrame(ttk.Frame):
 
         for w in (self._rf_school.cb, self._rf_item.cb, self._rf_color.cb):
             w.bind("<<ComboboxSelected>>", lambda e: self._on_filter_changed(), add="+")
+        for w in (self._rf_bill_entry, self._rf_customer_entry):
+            w.bind("<Return>", lambda e: self._refresh(), add="+")
 
         # ---- Reservations table ----
         tbl_wrap = ttk.Frame(self)
@@ -14775,6 +16011,8 @@ class ReservationsFrame(ttk.Frame):
         self._rf_status.set("")
         self._rf_df.set("")
         self._rf_dt.set("")
+        self._rf_bill_var.set("")
+        self._rf_customer_var.set("")
         self._rf_school.refresh_values()
         self._rf_item.refresh_values()
         self._rf_color.refresh_values()
@@ -14787,10 +16025,13 @@ class ReservationsFrame(ttk.Frame):
         item_type = self._rf_item.get() or None
         color = self._rf_color.get() or None
         status = self._rf_status.get() or None
+        bill_number = self._rf_bill_var.get().strip() or None
+        customer = self._rf_customer_var.get().strip() or None
         try:
             self._res_table.delete(*self._res_table.get_children())
             for r in self.db.list_reservations(status=status, date_from=df, date_to=dt,
-                                                school=school, item_type=item_type, color=color):
+                                                school=school, item_type=item_type, color=color,
+                                                bill_number=bill_number, customer=customer):
                 try:
                     group_rows = self.db.list_reservation_group_items(int(r["id"]))
                     bill_code = _reservation_bill_id_from_rows(group_rows) or str(r["id"])
@@ -14961,12 +16202,38 @@ class ReservationsFrame(ttk.Frame):
 
         selected_ids: Set[int] = set()
         pending_by_id = {int(r["id"]): r for r in pending_items}
+        delivery_choices: Dict[int, Dict[str, Any]] = {}
         for r in pending_items:
             rid = int(r["id"])
             total = float(r.get("total_amount") or 0.0)
             paid = float(r.get("paid_amount") or 0.0)
             rem = max(0.0, float(r.get("total_amount") or 0.0) - float(r.get("paid_amount") or 0.0))
+            delivery_choices[rid] = {
+                "item_type": str(r.get("item_type") or "").strip(),
+                "school": str(r.get("school") or "").strip(),
+                "color": str(r.get("color") or "").strip(),
+                "size": str(r.get("size") or "").strip(),
+                "unit_price": float(r.get("unit_price") or 0.0),
+                "total_amount": total,
+            }
             tv.insert("", tk.END, iid=str(rid), values=("☐", group_code, r.get("item_type", ""), r.get("school", ""), r.get("color", ""), r.get("size", ""), int(r.get("qty") or 0), f"{format_money(total)}", f"{format_money(paid)}", f"{format_money(rem)}"))
+
+        edit_box = ttk.LabelFrame(frm, text="تسليم الصنف المحدد كـ")
+        edit_box.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(edit_box, text="النوع:").pack(side=tk.RIGHT, padx=(8, 2))
+        delivery_item_var = tk.StringVar()
+        delivery_item_cb = ttk.Combobox(edit_box, textvariable=delivery_item_var, state="readonly", width=24)
+        delivery_item_cb.pack(side=tk.RIGHT, padx=4)
+        ttk.Label(edit_box, text="اللون:").pack(side=tk.RIGHT, padx=(8, 2))
+        delivery_color_var = tk.StringVar()
+        delivery_color_cb = ttk.Combobox(edit_box, textvariable=delivery_color_var, state="readonly", width=18)
+        delivery_color_cb.pack(side=tk.RIGHT, padx=4)
+        ttk.Label(edit_box, text="المقاس:").pack(side=tk.RIGHT, padx=(8, 2))
+        delivery_size_var = tk.StringVar()
+        delivery_size_cb = ttk.Combobox(edit_box, textvariable=delivery_size_var, state="readonly", width=12)
+        delivery_size_cb.pack(side=tk.RIGHT, padx=4)
+        delivery_info_var = tk.StringVar(value="اختر سطراً لتغيير النوع أو اللون أو المقاس")
+        ttk.Label(edit_box, textvariable=delivery_info_var, foreground="#475569").pack(side=tk.RIGHT, padx=8)
 
         ttk.Label(frm, text="المبلغ المحصّل الآن:").pack(anchor="w")
         collect_var = tk.StringVar(value="0")
@@ -14974,7 +16241,7 @@ class ReservationsFrame(ttk.Frame):
 
         def _selected_delivery_required() -> Tuple[float, float]:
             selected_rows = [pending_by_id[rid] for rid in sorted(selected_ids) if rid in pending_by_id]
-            selected_total = sum(float(r.get("total_amount") or 0.0) for r in selected_rows)
+            selected_total = sum(float(delivery_choices.get(int(r["id"]), {}).get("total_amount") or r.get("total_amount") or 0.0) for r in selected_rows)
             selected_paid = sum(float(r.get("paid_amount") or 0.0) for r in selected_rows)
             required = max(0.0, selected_total - selected_paid)
             return selected_total, required
@@ -14982,8 +16249,158 @@ class ReservationsFrame(ttk.Frame):
         def _refresh_selected_payment():
             selected_total, required = _selected_delivery_required()
             selected_total_var.set(f"إجمالي العناصر المحددة: {format_money(selected_total)}")
+            selected_paid = sum(float(pending_by_id[rid].get("paid_amount") or 0.0) for rid in selected_ids if rid in pending_by_id)
+            refund = max(0.0, selected_paid - selected_total)
             required_var.set(f"المطلوب الآن: {format_money(required)}")
+            if refund > 1e-9:
+                required_var.set(f"المطلوب الآن: 0 | يرد للعميل: {format_money(refund)}")
             collect_var.set(f"{format_money(required)}")
+
+        def _available_delivery_items(row: Dict[str, Any]) -> List[str]:
+            school = str(row.get("school") or "").strip()
+            values = self.db.get_distinct_filtered(
+                "item_type",
+                {"school": school},
+                available_only=True,
+            )
+            original = str(row.get("item_type") or "").strip()
+            if original and original not in values:
+                values = [original] + values
+            return sort_item_type_values(values)
+
+        def _available_delivery_colors(row: Dict[str, Any], item_type: str) -> List[str]:
+            school = str(row.get("school") or "").strip()
+            values = self.db.get_distinct_filtered(
+                "color",
+                {"item_type": item_type, "school": school},
+                available_only=True,
+            )
+            original = str(row.get("color") or "").strip()
+            if str(row.get("item_type") or "").strip().casefold() == str(item_type or "").strip().casefold() and original and original not in values:
+                values = [original] + values
+            return values
+
+        def _available_delivery_sizes(row: Dict[str, Any], item_type: str, color: str) -> List[str]:
+            school = str(row.get("school") or "").strip()
+            values = self.db.get_distinct_filtered(
+                "size",
+                {"item_type": item_type, "school": school, "color": color},
+                available_only=True,
+            )
+            original = str(row.get("size") or "").strip()
+            if (
+                str(row.get("item_type") or "").strip().casefold() == str(item_type or "").strip().casefold()
+                and str(row.get("color") or "").strip().casefold() == str(color or "").strip().casefold()
+                and original
+                and original not in values
+            ):
+                values = [original] + values
+            def _size_sort_key(label: Any) -> Tuple[int, Any]:
+                text = _normalize_size_label(str(label or "").strip())
+                if text.isdigit():
+                    return (0, int(text))
+                try:
+                    return (1, ALPHA_SIZES.index(text.upper()))
+                except ValueError:
+                    return (2, text.casefold())
+
+            return sorted(values, key=_size_sort_key)
+
+        def _update_delivery_row(rid: int, *, refresh_colors: bool = False, refresh_sizes: bool = False) -> None:
+            row = pending_by_id.get(rid)
+            if not row:
+                return
+            item_type = delivery_item_var.get().strip() or str(row.get("item_type") or "").strip()
+            if refresh_colors:
+                colors = _available_delivery_colors(row, item_type)
+                delivery_color_cb["values"] = colors
+                current_color = str(delivery_choices.get(rid, {}).get("color") or row.get("color") or "").strip()
+                if current_color not in colors:
+                    current_color = colors[0] if colors else ""
+                delivery_color_var.set(current_color)
+                refresh_sizes = True
+            color = delivery_color_var.get().strip() or str(row.get("color") or "").strip()
+            if refresh_sizes:
+                sizes = _available_delivery_sizes(row, item_type, color)
+                delivery_size_cb["values"] = sizes
+                current_size = str(delivery_choices.get(rid, {}).get("size") or row.get("size") or "").strip()
+                if current_size not in sizes:
+                    current_size = sizes[0] if sizes else ""
+                delivery_size_var.set(current_size)
+            size = delivery_size_var.get().strip() or str(row.get("size") or "").strip()
+            qty = int(row.get("qty") or 0)
+            price = self.db.get_effective_price(item_type, row.get("school"), color, size)
+            if price is None:
+                delivery_info_var.set("لا يوجد سعر لهذا الاختيار")
+                return
+            total = round(float(price) * qty, 2)
+            paid = float(row.get("paid_amount") or 0.0)
+            remaining_now = max(0.0, total - paid)
+            delivery_choices[rid] = {
+                "item_type": item_type,
+                "school": str(row.get("school") or "").strip(),
+                "color": color,
+                "size": size,
+                "unit_price": float(price),
+                "total_amount": total,
+            }
+            vals2 = list(tv.item(str(rid), "values"))
+            vals2[2] = item_type
+            vals2[4] = color
+            vals2[5] = size
+            vals2[7] = f"{format_money(total)}"
+            vals2[9] = f"{format_money(remaining_now)}"
+            tv.item(str(rid), values=vals2)
+            available = self.db.get_available_qty_for_reservation(item_type, row.get("school"), color, size)
+            delivery_info_var.set(f"السعر: {format_money(float(price))} | المتاح: {available}")
+            _refresh_selected_payment()
+
+        def _load_delivery_editor(_event=None) -> None:
+            cur = tv.focus() or (tv.selection()[0] if tv.selection() else None)
+            if not cur:
+                return
+            rid = int(cur)
+            row = pending_by_id.get(rid)
+            if not row:
+                return
+            items = _available_delivery_items(row)
+            delivery_item_cb["values"] = items
+            choice = delivery_choices.get(rid, {})
+            item_type = str(choice.get("item_type") or row.get("item_type") or "").strip()
+            if item_type not in items and item_type:
+                items = [item_type] + list(items)
+                delivery_item_cb["values"] = items
+            delivery_item_var.set(item_type)
+            colors = _available_delivery_colors(row, item_type)
+            delivery_color_cb["values"] = colors
+            color = str(choice.get("color") or row.get("color") or "").strip()
+            if color not in colors and color:
+                colors = [color] + list(colors)
+                delivery_color_cb["values"] = colors
+            delivery_color_var.set(color)
+            sizes = _available_delivery_sizes(row, item_type, color)
+            delivery_size_cb["values"] = sizes
+            size = str(choice.get("size") or row.get("size") or "").strip()
+            if size not in sizes and size:
+                sizes = [size] + list(sizes)
+                delivery_size_cb["values"] = sizes
+            delivery_size_var.set(size)
+            _update_delivery_row(rid)
+
+        def _on_delivery_item_changed(_event=None) -> None:
+            cur = tv.focus() or (tv.selection()[0] if tv.selection() else None)
+            if cur:
+                _update_delivery_row(int(cur), refresh_colors=True)
+
+        def _on_delivery_color_changed(_event=None) -> None:
+            cur = tv.focus() or (tv.selection()[0] if tv.selection() else None)
+            if cur:
+                _update_delivery_row(int(cur), refresh_sizes=True)
+
+        def _on_delivery_size_changed(_event=None) -> None:
+            cur = tv.focus() or (tv.selection()[0] if tv.selection() else None)
+            if cur:
+                _update_delivery_row(int(cur))
 
         def _toggle_selected(_e=None):
             cur = tv.focus() or (tv.selection()[0] if tv.selection() else None)
@@ -15000,6 +16417,10 @@ class ReservationsFrame(ttk.Frame):
             tv.item(cur, values=vals2)
             _refresh_selected_payment()
         tv.bind("<Double-1>", _toggle_selected, add="+")
+        tv.bind("<<TreeviewSelect>>", _load_delivery_editor, add="+")
+        delivery_item_cb.bind("<<ComboboxSelected>>", _on_delivery_item_changed, add="+")
+        delivery_color_cb.bind("<<ComboboxSelected>>", _on_delivery_color_changed, add="+")
+        delivery_size_cb.bind("<<ComboboxSelected>>", _on_delivery_size_changed, add="+")
 
         def _confirm():
             if not selected_ids:
@@ -15016,12 +16437,25 @@ class ReservationsFrame(ttk.Frame):
                     payment_method = self._choose_payment_method(collected, "\u0637\u0631\u064a\u0642\u0629 \u062a\u062d\u0635\u064a\u0644 \u0628\u0627\u0642\u064a \u0627\u0644\u062d\u062c\u0632")
                     if not payment_method:
                         return
-                summary = self.db.deliver_reservation_items(sorted(selected_ids), collected, payment_method=payment_method)
+                selected_replacements = {
+                    rid: delivery_choices[rid]
+                    for rid in selected_ids
+                    if rid in delivery_choices
+                }
+                summary = self.db.deliver_reservation_items(
+                    sorted(selected_ids),
+                    collected,
+                    payment_method=payment_method,
+                    replacements=selected_replacements,
+                )
                 if not summary.get("group_completed"):
                     refreshed_group = self.db.list_reservation_group_items(res_id)
                     self._print_pending_reservation_receipt(refreshed_group)
                 dlg.destroy()
                 msg = f"تم تسليم {int(summary.get('delivered_items') or 0)} عنصر."
+                refund_amount = float(summary.get("refund_amount") or 0.0)
+                if refund_amount > 1e-9:
+                    msg += f" المبلغ المطلوب رده للعميل: {format_money(refund_amount)}"
                 msg += " وتم إغلاق الفاتورة بالكامل." if summary.get("group_completed") else " وباقي العناصر لا تزال معلقة."
                 ToastNotification.show(self.winfo_toplevel(), msg, toast_type="success")
                 self._refresh()
@@ -15044,8 +16478,12 @@ class ReservationsFrame(ttk.Frame):
                 r for rid, r in pending_by_id.items()
                 if rid not in selected_ids and _is_reservation_active(r.get("status"))
             ]
-            refund_now = 0.0 if remaining_after_cancel else selected_paid
-            redistributed = selected_paid if remaining_after_cancel else 0.0
+            remaining_capacity = sum(
+                max(0.0, float(r.get("total_amount") or 0.0) - float(r.get("paid_amount") or 0.0))
+                for r in remaining_after_cancel
+            )
+            redistributed = min(selected_paid, remaining_capacity) if remaining_after_cancel else 0.0
+            refund_now = round(max(0.0, selected_paid - redistributed), 2)
             money_line = (
                 f"المبلغ الذي يجب رده للعميل الآن: {format_money(refund_now)}"
                 if refund_now > 1e-9
@@ -15408,6 +16846,11 @@ class StockAuditWindow(tk.Toplevel):
         self._recent_keys: Set[Tuple[str, str, str, str]] = set()
         self._verified_keys: Set[Tuple[str, str, str, str]] = set()
         self._audit_sync_job = None
+        self._audit_job = None
+        self._render_job = None
+        self._render_generation = 0
+        self._pending_changes = False
+        self._catalog_ensured = False
         self._build()
 
     def _build(self):
@@ -15432,9 +16875,9 @@ class StockAuditWindow(tk.Toplevel):
             w.grid(row=0, column=i, sticky="ew", padx=6, pady=6)
             filters.columnconfigure(i, weight=1)
             for ev in ("<KeyRelease>", "<<ComboboxSelected>>"):
-                w.cb.bind(ev, lambda e: (self._refresh_filter_values(), self._schedule_refresh()), add="+")
+                w.cb.bind(ev, lambda e: self._on_filter_changed(), add="+")
 
-        ttk.Button(filters, text="تحميل المخزون", command=self._refresh).grid(row=0, column=3, padx=8, pady=6)
+        ttk.Button(filters, text="تحميل المخزون", command=self._request_refresh).grid(row=0, column=3, padx=8, pady=6)
         ttk.Button(filters, text="سجل تقارير الجرد", command=self._open_history).grid(row=0, column=4, padx=8, pady=6)
 
         wrap = ttk.Frame(self)
@@ -15475,22 +16918,34 @@ class StockAuditWindow(tk.Toplevel):
         ttk.Entry(bar, textvariable=self.actual_var, width=10).pack(side=tk.LEFT, padx=6)
         ttk.Button(bar, text="تعيين", command=self._assign_selected_actual).pack(side=tk.LEFT, padx=4)
         ttk.Button(bar, text="مطابق", command=self._mark_selected_verified).pack(side=tk.LEFT, padx=4)
-        ttk.Button(bar, text="تطبيق التسويات", command=self._apply_all_mismatches).pack(side=tk.LEFT, padx=4)
+        self.apply_btn = ttk.Button(bar, text="تطبيق التسويات", command=self._apply_all_mismatches)
+        self.apply_btn.pack(side=tk.LEFT, padx=4)
         ttk.Button(bar, text="تصدير تقرير الفروق", command=self._export_current_report).pack(side=tk.LEFT, padx=12)
         ttk.Button(bar, text="طباعة تقرير الفروق", command=self._print_current_report).pack(side=tk.LEFT, padx=4)
         self.summary_var = tk.StringVar(value="")
         ttk.Label(bar, textvariable=self.summary_var, font=("Segoe UI", 10, "bold")).pack(side=tk.RIGHT, padx=8)
 
-        self._refresh()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._refresh(force=True)
 
     def _refresh_filter_values(self):
         for w in (self.f_type, self.f_school, self.f_color):
             w.refresh_values()
 
+    def _on_filter_changed(self):
+        if not self._confirm_pending_changes("تغيير التصفية"):
+            return
+        self._refresh_filter_values()
+        self._schedule_refresh()
+
     def _schedule_refresh(self, delay_ms: int = 250):
         if hasattr(self, "_audit_job") and self._audit_job:
             self.after_cancel(self._audit_job)
-        self._audit_job = self.after(delay_ms, self._refresh)
+        self._audit_job = self.after(delay_ms, lambda: self._refresh(force=True))
+
+    def _request_refresh(self):
+        if self._confirm_pending_changes("تحميل المخزون"):
+            self._refresh(force=True)
 
     def _schedule_audit_sync(self) -> None:
         if self._audit_sync_job:
@@ -15605,53 +17060,131 @@ class StockAuditWindow(tk.Toplevel):
                 })
         return out
 
-    def _refresh(self):
+    def _refresh(self, *, force: bool = False):
+        if not force and not self._confirm_pending_changes("تحميل المخزون"):
+            return
+        started = time.time()
+        catalog_ms = touched_ms = expand_ms = 0
         try:
-            self.db.ensure_branch_catalog_stock_rows_lightweight()
+            if not self._catalog_ensured:
+                step = time.time()
+                self.db.ensure_branch_catalog_stock_rows_lightweight()
+                catalog_ms = int((time.time() - step) * 1000)
+                self._catalog_ensured = True
+            step = time.time()
             self._touched_keys = self.db.stock_audit_touched_keys()
+            touched_ms = int((time.time() - step) * 1000)
+            step = time.time()
             self._rows = self._expanded_rows()
+            expand_ms = int((time.time() - step) * 1000)
+            self._pending_changes = False
         except Exception as ex:
             messagebox.showerror("فشل تحميل الجرد", str(ex), parent=self)
             return
+        try:
+            if logging_setup is not None:  # type: ignore[name-defined]
+                logging_setup.log_event(
+                    "pos.stock_audit.refresh",
+                    rows=len(self._rows),
+                    catalog_ms=catalog_ms,
+                    touched_ms=touched_ms,
+                    expand_ms=expand_ms,
+                    elapsed_ms=int((time.time() - started) * 1000),
+                )  # type: ignore[union-attr]
+        except Exception:
+            pass
         self._render()
 
-    def _render(self):
-        self.table.delete(*self.table.get_children())
-        total_diff = 0
-        total_value = 0.0
-        for idx, r in enumerate(self._rows):
-            diff = int(r.get("diff") or 0)
-            value = float(diff * float(r.get("unit_price") or 0))
-            r["diff_value"] = value
-            total_diff += diff
-            total_value += value
-            key = _audit_key(r)
-            tags = []
-            if key in self._recent_keys:
-                tags.append("current_touched")
-            elif key in self._verified_keys:
-                tags.append("verified")
-            elif diff > 0:
-                tags.append("surplus")
-            elif diff < 0:
-                tags.append("deficit")
-            elif key in self._touched_keys:
-                tags.append("history_touched")
-            self.table.insert(
-                "", tk.END, iid=str(idx),
-                values=(
-                    r.get("stock_id") or "",
-                    r["item_type"], r["school"], r["color"], r["size"],
-                    int(r["expected"]), int(r["actual"]), f"{diff:+d}",
-                    format_money(float(r["unit_price"])), format_money(value),
-                ),
-                tags=tuple(tags),
-            )
+    def _row_display(self, idx: int, r: Dict[str, Any]) -> Tuple[Tuple[Any, ...], Tuple[str, ...]]:
+        diff = int(r.get("diff") or 0)
+        value = float(diff * float(r.get("unit_price") or 0))
+        r["diff_value"] = value
+        key = _audit_key(r)
+        tags = []
+        if key in self._recent_keys:
+            tags.append("current_touched")
+        elif key in self._verified_keys:
+            tags.append("verified")
+        elif diff > 0:
+            tags.append("surplus")
+        elif diff < 0:
+            tags.append("deficit")
+        elif key in self._touched_keys:
+            tags.append("history_touched")
+        return (
+            (
+                r.get("stock_id") or "",
+                r["item_type"], r["school"], r["color"], r["size"],
+                int(r["expected"]), int(r["actual"]), f"{diff:+d}",
+                format_money(float(r["unit_price"])), format_money(value),
+            ),
+            tuple(tags),
+        )
+
+    def _update_pending_state(self):
+        self._pending_changes = any(int(r.get("diff") or 0) != 0 for r in self._rows)
+        try:
+            self.apply_btn.configure(state=("normal" if self._pending_changes else "disabled"))
+        except Exception:
+            pass
+
+    def _update_summary(self):
+        total_diff = sum(int(r.get("diff") or 0) for r in self._rows)
+        total_value = sum(float(int(r.get("diff") or 0) * float(r.get("unit_price") or 0)) for r in self._rows)
         visible_verified = sum(1 for r in self._rows if _audit_key(r) in self._verified_keys)
+        pending = " | تغييرات غير مطبقة" if self._pending_changes else ""
         self.summary_var.set(
             f"تم التأكد: {visible_verified}/{len(self._rows)} | "
-            f"إجمالي الفرق: {total_diff:+d} | إجمالي القيمة: {format_money(total_value)}"
+            f"إجمالي الفرق: {total_diff:+d} | إجمالي القيمة: {format_money(total_value)}{pending}"
         )
+
+    def _render(self):
+        if self._render_job is not None:
+            try:
+                self.after_cancel(self._render_job)
+            except Exception:
+                pass
+            self._render_job = None
+        self._render_generation += 1
+        generation = self._render_generation
+        self.table.delete(*self.table.get_children())
+        self._update_pending_state()
+        self._update_summary()
+
+        def insert_chunk(start: int = 0) -> None:
+            if generation != self._render_generation:
+                return
+            end = min(start + 150, len(self._rows))
+            for idx in range(start, end):
+                values, tags = self._row_display(idx, self._rows[idx])
+                self.table.insert("", tk.END, iid=str(idx), values=values, tags=tags)
+            if end < len(self._rows):
+                self._render_job = self.after(1, lambda: insert_chunk(end))
+            else:
+                self._render_job = None
+                _apply_zebra_tags(self.table)
+                try:
+                    if logging_setup is not None:  # type: ignore[name-defined]
+                        logging_setup.log_event(
+                            "pos.stock_audit.render",
+                            rows=len(self._rows),
+                        )  # type: ignore[union-attr]
+                except Exception:
+                    pass
+
+        insert_chunk(0)
+
+    def _refresh_row_display(self, idx: int):
+        if idx < 0 or idx >= len(self._rows):
+            return
+        iid = str(idx)
+        if not self.table.exists(iid):
+            self._render()
+            return
+        values, tags = self._row_display(idx, self._rows[idx])
+        self.table.item(iid, values=values, tags=tags)
+        self._update_pending_state()
+        self._update_summary()
         _apply_zebra_tags(self.table)
 
     def _selected_index(self) -> Optional[int]:
@@ -15687,22 +17220,11 @@ class StockAuditWindow(tk.Toplevel):
         key = _audit_key(row)
         if int(row["diff"]) == 0:
             self._verified_keys.add(key)
+            self._recent_keys.discard(key)
         else:
             self._verified_keys.discard(key)
-        if int(row["diff"]) != 0:
-            try:
-                self._recent_keys.add(key)
-                report_id = self.db.append_stock_audit_report_bucket([row], reason="auto-equalization", bucket_key=now_iso()[:13])
-                self.db.apply_stock_adjustments([row], note="POS stock audit auto-equalization")
-                self.db.record_pos_stock_audit_applied(report_id, [row], reason="auto-equalization")
-                self._schedule_audit_sync()
-                ToastNotification.show(self.winfo_toplevel(), "تم حفظ التسوية في تقرير الساعة وتطبيقها.", toast_type="success")
-                self._refresh()
-                return
-            except Exception as ex:
-                messagebox.showerror("فشل تطبيق التسوية", str(ex), parent=self)
-                return
-        self._render()
+            self._recent_keys.add(key)
+        self._refresh_row_display(idx)
 
     def _mark_selected_verified(self):
         idx = self._selected_index()
@@ -15715,28 +17237,81 @@ class StockAuditWindow(tk.Toplevel):
         row["diff"] = 0
         self.actual_var.set(str(expected))
         self._verified_keys.add(_audit_key(row))
-        self._render()
+        self._recent_keys.discard(_audit_key(row))
+        self._refresh_row_display(idx)
 
     def _mismatch_rows(self) -> List[Dict[str, Any]]:
         return [dict(r) for r in self._rows if int(r.get("diff") or 0) != 0]
 
-    def _apply_all_mismatches(self):
+    def _apply_all_mismatches(self, *, ask: bool = True, refresh_after: bool = True) -> bool:
         rows = self._mismatch_rows()
         if not rows:
             messagebox.showinfo("لا توجد فروق", "لا توجد فروق لتطبيقها.", parent=self)
-            return
-        if not messagebox.askyesno("تطبيق التسويات", f"سيتم تطبيق {len(rows)} فرق وحفظ تقرير. هل تريد المتابعة؟", parent=self):
-            return
+            self._update_pending_state()
+            self._update_summary()
+            return True
+        if ask and not messagebox.askyesno("تطبيق التسويات", f"سيتم تطبيق {len(rows)} فرق وحفظ تقرير. هل تريد المتابعة؟", parent=self):
+            return False
         try:
             report_id = self.db.create_stock_audit_report(rows, reason="manual")
             self.db.apply_stock_adjustments(rows, note="POS stock audit manual equalization")
             self.db.record_pos_stock_audit_applied(report_id, rows, reason="manual")
             self._schedule_audit_sync()
             self._recent_keys.update(_audit_key(r) for r in rows)
+            applied_keys = {_audit_key(r) for r in rows}
+            for row in self._rows:
+                if _audit_key(row) in applied_keys:
+                    row["expected"] = int(row.get("actual") or 0)
+                    row["diff"] = 0
+                    row["diff_value"] = 0.0
+                    self._verified_keys.add(_audit_key(row))
+            self._pending_changes = False
             ToastNotification.show(self.winfo_toplevel(), "تم حفظ التقرير وتطبيق التسويات.", toast_type="success")
-            self._refresh()
+            if refresh_after:
+                self._refresh(force=True)
+            else:
+                self._update_pending_state()
+                self._update_summary()
+            return True
         except Exception as ex:
             messagebox.showerror("فشل تطبيق التسويات", str(ex), parent=self)
+            return False
+
+    def _confirm_pending_changes(self, action_name: str) -> bool:
+        self._update_pending_state()
+        if not self._pending_changes:
+            return True
+        choice = messagebox.askyesnocancel(
+            "تغييرات جرد غير مطبقة",
+            f"توجد تغييرات جرد لم يتم تطبيقها.\n\n"
+            f"نعم: تطبيق التسويات الآن ثم متابعة {action_name}.\n"
+            f"لا: متابعة {action_name} بدون حفظ هذه التغييرات.\n"
+            f"إلغاء: الرجوع للجرد.",
+            parent=self,
+        )
+        if choice is None:
+            return False
+        if choice:
+            return self._apply_all_mismatches(ask=False, refresh_after=False)
+        self._pending_changes = False
+        for row in self._rows:
+            row["actual"] = int(row.get("expected") or 0)
+            row["diff"] = 0
+        self._recent_keys.clear()
+        return True
+
+    def _on_close(self):
+        if not self._confirm_pending_changes("إغلاق النافذة"):
+            return
+        for job_name in ("_audit_job", "_audit_sync_job", "_render_job"):
+            job = getattr(self, job_name, None)
+            if job:
+                try:
+                    self.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, job_name, None)
+        self.destroy()
 
     def _current_report_payload(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         rows = self._mismatch_rows()
@@ -16878,7 +18453,7 @@ class BillsHistoryWindow(tk.Toplevel):
         super().__init__(master)
         self.db = db
         self.title("سجل الفواتير")
-        self.geometry("1120x560")
+        self.geometry("1260x560")
         self._build()
 
     def _build(self):
@@ -16905,7 +18480,7 @@ class BillsHistoryWindow(tk.Toplevel):
         bills_wrap.pack(fill=tk.BOTH, expand=False, padx=8, pady=(0, 6))
         self.bills_table = ttk.Treeview(
             bills_wrap,
-            columns=("id", "created_at", "bill_type", "customer", "phone", "total", "payment_method", "status"),
+            columns=("id", "created_at", "bill_type", "customer", "phone", "total", "payment_method", "status", "note"),
             show="headings",
             height=10,
         )
@@ -16918,9 +18493,10 @@ class BillsHistoryWindow(tk.Toplevel):
             ("total", "الإجمالي", 100),
             ("payment_method", "طريقة الدفع", 100),
             ("status", "الحالة", 100),
+            ("note", "ملاحظة", 220),
         ]:
             self.bills_table.heading(col, text=txt)
-            self.bills_table.column(col, width=w, anchor="center")
+            self.bills_table.column(col, width=w, anchor="center" if col != "note" else "w")
         bills_ysb = ttk.Scrollbar(bills_wrap, orient="vertical", command=self.bills_table.yview)
         bills_xsb = ttk.Scrollbar(bills_wrap, orient="horizontal", command=self.bills_table.xview)
         self.bills_table.configure(yscrollcommand=bills_ysb.set, xscrollcommand=bills_xsb.set)
@@ -17021,6 +18597,7 @@ class BillsHistoryWindow(tk.Toplevel):
                     f"{format_money(float(b['total']))}",
                     _payment_method_label(str(b.get("payment_method") or PAYMENT_METHOD_CASH)),
                     status_text,
+                    b.get("note") or "",
                 ),
             )
         self.items_table.delete(*self.items_table.get_children())
@@ -17163,20 +18740,35 @@ class BillsHistoryWindow(tk.Toplevel):
         except StopIteration:
             messagebox.showerror("خطأ", "لم يتم العثور على الفاتورة.", parent=self)
             return
-        refund_amount = float(bill.get("total") or 0.0)
-        payment_method = _payment_label(str(bill.get("payment_method") or PAYMENT_METHOD_CASH))
+        bill_type = str(bill.get("bill_type") or "SALE").upper()
+        if str(bill.get("status") or "").upper() == "VOID":
+            messagebox.showwarning("غير مناسب", "هذه الفاتورة ملغاة بالفعل.", parent=self)
+            return
+        if bill_type not in ("SALE", "RETURN"):
+            messagebox.showwarning("غير مناسب", "الإلغاء المباشر متاح لفواتير البيع والمرتجع فقط.", parent=self)
+            return
+        amount = float(bill.get("total") or 0.0)
+        payment_method = _payment_method_label(str(bill.get("payment_method") or PAYMENT_METHOD_CASH))
         pw = simpledialog.askstring("كلمة مرور المدير", "أدخل كلمة مرور المدير:", show="*", parent=self)
         if not pw:
             return
         if not self.db.verify_admin_password(pw):
             messagebox.showerror("مرفوض", "كلمة المرور غير صحيحة.", parent=self)
             return
+        if bill_type == "RETURN":
+            money_line = f"المبلغ الذي سيدخل إلى الكاشير: {format_money(amount)}"
+            summary_line = "إذا كان المرتجع من وردية سابقة سيضاف هذا المبلغ إلى ملخص الوردية. إذا كان من نفس الوردية سيتم فقط إلغاء أثر المرتجع."
+            toast_line = f"تم إلغاء فاتورة المرتجع #{bill_id}. المبلغ الداخل للكاشير: {format_money(amount)}"
+        else:
+            money_line = f"المبلغ الذي يجب رده للعميل: {format_money(amount)}"
+            summary_line = "إذا كان البيع من وردية سابقة سيخصم هذا المبلغ من ملخص الوردية. إذا كان من نفس الوردية سيتم فقط إلغاء أثر البيع."
+            toast_line = f"تم إلغاء الفاتورة #{bill_id}. المبلغ المطلوب رده: {format_money(amount)}"
         if not messagebox.askyesno(
             "تأكيد إلغاء الفاتورة",
             f"سيتم إلغاء الفاتورة #{bill_id}.\n\n"
-            f"المبلغ الذي يجب رده للعميل: {format_money(refund_amount)}\n"
+            f"{money_line}\n"
             f"طريقة الدفع الأصلية: {payment_method}\n\n"
-            "هذا المبلغ سيتم خصمه من ملخص الوردية. هل تريد المتابعة؟",
+            f"{summary_line}\nهل تريد المتابعة؟",
             parent=self,
         ):
             return
@@ -17187,7 +18779,7 @@ class BillsHistoryWindow(tk.Toplevel):
             self.db.void_bill(bill_id, reason)
             ToastNotification.show(
                 self.winfo_toplevel(),
-                f"تم إلغاء الفاتورة #{bill_id}. المبلغ المطلوب رده: {format_money(refund_amount)}",
+                toast_line,
                 toast_type="success",
             )
             self._refresh()
@@ -17828,8 +19420,9 @@ class ExpenseDialog(tk.Toplevel):
         self.db = db
         self._on_saved = on_saved
         self.title("تسجيل مصروف")
-        self.geometry("420x220")
-        self.resizable(False, False)
+        self.geometry("680x420")
+        self.minsize(560, 360)
+        self.resizable(True, True)
         self.transient(master)
         self.grab_set()
         self._build()
@@ -17864,8 +19457,94 @@ class ExpenseDialog(tk.Toplevel):
         ttk.Button(btns, text="إلغاء", command=self.destroy).pack(side=tk.RIGHT)
         ttk.Button(btns, text="حفظ", command=self._save).pack(side=tk.RIGHT, padx=8)
 
+        details = ttk.LabelFrame(frm, text="تفاصيل المصروفات")
+        details.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        filters = ttk.Frame(details)
+        filters.pack(fill=tk.X, padx=6, pady=(6, 2))
+        self._df = DateField(filters, "من")
+        self._df.pack(side=tk.LEFT, padx=(0, 8))
+        self._dt = DateField(filters, "إلى")
+        self._dt.pack(side=tk.LEFT, padx=(0, 8))
+        today = date.today().strftime("%Y-%m-%d")
+        self._df.set(today)
+        self._dt.set(today)
+        ttk.Button(filters, text="تحديث", command=self._refresh_expenses).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(filters, text="الوردية الحالية", command=self._show_current_shift_expenses).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(filters, text="مسح التاريخ", command=self._clear_expense_dates).pack(side=tk.LEFT, padx=(4, 0))
+        self._expense_total_var = tk.StringVar(value="")
+        ttk.Label(details, textvariable=self._expense_total_var, font=("Segoe UI", 10, "bold")).pack(fill=tk.X, padx=6, pady=(4, 2))
+
+        wrap = ttk.Frame(details)
+        wrap.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
+        self._expense_tree = ttk.Treeview(
+            wrap,
+            columns=("shift", "created_at", "amount", "note"),
+            show="headings",
+            height=8,
+        )
+        for col, txt, width in [
+            ("shift", "الوردية", 80),
+            ("created_at", "اليوم / الوقت", 170),
+            ("amount", "المبلغ", 110),
+            ("note", "الملاحظة", 300),
+        ]:
+            self._expense_tree.heading(col, text=txt)
+            self._expense_tree.column(col, width=width, anchor="center")
+        ysb = ttk.Scrollbar(wrap, orient="vertical", command=self._expense_tree.yview)
+        self._expense_tree.configure(yscrollcommand=ysb.set)
+        self._expense_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ysb.pack(side=tk.RIGHT, fill=tk.Y)
+        _bind_mousewheel(self._expense_tree)
+        self._refresh_expenses()
+
         amount_ent.focus_set()
         amount_ent.bind("<Return>", lambda _e: self._save())
+
+    def _clear_expense_dates(self):
+        self._df.set("")
+        self._dt.set("")
+        self._refresh_expenses()
+
+    def _show_current_shift_expenses(self):
+        sid = int(self.db.active_shift_id or 0)
+        if not sid:
+            messagebox.showwarning("لا توجد وردية", "لا توجد وردية مفتوحة حالياً.", parent=self)
+            return
+        shift = self.db.conn.execute("SELECT started_at FROM shifts WHERE id=?", (sid,)).fetchone()
+        day = str(shift["started_at"] if shift else now_iso())[:10]
+        self._df.set(day)
+        self._dt.set(day)
+        self._refresh_expenses(shift_id=sid)
+
+    def _refresh_expenses(self, shift_id: Optional[int] = None):
+        if not hasattr(self, "_expense_tree"):
+            return
+        self._expense_tree.delete(*self._expense_tree.get_children())
+        df = self._df.get() or None
+        dt = self._dt.get() or None
+        if df and not dt:
+            dt = df
+            self._dt.set(dt)
+        elif dt and not df:
+            df = dt
+            self._df.set(df)
+        rows = self.db.list_expenses(date_from=df, date_to=dt, shift_id=shift_id)
+        total = 0.0
+        for row in rows:
+            amount = float(row.get("amount") or 0.0)
+            total += amount
+            self._expense_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    f"#{int(row.get('shift_id') or 0)}",
+                    fmt_local_ts(row.get("created_at"), ""),
+                    format_money(amount),
+                    row.get("note") or "",
+                ),
+            )
+        _apply_zebra_tags(self._expense_tree)
+        self._expense_total_var.set(f"عدد المصروفات: {len(rows)}  |  الإجمالي: {format_money(total)}")
 
     def _save(self):
         try:
@@ -17874,7 +19553,13 @@ class ExpenseDialog(tk.Toplevel):
             if self._on_saved:
                 self._on_saved()
             ToastNotification.show(self.master, "تم تسجيل المصروف", toast_type="success")
-            self.destroy()
+            self._amount_var.set("")
+            self._note_var.set("")
+            self._refresh_expenses()
+            try:
+                self.focus_set()
+            except Exception:
+                pass
         except Exception as ex:
             messagebox.showerror("خطأ", str(ex), parent=self)
 

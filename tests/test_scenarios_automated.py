@@ -24,6 +24,7 @@ REPO = Path(__file__).resolve().parents[1]
 POS_DIR = str(REPO / "POS")
 POS_FILE = REPO / "POS" / "HosnyPOS.py"
 POS_SYNC_APPLIERS_FILE = REPO / "POS" / "sync_appliers.py"
+POS_SYNC_CLIENT_FILE = REPO / "POS" / "sync_client.py"
 WAREHOUSE_DIR = str(REPO / "Warehouse")
 WAREHOUSE_FILE = REPO / "Warehouse" / "HosnyWarehouse.py"
 WAREHOUSE_SYNC_CORE_FILE = REPO / "Warehouse" / "sync_core.py"
@@ -181,6 +182,118 @@ class TestTestingBranchConfiguration(unittest.TestCase):
         self.assertTrue(payload["shipment_uuid"])
         self.assertEqual(payload["items"][0]["qty"], 4)
 
+    def test_branch_shipment_receipt_state_and_resend(self):
+        wh_mod = _load_warehouse_module()
+        path = _db_path()
+        self.addCleanup(lambda p=path: os.path.isfile(p) and os.remove(p))
+        db = wh_mod.SqliteDatabase(path=path, legacy_json=str(REPO / "nonexistent_warehouse_legacy.json"))
+        self.addCleanup(lambda: db.conn.close())
+
+        bid = db.create_bill(
+            wh_mod.branch_customer_label("POS-CEN"),
+            [
+                {
+                    "item_type": "Center Tee",
+                    "school": "Center School",
+                    "color": "Red",
+                    "size": "14",
+                    "unit_price": 275.0,
+                    "qty": 2,
+                    "allow_factory_fill": True,
+                }
+            ],
+            target_pos="POS-CEN",
+        )
+        bill = next(b for b in db.list_bills() if int(b["id"]) == int(bid))
+        self.assertEqual(db.branch_shipment_receipt_state(bill), "بانتظار الإرسال")
+
+        shipment_uuid = str(bill["uuid"])
+        db.conn.execute(
+            "UPDATE sync_outbox SET status='acked' WHERE payload_json LIKE ?",
+            (f"%{shipment_uuid}%",),
+        )
+        self.assertEqual(db.branch_shipment_receipt_state(bill), "مرسل - لم يؤكد")
+
+        event_uuid = db.resend_branch_shipment_bill(bid)
+        event = db.conn.execute(
+            """
+            SELECT event_type, target_scope, status, payload_json
+              FROM sync_outbox
+             WHERE event_uuid=?
+            """,
+            (event_uuid,),
+        ).fetchone()
+        self.assertEqual(event["event_type"], "STOCK_TRANSFER_OUT")
+        self.assertEqual(event["target_scope"], "pos:POS-CEN")
+        self.assertEqual(event["status"], "pending")
+        payload = json.loads(event["payload_json"])
+        self.assertEqual(payload["shipment_uuid"], shipment_uuid)
+        self.assertEqual(payload["items"][0]["qty"], 2)
+        self.assertEqual(db.branch_shipment_receipt_state(bill), "بانتظار الإرسال")
+
+        db.conn.execute(
+            """
+            INSERT INTO shipment_receipt_reviews(
+                sync_event_uuid, shipment_uuid, source_device, payload_json,
+                has_diff, note, created_at
+            ) VALUES(?,?,?,?,?,?,?)
+            """,
+            ("receipt-event", shipment_uuid, "POS-CEN", "[]", 0, "", wh_mod.now_iso()),
+        )
+        self.assertEqual(db.branch_shipment_receipt_state(bill), "استلمه الفرع")
+
+    def test_rerouted_branch_shipment_uses_bill_uuid_as_shipment_uuid(self):
+        wh_mod = _load_warehouse_module()
+        path = _db_path()
+        self.addCleanup(lambda p=path: os.path.isfile(p) and os.remove(p))
+        db = wh_mod.SqliteDatabase(path=path, legacy_json=str(REPO / "nonexistent_warehouse_legacy.json"))
+        self.addCleanup(lambda: db.conn.close())
+        db.conn.execute(
+            """
+            INSERT INTO branch_inventory_queue(
+                sync_event_uuid, queue_kind, source_device, requested_target_device,
+                external_ref, line_index, created_at, item_type, school, color,
+                size, unit_price, qty, has_badge, note, status
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "source-return-event",
+                "RETURN",
+                "POS-OBO",
+                "WAREHOUSE",
+                "source-shipment",
+                0,
+                wh_mod.now_iso(),
+                "Reroute Tee",
+                "Reroute School",
+                "Red",
+                "14",
+                400.0,
+                2,
+                0,
+                "wrong branch",
+                "PENDING",
+            ),
+        )
+
+        bill_id = db.reroute_branch_inventory_queue_items([1], "POS-OCT")
+        bill = next(b for b in db.list_bills() if int(b["id"]) == int(bill_id))
+        event = db.conn.execute(
+            """
+            SELECT target_scope, payload_json
+              FROM sync_outbox
+             WHERE event_type='STOCK_TRANSFER_OUT'
+             ORDER BY local_seq DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+
+        self.assertEqual(event["target_scope"], "pos:POS-OCT")
+        self.assertEqual(payload["shipment_uuid"], bill["uuid"])
+        self.assertIn(f"bill #{bill_id}", payload["note"])
+        self.assertEqual(db.branch_shipment_receipt_state(bill), "بانتظار الإرسال")
+
 
 class TestEnvAndSales(unittest.TestCase):
     """ENV-03 (DB init), SALE-01, SALE-03, WH return bill shape, stats."""
@@ -214,6 +327,27 @@ class TestEnvAndSales(unittest.TestCase):
         )
         self.assertGreater(bid, 0)
         self.assertEqual(_stock_sum(db, "Tee", "IPS", "White", "M"), 3)
+
+    def test_bill_history_includes_sale_and_reservation_notes(self):
+        self._db = _open_db(self._path)
+        db = self._db
+        db.add_stock("Note Tee", "Note School", "Black", "10", 100.0, 3)
+        bill_id = db.create_bill(
+            "Note Customer",
+            [{"item_type": "Note Tee", "school": "Note School", "color": "Black", "size": "10", "unit_price": 100.0, "qty": 1}],
+            note="sale note visible",
+        )
+        reservation_ids = db.create_reservation(
+            "Reservation Note Customer",
+            [{"item_type": "Note Tee", "school": "Note School", "color": "Black", "size": "12", "unit_price": 120.0, "qty": 1, "note": "reservation note visible"}],
+            paid_amount=120.0,
+        )
+
+        history = db.list_bill_history()
+        sale = next(row for row in history if row.get("history_key") == f"bill:{bill_id}")
+        reservation = next(row for row in history if row.get("history_key", "").startswith("reservation:") and int(row.get("id") or 0) == int(reservation_ids[0]))
+        self.assertEqual(sale.get("note"), "sale note visible")
+        self.assertEqual(reservation.get("note"), "reservation note visible")
 
     def test_pos_audit_log_records_sale_with_hash_chain(self):
         self._db = _open_db(self._path)
@@ -850,6 +984,147 @@ class TestPosStockAuditSync(unittest.TestCase):
 class TestPosStockSnapshotSync(unittest.TestCase):
     """Warehouse must compare POS stock snapshot timestamps by instant."""
 
+    def test_unchanged_pending_stock_snapshot_is_reused(self):
+        self._path = _db_path()
+        self._db = None
+        try:
+            self._db = _open_db(self._path)
+            db = self._db
+            db.add_stock("Timeout Tee", "Center School", "Red", "14", 275.0, 3)
+            sync_client = _load_module("pos_sync_client_snapshot_reuse_autotest", POS_SYNC_CLIENT_FILE)
+            client = sync_client.SyncClient(db.conn)
+            cfg = {"device_role": "pos", "device_name": "POS-CEN"}
+
+            first_uuid = client.emit_stock_snapshot_event(cfg)
+            second_uuid = client.emit_stock_snapshot_event(cfg)
+
+            self.assertTrue(first_uuid)
+            self.assertEqual(second_uuid, first_uuid)
+            pending_rows = db.conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                  FROM sync_outbox
+                 WHERE event_type='POS_STOCK_SNAPSHOT'
+                   AND status='pending'
+                """
+            ).fetchone()["c"]
+            self.assertEqual(int(pending_rows or 0), 1)
+
+            db.conn.execute(
+                "UPDATE sync_outbox SET status='acked' WHERE event_uuid=?",
+                (first_uuid,),
+            )
+            third_uuid = client.emit_stock_snapshot_event(cfg)
+            self.assertIsNone(third_uuid)
+            total_rows = db.conn.execute(
+                "SELECT COUNT(*) AS c FROM sync_outbox WHERE event_type='POS_STOCK_SNAPSHOT'"
+            ).fetchone()["c"]
+            self.assertEqual(int(total_rows or 0), 1)
+        finally:
+            _close_db(self._db)
+            try:
+                os.remove(self._path)
+            except Exception:
+                pass
+
+    def test_duplicate_snapshot_rows_are_collapsed_before_mirror_insert(self):
+        wh_core = _load_module("warehouse_sync_core_snapshot_dupes_autotest", WAREHOUSE_SYNC_CORE_FILE)
+        wh_appliers = _load_module("warehouse_sync_appliers_snapshot_dupes_autotest", WAREHOUSE_SYNC_APPLIERS_FILE)
+        wh = sqlite3.connect(":memory:")
+        try:
+            wh_core.apply_sync_migration(wh)
+            result = wh_appliers.apply_pos_stock_snapshot(
+                wh,
+                {
+                    "source_device_name": "POS-ZAY",
+                    "snapshot_at": "2026-08-24T11:50:00Z",
+                    "rows": [
+                        {
+                            "item_type": "Summer Tee",
+                            "school": "Raja",
+                            "color": "Red",
+                            "size": "10",
+                            "unit_price": 295.0,
+                            "count": 2,
+                        },
+                        {
+                            "item_type": "Summer Tee",
+                            "school": "Raja",
+                            "color": "Red",
+                            "size": "10",
+                            "unit_price": 295,
+                            "count": 3,
+                        },
+                    ],
+                },
+                "snapshot-dupe-rows",
+            )
+            self.assertEqual(result["mirrored_rows"], 1)
+            row = wh.execute(
+                """
+                SELECT COUNT(*) AS rows, COALESCE(SUM(count), 0) AS total_count
+                  FROM pos_stocks_mirror
+                 WHERE source_device='POS-ZAY'
+                """
+            ).fetchone()
+            self.assertEqual(int(row[0] or 0), 1)
+            self.assertEqual(int(row[1] or 0), 5)
+        finally:
+            wh.close()
+
+    def test_existing_duplicate_mirror_rows_are_repaired_before_snapshot_index(self):
+        wh_core = _load_module("warehouse_sync_core_snapshot_existing_dupes_autotest", WAREHOUSE_SYNC_CORE_FILE)
+        wh_appliers = _load_module("warehouse_sync_appliers_snapshot_existing_dupes_autotest", WAREHOUSE_SYNC_APPLIERS_FILE)
+        wh = sqlite3.connect(":memory:")
+        try:
+            wh_core.apply_sync_migration(wh)
+            wh.executemany(
+                """
+                INSERT INTO pos_stocks_mirror
+                    (source_device,item_type,school,color,size,unit_price,count,snapshot_at)
+                VALUES ('POS-CEN','Polo','Raja','Red','10',295,?,?)
+                """,
+                [(4, "2026-08-24T10:00:00Z"), (4, "2026-08-24T10:05:00Z")],
+            )
+            result = wh_appliers.apply_pos_stock_snapshot(
+                wh,
+                {
+                    "source_device_name": "POS-ZAY",
+                    "snapshot_at": "2026-08-24T11:50:00Z",
+                    "rows": [
+                        {
+                            "item_type": "Summer Tee",
+                            "school": "Raja",
+                            "color": "Red",
+                            "size": "10",
+                            "unit_price": 295,
+                            "count": 3,
+                        },
+                    ],
+                },
+                "snapshot-existing-dupe-rows",
+            )
+            self.assertEqual(result["mirrored_rows"], 1)
+            duplicate_groups = wh.execute(
+                """
+                SELECT COUNT(*)
+                  FROM (
+                    SELECT 1
+                      FROM pos_stocks_mirror
+                     GROUP BY source_device,item_type,school,color,size,unit_price
+                    HAVING COUNT(*) > 1
+                  )
+                """
+            ).fetchone()[0]
+            self.assertEqual(int(duplicate_groups or 0), 0)
+            indexes = [
+                row[1]
+                for row in wh.execute("PRAGMA index_list(pos_stocks_mirror)").fetchall()
+            ]
+            self.assertIn("idx_pos_stocks_mirror_unique_spec", indexes)
+        finally:
+            wh.close()
+
     def test_utc_snapshot_after_local_snapshot_is_not_skipped(self):
         wh_core = _load_module("warehouse_sync_core_snapshot_time_autotest", WAREHOUSE_SYNC_CORE_FILE)
         wh_appliers = _load_module("warehouse_sync_appliers_snapshot_time_autotest", WAREHOUSE_SYNC_APPLIERS_FILE)
@@ -895,6 +1170,47 @@ class TestPosStockSnapshotSync(unittest.TestCase):
             ).fetchone()
             self.assertAlmostEqual(float(meta[0] or 0), 1575.0, places=2)
             self.assertEqual(meta[1], "2026.8.2.10")
+        finally:
+            wh.close()
+
+
+class TestWarehouseFinancialLedgerSync(unittest.TestCase):
+    def test_sale_voided_applier_writes_signed_amount(self):
+        wh_core = _load_module("warehouse_sync_core_voided_sale_autotest", WAREHOUSE_SYNC_CORE_FILE)
+        wh_appliers = _load_module("warehouse_sync_appliers_voided_sale_autotest", WAREHOUSE_SYNC_APPLIERS_FILE)
+        wh = sqlite3.connect(":memory:")
+        try:
+            wh_core.apply_sync_migration(wh)
+            wh.execute(
+                """
+                INSERT INTO sync_inbox(event_uuid, event_type, server_seq, source_device, payload_json, server_created_at, apply_status, applied_at)
+                VALUES ('void-sale-event', 'SALE_VOIDED', 1, 'POS-ZAY', '{}', '2026-08-24T11:55:00Z', 'pending', '2026-08-24T11:55:00Z')
+                """
+            )
+            result = wh_appliers.apply_wh_pos_ledger_sale_voided(
+                wh,
+                {
+                    "bill_id": 559,
+                    "total": 295,
+                    "payment_method": "CASH",
+                    "voided_at": "2026-08-24T11:55:00Z",
+                    "reason": "mistake",
+                },
+                "void-sale-event",
+            )
+            self.assertEqual(result["amount"], -295)
+            row = wh.execute(
+                """
+                SELECT amount, cash_amount, payment_method, category, day
+                  FROM pos_financial_ledger
+                 WHERE event_uuid='void-sale-event'
+                """
+            ).fetchone()
+            self.assertEqual(float(row[0] or 0), -295)
+            self.assertEqual(float(row[1] or 0), -295)
+            self.assertEqual(row[2], "CASH")
+            self.assertEqual(row[3], "void_bill")
+            self.assertEqual(row[4], "2026-08-24")
         finally:
             wh.close()
 
@@ -1372,6 +1688,108 @@ class TestSpecRenameSync(unittest.TestCase):
 
         self.assertTrue(result.get("skipped"))
         self.assertEqual(result.get("reason"), "refusing non-exact price update")
+
+    def test_pos_price_update_refreshes_pending_shipment_price_anchor(self):
+        self._db = _open_db(self._path)
+        db = self._db
+        db.conn.execute(
+            """
+            INSERT INTO branch_catalog_definitions
+                (item_type,school,color,size,unit_price,source_event_uuid,note,created_at)
+            VALUES(?,?,?,?,?,?,?,?)
+            """,
+            ("Profile Tee", "Profile School", "Yellow", "16", 280.0, "old-catalog", "old catalog", now_iso()),
+        )
+        db.conn.execute(
+            """
+            INSERT INTO stocks(item_type,school,color,size,unit_price,count)
+            VALUES(?,?,?,?,?,?)
+            """,
+            ("Profile Tee", "Profile School", "Yellow", "16", 280.0, 0),
+        )
+        db.conn.execute(
+            """
+            INSERT INTO incoming_shipment_items_pending(
+                shipment_uuid,line_index,item_type,school,color,size,
+                unit_price,expected_qty,received_qty,status
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            ("ship-old-price", 0, "Profile Tee", "Profile School", "Yellow", "16", 280.0, 3, None, "PENDING"),
+        )
+        appliers = _load_module("pos_sync_appliers_pending_price_autotest", POS_SYNC_APPLIERS_FILE)
+
+        result = appliers.apply_price_update(
+            db.conn,
+            {
+                "new_price": 300.0,
+                "filters": {
+                    "item_type": "Profile Tee",
+                    "school": "Profile School",
+                    "color": "Yellow",
+                    "size": "16",
+                },
+                "allow_catalog_definition": True,
+            },
+            "event-price-pending-anchor",
+        )
+
+        self.assertEqual(result.get("pending_rows"), 1)
+        pending = db.conn.execute(
+            "SELECT unit_price FROM incoming_shipment_items_pending WHERE shipment_uuid='ship-old-price'"
+        ).fetchone()
+        self.assertAlmostEqual(float(pending["unit_price"]), 300.0, places=2)
+
+    def test_lightweight_visibility_repair_prefers_current_catalog_price_over_old_inbox_anchor(self):
+        self._db = _open_db(self._path)
+        db = self._db
+        db.conn.execute(
+            """
+            INSERT INTO branch_catalog_definitions
+                (item_type,school,color,size,unit_price,source_event_uuid,note,created_at)
+            VALUES(?,?,?,?,?,?,?,?)
+            """,
+            ("Profile Tee", "Profile School", "Yellow", "16", 300.0, "price-update-event", "Warehouse price profile sync", now_iso()),
+        )
+        payload = {
+            "shipment_uuid": "old-inbox-price",
+            "from_device": "WAREHOUSE",
+            "note": "bill #old",
+            "items": [
+                {
+                    "item_type": "Profile Tee",
+                    "school": "Profile School",
+                    "color": "Yellow",
+                    "size": "16",
+                    "unit_price": 280.0,
+                    "qty": 2,
+                }
+            ],
+        }
+        db.conn.execute(
+            """
+            INSERT INTO sync_inbox(event_uuid,event_type,server_seq,source_device,payload_json,applied_at,apply_status)
+            VALUES(?,?,?,?,?,?,?)
+            """,
+            ("old-inbox-price-event", "STOCK_TRANSFER_OUT", 10, "WAREHOUSE", json.dumps(payload, ensure_ascii=False), now_iso(), "ok"),
+        )
+
+        result = db.ensure_branch_catalog_stock_rows_lightweight()
+
+        self.assertEqual(result["created"], 1)
+        row = db.conn.execute(
+            """
+            SELECT unit_price,count
+              FROM stocks
+             WHERE item_type='Profile Tee'
+               AND school='Profile School'
+               AND color='Yellow'
+               AND size='16'
+            """
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertAlmostEqual(float(row["unit_price"]), 300.0, places=2)
+        self.assertEqual(int(row["count"]), 0)
 
     def test_price_profile_catalog_emits_related_branch_price_updates(self):
         wh_mod = _load_warehouse_module()
@@ -1908,6 +2326,15 @@ class TestWarehouseBranchStockViews(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_reservation_mirror_print_uses_selected_branch_stock_source(self):
+        wh_mod = _load_warehouse_module()
+
+        resolve = wh_mod.PosReservationsMirrorWindow._resolve_branch_stock_source
+        self.assertEqual(resolve("POS-ZAY", "كل فروع POS"), "POS-ZAY")
+        self.assertEqual(resolve("POS-ZAY", ""), "POS-ZAY")
+        self.assertEqual(resolve("", "كل فروع POS"), "__ALL_POS__")
+        self.assertEqual(resolve("POS-ZAY", "POS-OBO"), "POS-OBO")
+
     def test_monitor_and_cycle_use_corrected_pos_stock_mirror(self):
         wh_mod = _load_warehouse_module()
         self._db = wh_mod.SqliteDatabase(path=self._path, legacy_json=str(REPO / "nonexistent_warehouse_legacy.json"))
@@ -2146,6 +2573,165 @@ class TestWarehousePriceProfiles(unittest.TestCase):
                 self._db.conn.close()
             except Exception:
                 pass
+
+    def test_branch_stock_profile_issue_keys_flags_missing_and_mismatched_profiles(self):
+        wh_mod = _load_warehouse_module()
+        self._db = wh_mod.SqliteDatabase(path=self._path, legacy_json=str(REPO / "nonexistent_warehouse_legacy.json"))
+        db = self._db
+        profile_id = db.create_price_profile("Branch Profile")
+        db.replace_price_profile_item_prices(
+            profile_id,
+            "Profile Tee",
+            [
+                {"size": "10", "price": 180.0},
+                {"size": "12", "price": 200.0},
+            ],
+        )
+        db.assign_price_profile("Profile Tee", "School P", "Navy", profile_id)
+        window = object.__new__(wh_mod.BranchStockWindow)
+        window.db = db
+        window._current_branch_names = lambda: ("POS-ZAY", "POS-ZAY")
+
+        issues = wh_mod.BranchStockWindow._price_profile_issue_keys(
+            window,
+            [
+                ("Profile Tee", "School P", "Navy", "10", 180.0, 1),
+                ("Profile Tee", "School P", "Navy", "12", 190.0, 1),
+                ("No Profile Tee", "School Missing", "Red", "10", 100.0, 1),
+            ],
+        )
+
+        self.assertNotIn(("profile tee", "school p", "navy", "10"), issues)
+        self.assertIn(("profile tee", "school p", "navy", "12"), issues)
+        self.assertIn(("no profile tee", "school missing", "red", "10"), issues)
+
+    def test_manual_price_override_skips_only_that_branch_profile_catalog(self):
+        wh_mod = _load_warehouse_module()
+        self._db = wh_mod.SqliteDatabase(path=self._path, legacy_json=str(REPO / "nonexistent_warehouse_legacy.json"))
+        db = self._db
+        db.add_stock("Manual Tee", "Manual School", "Olive", "14", 1, 1, 200.0, 2)
+        db.add_stock("Manual Tee", "Manual School", "Olive", "16", 1, 1, 200.0, 2)
+        profile_id = db.create_price_profile("School Profile")
+        db.replace_price_profile_item_prices(
+            profile_id,
+            "Manual Tee",
+            [
+                {"size": "14", "price": 260.0},
+                {"size": "16", "price": 280.0},
+            ],
+        )
+        db.assign_price_profile("Manual Tee", "Manual School", "Olive", profile_id)
+        db.set_price_profile_manual_overrides("POS-ZAY", [
+            {
+                "item_type": "Manual Tee",
+                "school": "Manual School",
+                "color": "Olive",
+                "size": "14",
+                "unit_price": 200.0,
+            }
+        ])
+
+        unscoped_catalog = db.price_profile_catalog_rows_for_targets(
+            profile_id,
+            [("Manual Tee", "Manual School", "Olive")],
+        )
+        zayed_catalog = db.price_profile_catalog_rows_for_targets(
+            profile_id,
+            [("Manual Tee", "Manual School", "Olive")],
+            pos_device="POS-ZAY",
+        )
+        obor_catalog = db.price_profile_catalog_rows_for_targets(
+            profile_id,
+            [("Manual Tee", "Manual School", "Olive")],
+            pos_device="POS-OBO",
+        )
+        self.assertEqual([row["size"] for row in unscoped_catalog], ["14", "16"])
+        self.assertEqual([row["size"] for row in zayed_catalog], ["16"])
+        self.assertEqual([row["size"] for row in obor_catalog], ["14", "16"])
+
+        db.related_pos_devices_for_price_update = lambda _filters: ["POS-ZAY", "POS-OBO"]
+        sent = db.send_price_profile_catalog_to_all_pos(
+            profile_id,
+            [("Manual Tee", "Manual School", "Olive")],
+        )
+        self.assertEqual(sent, 3)
+        events = db.conn.execute(
+            """
+            SELECT target_scope, payload_json
+              FROM sync_outbox
+             WHERE event_type='PRICE_UPDATE'
+             ORDER BY local_seq
+            """
+        ).fetchall()
+        by_target_size = [
+            (str(row["target_scope"]), str(json.loads(row["payload_json"])["filters"]["size"]))
+            for row in events
+        ]
+        self.assertNotIn(("pos:POS-ZAY", "14"), by_target_size)
+        self.assertIn(("pos:POS-OBO", "14"), by_target_size)
+        self.assertIn(("pos:POS-ZAY", "16"), by_target_size)
+        self.assertIn(("pos:POS-OBO", "16"), by_target_size)
+
+        db.clear_price_profile_manual_overrides("POS-ZAY", [
+            {
+                "item_type": "Manual Tee",
+                "school": "Manual School",
+                "color": "Olive",
+                "size": "14",
+            }
+        ])
+        catalog_after_clear = db.price_profile_catalog_rows_for_targets(
+            profile_id,
+            [("Manual Tee", "Manual School", "Olive")],
+            pos_device="POS-ZAY",
+        )
+        self.assertEqual([row["size"] for row in catalog_after_clear], ["14", "16"])
+
+    def test_manual_price_override_is_not_reported_as_profile_issue(self):
+        wh_mod = _load_warehouse_module()
+        self._db = wh_mod.SqliteDatabase(path=self._path, legacy_json=str(REPO / "nonexistent_warehouse_legacy.json"))
+        db = self._db
+        profile_id = db.create_price_profile("Profile With Exception")
+        db.replace_price_profile_item_prices(
+            profile_id,
+            "Exception Tee",
+            [
+                {"size": "14", "price": 260.0},
+                {"size": "16", "price": 280.0},
+            ],
+        )
+        db.assign_price_profile("Exception Tee", "Exception School", "Olive", profile_id)
+        db.set_price_profile_manual_overrides("POS-ZAY", [
+            {
+                "item_type": "Exception Tee",
+                "school": "Exception School",
+                "color": "Olive",
+                "size": "14",
+                "unit_price": 200.0,
+            }
+        ])
+        window = object.__new__(wh_mod.BranchStockWindow)
+        window.db = db
+        window._current_branch_names = lambda: ("POS-ZAY", "POS-ZAY")
+
+        issues = wh_mod.BranchStockWindow._price_profile_issue_keys(
+            window,
+            [
+                ("Exception Tee", "Exception School", "Olive", "14", 200.0, 1),
+                ("Exception Tee", "Exception School", "Olive", "16", 200.0, 1),
+            ],
+        )
+        manual = wh_mod.BranchStockWindow._manual_price_override_keys(
+            window,
+            [
+                ("Exception Tee", "Exception School", "Olive", "14", 200.0, 1),
+                ("Exception Tee", "Exception School", "Olive", "16", 200.0, 1),
+            ],
+        )
+
+        self.assertIn(("exception tee", "exception school", "olive", "14"), manual)
+        self.assertNotIn(("exception tee", "exception school", "olive", "14"), issues)
+        self.assertIn(("exception tee", "exception school", "olive", "16"), issues)
 
     def test_missing_price_profile_report_lists_only_unassigned_stock_groups(self):
         wh_mod = _load_warehouse_module()
@@ -2543,6 +3129,154 @@ class TestReservationDeliver(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(float(paid_now), 240.0)
 
+    def test_reservation_paid_default_tracks_total_until_user_edits(self):
+        class FakeVar:
+            def __init__(self):
+                self.value = ""
+
+            def set(self, value):
+                self.value = str(value)
+
+            def get(self):
+                return self.value
+
+        frame = object.__new__(_MOD.POSFrame)
+        frame.active_bill = 5
+        frame.bills = {
+            5: [
+                {"unit_price": 100.0, "qty": 2},
+                {"unit_price": 175.0, "qty": 1},
+            ]
+        }
+        frame.reservation_paid_values = {5: "0", 7: "0"}
+        frame.reservation_paid_manual = {5: False, 7: False}
+        frame._updating_reservation_paid = False
+        frame._paid_var = FakeVar()
+
+        _MOD.POSFrame._refresh_reservation_paid_default(frame)
+        self.assertEqual(frame._paid_var.get(), "375")
+        self.assertFalse(frame.reservation_paid_manual[5])
+
+        frame.reservation_paid_manual[5] = True
+        frame._paid_var.set("50")
+        frame.bills[5].append({"unit_price": 25.0, "qty": 1})
+        _MOD.POSFrame._refresh_reservation_paid_default(frame)
+        self.assertEqual(frame._paid_var.get(), "50")
+
+    def test_reservation_delivery_can_change_size_and_reprice(self):
+        self._db = _open_db(self._path)
+        db = self._db
+        db.add_stock("Change Tee", "School Change", "Red", "14", 275.0, 1)
+        db.add_stock("Change Tee", "School Change", "Red", "16", 295.0, 1)
+        before_old = _stock_sum(db, "Change Tee", "School Change", "Red", "14")
+        before_new = _stock_sum(db, "Change Tee", "School Change", "Red", "16")
+        rid = int(db.create_reservation(
+            "Change Customer",
+            [{"item_type": "Change Tee", "school": "School Change", "color": "Red", "size": "14", "unit_price": 275.0, "qty": 1}],
+            paid_amount=100.0,
+        )[0])
+
+        summary = db.deliver_reservation_items(
+            [rid],
+            collected_amount=195.0,
+            replacements={rid: {"item_type": "Change Tee", "size": "16"}},
+        )
+        self.assertEqual(summary["delivered_items"], 1)
+        self.assertAlmostEqual(float(summary["collected_amount"]), 195.0, places=2)
+        self.assertAlmostEqual(float(summary["refund_amount"]), 0.0, places=2)
+        self.assertEqual(_stock_sum(db, "Change Tee", "School Change", "Red", "14"), before_old)
+        self.assertEqual(_stock_sum(db, "Change Tee", "School Change", "Red", "16"), before_new - 1)
+
+        row = db.conn.execute("SELECT item_type, size, unit_price, total_amount, paid_amount, status FROM reservations WHERE id=?", (rid,)).fetchone()
+        self.assertEqual(str(row["item_type"]), "Change Tee")
+        self.assertEqual(str(row["size"]), "16")
+        self.assertAlmostEqual(float(row["unit_price"]), 295.0, places=2)
+        self.assertAlmostEqual(float(row["total_amount"]), 295.0, places=2)
+        self.assertAlmostEqual(float(row["paid_amount"]), 295.0, places=2)
+        self.assertEqual(str(row["status"]), _MOD.RESERVATION_STATUS_DELIVERED)
+
+        paid_now = db.conn.execute(
+            "SELECT COALESCE(SUM(unit_price),0) FROM movements WHERE direction='DELIVER_PAY'"
+        ).fetchone()[0]
+        self.assertAlmostEqual(float(paid_now), 195.0, places=2)
+        out_size = db.conn.execute(
+            "SELECT size FROM movements WHERE direction='OUT' AND note LIKE '%Reservation delivered%' ORDER BY id DESC LIMIT 1"
+        ).fetchone()["size"]
+        self.assertEqual(str(out_size), "16")
+
+    def test_reservation_delivery_can_change_item_type_and_refund_lower_price(self):
+        self._db = _open_db(self._path)
+        db = self._db
+        db.add_stock("Reserved Shirt", "School Change", "Blue", "12", 300.0, 1)
+        db.add_stock("Delivered Pants", "School Change", "Blue", "12", 200.0, 1)
+        before_old = _stock_sum(db, "Reserved Shirt", "School Change", "Blue", "12")
+        before_new = _stock_sum(db, "Delivered Pants", "School Change", "Blue", "12")
+        rid = int(db.create_reservation(
+            "Change Customer",
+            [{"item_type": "Reserved Shirt", "school": "School Change", "color": "Blue", "size": "12", "unit_price": 300.0, "qty": 1}],
+            paid_amount=250.0,
+        )[0])
+
+        summary = db.deliver_reservation_items(
+            [rid],
+            collected_amount=0.0,
+            replacements={rid: {"item_type": "Delivered Pants", "size": "12"}},
+        )
+        self.assertEqual(summary["delivered_items"], 1)
+        self.assertAlmostEqual(float(summary["collected_amount"]), 0.0, places=2)
+        self.assertAlmostEqual(float(summary["refund_amount"]), 50.0, places=2)
+        self.assertEqual(_stock_sum(db, "Reserved Shirt", "School Change", "Blue", "12"), before_old)
+        self.assertEqual(_stock_sum(db, "Delivered Pants", "School Change", "Blue", "12"), before_new - 1)
+
+        row = db.conn.execute("SELECT item_type, size, unit_price, total_amount, paid_amount, status FROM reservations WHERE id=?", (rid,)).fetchone()
+        self.assertEqual(str(row["item_type"]), "Delivered Pants")
+        self.assertEqual(str(row["size"]), "12")
+        self.assertAlmostEqual(float(row["unit_price"]), 200.0, places=2)
+        self.assertAlmostEqual(float(row["total_amount"]), 200.0, places=2)
+        self.assertAlmostEqual(float(row["paid_amount"]), 200.0, places=2)
+        self.assertEqual(str(row["status"]), _MOD.RESERVATION_STATUS_DELIVERED)
+
+        refund_now = db.conn.execute(
+            "SELECT COALESCE(SUM(unit_price),0) FROM movements WHERE direction='RESERVE_REFUND'"
+        ).fetchone()[0]
+        self.assertAlmostEqual(float(refund_now), 50.0, places=2)
+
+    def test_reservation_delivery_can_change_color_and_reprice(self):
+        self._db = _open_db(self._path)
+        db = self._db
+        db.add_stock("Color Tee", "School Color", "Red", "10", 270.0, 1)
+        db.add_stock("Color Tee", "School Color", "Blue", "10", 290.0, 1)
+        before_old = _stock_sum(db, "Color Tee", "School Color", "Red", "10")
+        before_new = _stock_sum(db, "Color Tee", "School Color", "Blue", "10")
+        rid = int(db.create_reservation(
+            "Color Customer",
+            [{"item_type": "Color Tee", "school": "School Color", "color": "Red", "size": "10", "unit_price": 270.0, "qty": 1}],
+            paid_amount=100.0,
+        )[0])
+
+        summary = db.deliver_reservation_items(
+            [rid],
+            collected_amount=190.0,
+            replacements={rid: {"item_type": "Color Tee", "color": "Blue", "size": "10"}},
+        )
+
+        self.assertEqual(summary["delivered_items"], 1)
+        self.assertAlmostEqual(float(summary["collected_amount"]), 190.0, places=2)
+        self.assertEqual(_stock_sum(db, "Color Tee", "School Color", "Red", "10"), before_old)
+        self.assertEqual(_stock_sum(db, "Color Tee", "School Color", "Blue", "10"), before_new - 1)
+
+        row = db.conn.execute("SELECT color, unit_price, total_amount, paid_amount, status FROM reservations WHERE id=?", (rid,)).fetchone()
+        self.assertEqual(str(row["color"]), "Blue")
+        self.assertAlmostEqual(float(row["unit_price"]), 290.0, places=2)
+        self.assertAlmostEqual(float(row["total_amount"]), 290.0, places=2)
+        self.assertAlmostEqual(float(row["paid_amount"]), 290.0, places=2)
+        self.assertEqual(str(row["status"]), _MOD.RESERVATION_STATUS_DELIVERED)
+
+        out_color = db.conn.execute(
+            "SELECT color FROM movements WHERE direction='OUT' AND note LIKE '%Reservation delivered%' ORDER BY id DESC LIMIT 1"
+        ).fetchone()["color"]
+        self.assertEqual(str(out_color), "Blue")
+
     def test_cancel_reservation_items_redistributes_down_payment_to_remaining_items(self):
         self._db = _open_db(self._path)
         db = self._db
@@ -2573,6 +3307,42 @@ class TestReservationDeliver(unittest.TestCase):
             "SELECT COALESCE(SUM(unit_price),0) FROM movements WHERE direction='RESERVE_REFUND'"
         ).fetchone()[0]
         self.assertEqual(float(refund), 0.0)
+
+    def test_cancel_fully_paid_reservation_item_refunds_overflow_payment(self):
+        self._db = _open_db(self._path)
+        db = self._db
+        ids = [int(x) for x in db.create_reservation(
+            "Fully Paid Cancel Customer",
+            [
+                {"item_type": "Full Cancel Tee", "school": "School Full", "color": "Black", "size": "1", "unit_price": 270.0, "qty": 1},
+                {"item_type": "Full Cancel Tee", "school": "School Full", "color": "Black", "size": "2", "unit_price": 295.0, "qty": 1},
+                {"item_type": "Full Cancel Tee", "school": "School Full", "color": "Black", "size": "3", "unit_price": 295.0, "qty": 1},
+            ],
+            paid_amount=860.0,
+        )]
+
+        summary = db.cancel_reservation_items([ids[2]], reason="customer changed")
+        self.assertEqual(summary["cancelled_items"], 1)
+        self.assertAlmostEqual(float(summary["redistributed_amount"]), 0.0, places=2)
+        self.assertAlmostEqual(float(summary["refund_amount"]), 295.0, places=2)
+
+        rows = db.conn.execute(
+            "SELECT id, status, total_amount, paid_amount FROM reservations WHERE id IN (%s) ORDER BY id"
+            % ",".join("?" * len(ids)),
+            tuple(ids),
+        ).fetchall()
+        self.assertEqual([float(r["paid_amount"]) for r in rows[:2]], [270.0, 295.0])
+        self.assertEqual(str(rows[2]["status"]), _MOD.RESERVATION_STATUS_CANCELLED)
+        self.assertAlmostEqual(float(rows[2]["paid_amount"]), 0.0, places=2)
+
+        refund = db.conn.execute(
+            "SELECT COALESCE(SUM(unit_price),0) FROM movements WHERE direction='RESERVE_REFUND'"
+        ).fetchone()[0]
+        self.assertAlmostEqual(float(refund), 295.0, places=2)
+        shift_summary = db.get_shift_summary(db.active_shift_id)
+        self.assertAlmostEqual(float(shift_summary["cash_collected"]), 565.0, places=2)
+        self.assertAlmostEqual(float(shift_summary["res_refund"]), 295.0, places=2)
+        self.assertAlmostEqual(float(_MOD.ShiftsSummaryFrame._shift_cancel_total(shift_summary)), 295.0, places=2)
 
     def test_cancel_last_reservation_item_records_refund_and_reduces_shift_cash(self):
         self._db = _open_db(self._path)

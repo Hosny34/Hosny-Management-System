@@ -12,3 +12,5 @@
 [2026-07-29 01:18:39] updater process started: pid=76272
 [2026-07-29 01:33:26] launching updater: py -3 G:\TestManagementSystem\Hosny-Management-System\POS\pos_updater.py --pos-dir G:\TestManagementSystem\Hosny-Management-System\POS --package C:\Users\LENOVO\AppData\Local\Temp\HosnyPOSUpdates\2026.07.29.012841_20260729_013319\HosnyPOS-2026.07.29.012841.zip --pid 57780 --version 2026.07.29.012841 --restart --gui
 [2026-07-29 01:33:26] updater process started: pid=76760
+[2026-08-31 23:29:45] launching updater: py -3 G:\TestManagementSystem\Hosny-Management-System\POS\pos_updater.py --pos-dir G:\TestManagementSystem\Hosny-Management-System\POS --package C:\Users\LENOVO\AppData\Local\Temp\HosnyPOSUpdates\2026.8.2.84_20260831_232942\HosnyPOS-2026.8.2.84.zip --pid 90980 --version 2026.8.2.84 --restart --gui
+[2026-08-31 23:29:45] updater process started: pid=97912

@@ -1330,6 +1330,23 @@ class SqliteDatabase:
             );
             CREATE INDEX IF NOT EXISTS idx_price_profile_assignments_specs
             ON price_profile_assignments(item_type, school, color);
+            CREATE INDEX IF NOT EXISTS idx_price_profile_assignments_school
+            ON price_profile_assignments(school);
+            CREATE TABLE IF NOT EXISTS price_profile_manual_overrides (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                branch_device TEXT NOT NULL DEFAULT '',
+                item_type TEXT NOT NULL,
+                school TEXT NOT NULL,
+                color TEXT NOT NULL,
+                size TEXT NOT NULL,
+                manual_price REAL,
+                note TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(branch_device, item_type, school, color, size)
+            );
+            CREATE INDEX IF NOT EXISTS idx_price_profile_manual_overrides_specs
+            ON price_profile_manual_overrides(branch_device, item_type, school, color, size);
 
             CREATE TABLE IF NOT EXISTS fabric_weights (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1433,7 +1450,8 @@ class SqliteDatabase:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at TEXT NOT NULL,
                 customer TEXT,
-                total REAL NOT NULL
+                total REAL NOT NULL,
+                note TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_bills_created ON bills(created_at DESC);
 
@@ -1567,6 +1585,8 @@ class SqliteDatabase:
                 self.conn.execute(
                     "ALTER TABLE bills ADD COLUMN bill_type TEXT NOT NULL DEFAULT 'SALE'"
                 )
+            if "note" not in cols:
+                self.conn.execute("ALTER TABLE bills ADD COLUMN note TEXT")
         except Exception:
             pass
 
@@ -1736,8 +1756,96 @@ class SqliteDatabase:
             import traceback
             traceback.print_exc()
 
+        try:
+            self._migrate_price_profile_assignments_to_school_scope()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+
         cur.close()
         # ------------------- Size Profiles -------------------
+
+    def _migrate_price_profile_assignments_to_school_scope(self) -> None:
+        """Collapse legacy type/school/color price assignments to school scope."""
+        try:
+            rows = self.conn.execute(
+                """
+                SELECT
+                    a.id AS assignment_id,
+                    a.school,
+                    a.profile_id,
+                    a.updated_at,
+                    p.name AS profile_name
+                FROM price_profile_assignments a
+                JOIN price_profiles p ON p.id = a.profile_id
+                WHERE COALESCE(TRIM(a.school), '') <> ''
+                ORDER BY LOWER(TRIM(a.school)), a.id
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return
+        by_school: Dict[str, List[sqlite3.Row]] = {}
+        school_names: Dict[str, str] = {}
+        for row in rows:
+            school = str(row["school"] or "").strip()
+            if not school:
+                continue
+            key = school.casefold()
+            by_school.setdefault(key, []).append(row)
+            school_names.setdefault(key, school)
+        if not by_school:
+            return
+
+        def _profile_sort_key(items: List[sqlite3.Row], profile_id: int) -> Tuple[int, int, int]:
+            profile_rows = [r for r in items if int(r["profile_id"] or 0) == int(profile_id)]
+            names = [str(r["profile_name"] or "").strip() for r in profile_rows]
+            is_mirror = any(name.casefold().startswith("mirror import") for name in names)
+            latest_id = max((int(r["assignment_id"] or 0) for r in profile_rows), default=0)
+            return (0 if not is_mirror else 1, -len(profile_rows), -latest_id)
+
+        with self.conn:
+            for school_key, items in by_school.items():
+                profile_ids = sorted({int(r["profile_id"] or 0) for r in items if int(r["profile_id"] or 0) > 0})
+                if not profile_ids:
+                    continue
+                chosen = sorted(profile_ids, key=lambda pid: _profile_sort_key(items, pid))[0]
+                school = school_names[school_key]
+                self.conn.execute(
+                    "DELETE FROM price_profile_assignments WHERE LOWER(TRIM(school)) = LOWER(TRIM(?))",
+                    (school,),
+                )
+                self.conn.execute(
+                    """
+                    INSERT OR REPLACE INTO price_profile_assignments(
+                        item_type, school, color, profile_id, updated_at
+                    )
+                    VALUES('', ?, '', ?, datetime('now'))
+                    """,
+                    (school, int(chosen)),
+                )
+            mirror_rows = self.conn.execute(
+                """
+                SELECT p.id
+                FROM price_profiles p
+                WHERE LOWER(TRIM(p.name)) LIKE 'mirror import%'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM price_profile_assignments a
+                      WHERE a.profile_id = p.id
+                  )
+                """
+            ).fetchall()
+            mirror_ids = [int(r["id"] or 0) for r in mirror_rows if int(r["id"] or 0) > 0]
+            if mirror_ids:
+                placeholders = ",".join("?" for _ in mirror_ids)
+                self.conn.execute(
+                    f"DELETE FROM price_profile_lines WHERE profile_id IN ({placeholders})",
+                    mirror_ids,
+                )
+                self.conn.execute(
+                    f"DELETE FROM price_profiles WHERE id IN ({placeholders})",
+                    mirror_ids,
+                )
 
     def get_size_profile(self, item_type: str, school: str, color: str):
         cur = self.conn.execute(
@@ -1888,6 +1996,7 @@ class SqliteDatabase:
         package_no: Optional[int] = None,
         preferred_profile_id: Optional[int] = None,
         prices_by_size: Optional[Dict[str, Any]] = None,
+        update_existing_prices: bool = True,
     ) -> int:
         """Materialize zero-count stock rows for every size in the saved profile.
 
@@ -1929,6 +2038,70 @@ class SqliteDatabase:
                     if not size_txt:
                         continue
                     norm_size = _normalize_size_label(_strip_digit_marks(size_txt))
+                    existing = self.conn.execute(
+                        """
+                        SELECT id, COALESCE(count, 0) AS count, unit_price
+                        FROM stocks
+                        WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                          AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                          AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                          AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+                          AND warehouse_no = ?
+                          AND package_no = ?
+                        ORDER BY COALESCE(count, 0) DESC, id ASC
+                        """,
+                        (item, school_txt, color_txt, norm_size or size_txt, int(wh), int(pkg)),
+                    ).fetchall()
+                    if existing:
+                        if update_existing_prices and all(int(r["count"] or 0) == 0 for r in existing):
+                            price_raw = price_map.get(norm_size.casefold())
+                            price: Optional[float] = None
+                            if price_raw not in (None, ""):
+                                try:
+                                    price = float(price_raw)
+                                except (TypeError, ValueError):
+                                    price = None
+                            if price is None:
+                                try:
+                                    p = self.get_effective_price(
+                                        item,
+                                        school_txt,
+                                        color_txt,
+                                        norm_size or size_txt,
+                                        preferred_profile_id=preferred_profile_id,
+                                    )
+                                    price = float(p) if p is not None else None
+                                except Exception:
+                                    price = None
+                            if (
+                                price is not None
+                                and price > 0
+                                and any(abs(float(r["unit_price"] or 0.0) - float(price)) >= 0.000001 for r in existing)
+                            ):
+                                self.conn.execute(
+                                    """
+                                    UPDATE stocks
+                                       SET unit_price=?
+                                     WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                                       AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                                       AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                                       AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+                                       AND warehouse_no = ?
+                                       AND package_no = ?
+                                       AND COALESCE(count, 0) = 0
+                                    """,
+                                    (
+                                        float(price),
+                                        item,
+                                        school_txt,
+                                        color_txt,
+                                        norm_size or size_txt,
+                                        int(wh),
+                                        int(pkg),
+                                    ),
+                                )
+                        continue
+
                     price_raw = price_map.get(norm_size.casefold())
                     price: Optional[float] = None
                     if price_raw not in (None, ""):
@@ -1950,50 +2123,6 @@ class SqliteDatabase:
                             price = None
                     if price is None:
                         price = 0.0
-
-                    existing = self.conn.execute(
-                        """
-                        SELECT id, COALESCE(count, 0) AS count, unit_price
-                        FROM stocks
-                        WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
-                          AND LOWER(TRIM(school)) = LOWER(TRIM(?))
-                          AND LOWER(TRIM(color)) = LOWER(TRIM(?))
-                          AND LOWER(TRIM(size)) = LOWER(TRIM(?))
-                          AND warehouse_no = ?
-                          AND package_no = ?
-                        ORDER BY COALESCE(count, 0) DESC, id ASC
-                        """,
-                        (item, school_txt, color_txt, norm_size or size_txt, int(wh), int(pkg)),
-                    ).fetchall()
-                    if existing:
-                        if (
-                            price > 0
-                            and all(int(r["count"] or 0) == 0 for r in existing)
-                            and any(abs(float(r["unit_price"] or 0.0) - float(price)) >= 0.000001 for r in existing)
-                        ):
-                            self.conn.execute(
-                                """
-                                UPDATE stocks
-                                   SET unit_price=?
-                                 WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
-                                   AND LOWER(TRIM(school)) = LOWER(TRIM(?))
-                                   AND LOWER(TRIM(color)) = LOWER(TRIM(?))
-                                   AND LOWER(TRIM(size)) = LOWER(TRIM(?))
-                                   AND warehouse_no = ?
-                                   AND package_no = ?
-                                   AND COALESCE(count, 0) = 0
-                                """,
-                                (
-                                    float(price),
-                                    item,
-                                    school_txt,
-                                    color_txt,
-                                    norm_size or size_txt,
-                                    int(wh),
-                                    int(pkg),
-                                ),
-                            )
-                        continue
 
                     self.conn.execute(
                         """
@@ -2046,6 +2175,7 @@ class SqliteDatabase:
                     row["item_type"],
                     row["school"],
                     row["color"],
+                    update_existing_prices=False,
                 )
             except Exception:
                 continue
@@ -2256,6 +2386,9 @@ class SqliteDatabase:
             )
 
     def get_price_profile_assignment(self, item_type: str, school: str, color: str) -> Optional[Dict[str, Any]]:
+        school_txt = str(school or "").strip()
+        if not school_txt:
+            return None
         row = self.conn.execute(
             """
             SELECT
@@ -2268,23 +2401,32 @@ class SqliteDatabase:
                 p.name AS profile_name
             FROM price_profile_assignments a
             JOIN price_profiles p ON p.id = a.profile_id
-            WHERE LOWER(TRIM(a.item_type)) = LOWER(TRIM(?))
-              AND LOWER(TRIM(a.school)) = LOWER(TRIM(?))
-              AND LOWER(TRIM(a.color)) = LOWER(TRIM(?))
+            WHERE LOWER(TRIM(a.school)) = LOWER(TRIM(?))
+            ORDER BY
+                CASE
+                    WHEN COALESCE(TRIM(a.item_type), '') = ''
+                     AND COALESCE(TRIM(a.color), '') = '' THEN 0
+                    ELSE 1
+                END,
+                a.updated_at DESC,
+                a.id DESC
+            LIMIT 1
             """,
-            (item_type, school, color),
+            (school_txt,),
         ).fetchone()
         return None if row is None else dict(row)
 
     def assign_price_profile(self, item_type: str, school: str, color: str, profile_id: int) -> None:
-        item = str(item_type or "").strip()
         school_txt = str(school or "").strip()
-        color_txt = str(color or "").strip()
-        if not (item and school_txt and color_txt):
-            raise ValueError("النوع والمدرسة واللون مطلوبة لربط بروفايل السعر.")
+        if not school_txt:
+            raise ValueError("المدرسة مطلوبة لربط بروفايل السعر.")
         if self.get_price_profile(int(profile_id)) is None:
             raise ValueError("بروفايل السعر غير موجود.")
         with self.conn:
+            self.conn.execute(
+                "DELETE FROM price_profile_assignments WHERE LOWER(TRIM(school)) = LOWER(TRIM(?))",
+                (school_txt,),
+            )
             self.conn.execute(
                 """
                 INSERT INTO price_profile_assignments(
@@ -2296,19 +2438,20 @@ class SqliteDatabase:
                     profile_id = excluded.profile_id,
                     updated_at = datetime('now')
                 """,
-                (item, school_txt, color_txt, int(profile_id)),
+                ("", school_txt, "", int(profile_id)),
             )
 
     def clear_price_profile_assignment(self, item_type: str, school: str, color: str) -> int:
+        school_txt = str(school or "").strip()
+        if not school_txt:
+            return 0
         with self.conn:
             cur = self.conn.execute(
                 """
                 DELETE FROM price_profile_assignments
-                WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
-                  AND LOWER(TRIM(school)) = LOWER(TRIM(?))
-                  AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                WHERE LOWER(TRIM(school)) = LOWER(TRIM(?))
                 """,
-                (item_type, school, color),
+                (school_txt,),
             )
             return int(cur.rowcount or 0)
 
@@ -2338,17 +2481,184 @@ class SqliteDatabase:
         except (TypeError, ValueError):
             return None
 
+    def is_price_profile_manual_override(
+        self,
+        branch_device: str,
+        item_type: str,
+        school: str,
+        color: str,
+        size: str,
+    ) -> bool:
+        branch = str(branch_device or "").strip()
+        item = str(item_type or "").strip()
+        school_txt = str(school or "").strip()
+        color_txt = str(color or "").strip()
+        size_txt = _normalize_size_label(_strip_digit_marks(size))
+        if not (branch and item and school_txt and color_txt and size_txt):
+            return False
+        row = self.conn.execute(
+            """
+            SELECT 1
+              FROM price_profile_manual_overrides
+             WHERE LOWER(TRIM(branch_device)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+               AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+             LIMIT 1
+            """,
+            (branch, item, school_txt, color_txt, size_txt),
+        ).fetchone()
+        return row is not None
+
+    def manual_price_profile_override_keys(
+        self,
+        branch_device: str,
+        specs: Sequence[Tuple[str, str, str, str]],
+    ) -> Set[Tuple[str, str, str, str]]:
+        branch = str(branch_device or "").strip()
+        if not branch:
+            return set()
+        clean_specs = []
+        seen = set()
+        for item_type, school, color, size in specs or []:
+            item = str(item_type or "").strip()
+            school_txt = str(school or "").strip()
+            color_txt = str(color or "").strip()
+            size_txt = _normalize_size_label(_strip_digit_marks(size))
+            if not (item and school_txt and color_txt and size_txt):
+                continue
+            key = (item.casefold(), school_txt.casefold(), color_txt.casefold(), size_txt.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            clean_specs.append((item, school_txt, color_txt, size_txt))
+        if not clean_specs:
+            return set()
+
+        clauses = []
+        args: List[Any] = []
+        for item, school_txt, color_txt, size_txt in clean_specs:
+            clauses.append(
+                "(LOWER(TRIM(branch_device)) = LOWER(?) AND LOWER(TRIM(item_type)) = LOWER(?) AND LOWER(TRIM(school)) = LOWER(?) "
+                "AND LOWER(TRIM(color)) = LOWER(?) AND LOWER(TRIM(size)) = LOWER(?))"
+            )
+            args.extend([branch, item, school_txt, color_txt, size_txt])
+        try:
+            rows = self.conn.execute(
+                f"""
+                SELECT item_type, school, color, size
+                  FROM price_profile_manual_overrides
+                 WHERE {' OR '.join(clauses)}
+                """,
+                tuple(args),
+            ).fetchall()
+        except Exception:
+            return set()
+        return {
+            (
+                str(row["item_type"] or "").strip().casefold(),
+                str(row["school"] or "").strip().casefold(),
+                str(row["color"] or "").strip().casefold(),
+                _normalize_size_label(_strip_digit_marks(row["size"])).casefold(),
+            )
+            for row in rows
+        }
+
+    def set_price_profile_manual_overrides(
+        self,
+        branch_device: str,
+        specs: Sequence[Dict[str, Any]],
+        *,
+        note: str = "Manual price override",
+    ) -> int:
+        branch = str(branch_device or "").strip()
+        if not branch:
+            raise ValueError("اختر فرع POS أولاً.")
+        saved = 0
+        with self.conn:
+            for spec in specs or []:
+                item = str(spec.get("item_type") or "").strip()
+                school_txt = str(spec.get("school") or "").strip()
+                color_txt = str(spec.get("color") or "").strip()
+                size_txt = _normalize_size_label(_strip_digit_marks(spec.get("size")))
+                if not (item and school_txt and color_txt and size_txt):
+                    continue
+                manual_price = None
+                if spec.get("unit_price") not in (None, ""):
+                    try:
+                        manual_price = float(spec.get("unit_price"))
+                    except (TypeError, ValueError):
+                        manual_price = None
+                self.conn.execute(
+                    """
+                    INSERT INTO price_profile_manual_overrides(
+                        branch_device, item_type, school, color, size, manual_price, note, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                    ON CONFLICT(branch_device, item_type, school, color, size)
+                    DO UPDATE SET
+                        manual_price = excluded.manual_price,
+                        note = excluded.note,
+                        updated_at = datetime('now')
+                    """,
+                    (branch, item, school_txt, color_txt, size_txt, manual_price, str(note or "")),
+                )
+                saved += 1
+        return saved
+
+    def clear_price_profile_manual_overrides(
+        self,
+        branch_device: str,
+        specs: Sequence[Dict[str, Any]],
+    ) -> int:
+        branch = str(branch_device or "").strip()
+        if not branch:
+            return 0
+        clean_specs = []
+        seen = set()
+        for spec in specs or []:
+            item = str(spec.get("item_type") or "").strip()
+            school_txt = str(spec.get("school") or "").strip()
+            color_txt = str(spec.get("color") or "").strip()
+            size_txt = _normalize_size_label(_strip_digit_marks(spec.get("size")))
+            if not (item and school_txt and color_txt and size_txt):
+                continue
+            key = (item.casefold(), school_txt.casefold(), color_txt.casefold(), size_txt.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            clean_specs.append((item, school_txt, color_txt, size_txt))
+        if not clean_specs:
+            return 0
+        deleted = 0
+        with self.conn:
+            for item, school_txt, color_txt, size_txt in clean_specs:
+                cur = self.conn.execute(
+                    """
+                    DELETE FROM price_profile_manual_overrides
+                     WHERE LOWER(TRIM(branch_device)) = LOWER(TRIM(?))
+                       AND LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                       AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                       AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+                       AND LOWER(TRIM(size)) = LOWER(TRIM(?))
+                    """,
+                    (branch, item, school_txt, color_txt, size_txt),
+                )
+                deleted += int(cur.rowcount or 0)
+        return deleted
+
     def price_profile_catalog_rows_for_targets(
         self,
         profile_id: int,
         targets: Sequence[Tuple[str, str, str]],
+        *,
+        pos_device: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
         seen = set()
-        clean_targets = [
-            (str(item or "").strip(), str(school or "").strip(), str(color or "").strip())
-            for item, school, color in (targets or [])
-        ]
+        device = str(pos_device or "").strip()
+        clean_targets = self._expand_price_profile_targets(targets)
         for item, school, color in clean_targets:
             if not (item and school and color):
                 continue
@@ -2360,6 +2670,8 @@ class SqliteDatabase:
                 if price is None:
                     continue
                 key = (item.casefold(), school.casefold(), color.casefold(), size.casefold())
+                if device and self.is_price_profile_manual_override(device, item, school, color, size):
+                    continue
                 if key in seen:
                     continue
                 seen.add(key)
@@ -2380,6 +2692,98 @@ class SqliteDatabase:
         ))
         return rows
 
+    def _expand_price_profile_targets(
+        self,
+        targets: Sequence[Tuple[str, str, str]],
+    ) -> List[Tuple[str, str, str]]:
+        """Expand school-level price assignments to concrete item/color targets."""
+        direct: Set[Tuple[str, str, str]] = set()
+        schools: Set[str] = set()
+        for item, school, color in (targets or []):
+            item_txt = str(item or "").strip()
+            school_txt = str(school or "").strip()
+            color_txt = str(color or "").strip()
+            if not school_txt:
+                continue
+            schools.add(school_txt)
+            if item_txt and color_txt:
+                direct.add((item_txt, school_txt, color_txt))
+
+        expanded: Set[Tuple[str, str, str]] = set(direct)
+        for school_txt in schools:
+            try:
+                rows = self.conn.execute(
+                    """
+                    SELECT DISTINCT item_type, school, color
+                    FROM stocks
+                    WHERE LOWER(TRIM(school)) = LOWER(TRIM(?))
+                      AND COALESCE(TRIM(item_type), '') <> ''
+                      AND COALESCE(TRIM(color), '') <> ''
+                    UNION
+                    SELECT DISTINCT item_type, school, color
+                    FROM size_profiles
+                    WHERE LOWER(TRIM(school)) = LOWER(TRIM(?))
+                      AND COALESCE(TRIM(item_type), '') <> ''
+                      AND COALESCE(TRIM(color), '') <> ''
+                    ORDER BY 2, 1, 3
+                    """,
+                    (school_txt, school_txt),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            for row in rows:
+                item_txt = str(row["item_type"] or "").strip()
+                row_school = str(row["school"] or "").strip()
+                color_txt = str(row["color"] or "").strip()
+                if item_txt and row_school and color_txt:
+                    expanded.add((item_txt, row_school, color_txt))
+        return sorted(expanded, key=lambda x: (x[1].casefold(), x[0].casefold(), x[2].casefold()))
+
+    def _expand_price_profile_targets_for_item(
+        self,
+        item_type: str,
+        schools: Sequence[str],
+    ) -> List[Tuple[str, str, str]]:
+        """Expand school-level price assignments for one item type only."""
+        item = str(item_type or "").strip()
+        if not item:
+            return []
+        expanded: Set[Tuple[str, str, str]] = set()
+        seen_schools: Set[str] = set()
+        for school in schools or []:
+            school_txt = str(school or "").strip()
+            school_key = school_txt.casefold()
+            if not school_txt or school_key in seen_schools:
+                continue
+            seen_schools.add(school_key)
+            try:
+                rows = self.conn.execute(
+                    """
+                    SELECT DISTINCT item_type, school, color
+                    FROM stocks
+                    WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                      AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                      AND COALESCE(TRIM(color), '') <> ''
+                    UNION
+                    SELECT DISTINCT item_type, school, color
+                    FROM size_profiles
+                    WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                      AND LOWER(TRIM(school)) = LOWER(TRIM(?))
+                      AND COALESCE(TRIM(color), '') <> ''
+                    ORDER BY 2, 1, 3
+                    """,
+                    (item, school_txt, item, school_txt),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            for row in rows:
+                row_item = str(row["item_type"] or "").strip()
+                row_school = str(row["school"] or "").strip()
+                color_txt = str(row["color"] or "").strip()
+                if row_item and row_school and color_txt:
+                    expanded.add((row_item, row_school, color_txt))
+        return sorted(expanded, key=lambda x: (x[1].casefold(), x[0].casefold(), x[2].casefold()))
+
     def list_price_profile_assignment_targets(
         self,
         profile_id: int,
@@ -2387,16 +2791,12 @@ class SqliteDatabase:
     ) -> List[Tuple[str, str, str]]:
         where = ["profile_id=?"]
         args: List[Any] = [int(profile_id)]
-        item = str(item_type or "").strip()
-        if item:
-            where.append("LOWER(TRIM(item_type)) = LOWER(TRIM(?))")
-            args.append(item)
         rows = self.conn.execute(
             f"""
             SELECT item_type, school, color
             FROM price_profile_assignments
             WHERE {' AND '.join(where)}
-            ORDER BY LOWER(TRIM(item_type)), LOWER(TRIM(school)), LOWER(TRIM(color))
+            ORDER BY LOWER(TRIM(school)), LOWER(TRIM(item_type)), LOWER(TRIM(color))
             """,
             tuple(args),
         ).fetchall()
@@ -2407,10 +2807,13 @@ class SqliteDatabase:
                 str(r["color"] or "").strip(),
             )
             for r in rows
-            if str(r["item_type"] or "").strip()
-            and str(r["school"] or "").strip()
-            and str(r["color"] or "").strip()
+            if str(r["school"] or "").strip()
         ]
+        item = str(item_type or "").strip()
+        if item:
+            schools = [school for _, school, _ in targets]
+            return self._expand_price_profile_targets_for_item(item, schools)
+        return targets
 
     def send_price_profile_catalog_to_all_pos(
         self,
@@ -2420,20 +2823,32 @@ class SqliteDatabase:
     ) -> int:
         sent = 0
         for row in self.price_profile_catalog_rows_for_targets(int(profile_id), targets):
-            event_uuids = self.emit_price_update_sync_events(
-                filters={
-                    "item_type": row.get("item_type"),
-                    "school": row.get("school"),
-                    "color": row.get("color"),
-                    "size": row.get("size"),
-                },
-                new_price=float(row.get("unit_price") or 0),
-                note=note,
-                sync_mode="related-pos",
-                audit_mode="price-profile-catalog",
-                allow_catalog_definition=True,
-            )
-            sent += len(event_uuids)
+            filters = {
+                "item_type": row.get("item_type"),
+                "school": row.get("school"),
+                "color": row.get("color"),
+                "size": row.get("size"),
+            }
+            devices = self.related_pos_devices_for_price_update(filters)
+            for device in devices:
+                if self.is_price_profile_manual_override(
+                    device,
+                    row.get("item_type"),
+                    row.get("school"),
+                    row.get("color"),
+                    row.get("size"),
+                ):
+                    continue
+                event_uuids = self.emit_price_update_sync_events(
+                    filters=filters,
+                    new_price=float(row.get("unit_price") or 0),
+                    note=note,
+                    sync_mode="selected-pos",
+                    sync_pos_devices=[device],
+                    audit_mode="price-profile-catalog",
+                    allow_catalog_definition=True,
+                )
+                sent += len(event_uuids)
         return int(sent)
 
     def send_price_profile_catalog_to_pos(
@@ -2447,7 +2862,7 @@ class SqliteDatabase:
         if not device:
             raise ValueError("اختر فرع POS أولاً.")
         sent = 0
-        for row in self.price_profile_catalog_rows_for_targets(int(profile_id), targets):
+        for row in self.price_profile_catalog_rows_for_targets(int(profile_id), targets, pos_device=device):
             event_uuids = self.emit_price_update_sync_events(
                 filters={
                     "item_type": row.get("item_type"),
@@ -2476,9 +2891,7 @@ class SqliteDatabase:
                 SELECT 1
                   FROM price_profile_assignments a
                   JOIN price_profiles p ON p.id = a.profile_id
-                 WHERE LOWER(TRIM(a.item_type)) = LOWER(TRIM(s.item_type))
-                   AND LOWER(TRIM(a.school)) = LOWER(TRIM(s.school))
-                   AND LOWER(TRIM(a.color)) = LOWER(TRIM(s.color))
+                 WHERE LOWER(TRIM(a.school)) = LOWER(TRIM(s.school))
             )
             """,
         ]
@@ -2531,10 +2944,7 @@ class SqliteDatabase:
         note: str = "Price profile applied",
         price_sync_mode: str = "related-pos",
     ) -> Dict[str, int]:
-        clean_targets = [
-            (str(item or "").strip(), str(school or "").strip(), str(color or "").strip())
-            for item, school, color in (targets or [])
-        ]
+        clean_targets = self._expand_price_profile_targets(targets)
         clean_targets = [(item, school, color) for item, school, color in clean_targets if item and school and color]
         if not clean_targets:
             return {"updated": 0, "skipped": 0, "checked": 0}
@@ -2622,19 +3032,17 @@ class SqliteDatabase:
             SELECT item_type, school, color
             FROM price_profile_assignments
             WHERE profile_id=?
-              AND LOWER(TRIM(item_type)) = LOWER(TRIM(?))
-            ORDER BY LOWER(TRIM(school)), LOWER(TRIM(color))
+            ORDER BY LOWER(TRIM(school)), LOWER(TRIM(item_type)), LOWER(TRIM(color))
             """,
-            (int(profile_id), item),
+            (int(profile_id),),
         ).fetchall()
-        targets = [
-            (
-                str(r["item_type"] or "").strip(),
-                str(r["school"] or "").strip(),
-                str(r["color"] or "").strip(),
-            )
-            for r in rows
-        ]
+        targets = []
+        schools = []
+        for r in rows:
+            school = str(r["school"] or "").strip()
+            if school:
+                schools.append(school)
+        targets = self._expand_price_profile_targets_for_item(item, schools)
         if not targets:
             return {"updated": 0, "skipped": 0, "checked": 0}
         return self.apply_price_profile_to_stock(
@@ -2883,7 +3291,7 @@ class SqliteDatabase:
         1) price profile (explicit or assigned)
         2) exact last price (history)
         3) default price for item
-        3) None if unknown
+        4) None if unknown
         """
         try:
             profile_id = self.resolve_price_profile_id(
@@ -3255,6 +3663,49 @@ class SqliteDatabase:
         self._emit_spec_rename_sync_events(rename_events)
         self.cleanup_unused_specs()
         return count
+
+    def stock_ids_for_spec_in_warehouse(
+        self,
+        *,
+        item_type: Any,
+        school: Any,
+        color: Any,
+        size: Any,
+        warehouse_no: Any,
+    ) -> List[int]:
+        """Return all stock row ids for the same visible spec in one warehouse.
+
+        Package number is intentionally ignored here.  The inventory window
+        groups packages together, and editing specs from that grouped view
+        should affect the whole item spec inside the selected warehouse.
+        """
+        wh = parse_int_text(warehouse_no)
+        if wh is None:
+            return []
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT id
+                FROM stocks
+                WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
+                  AND LOWER(TRIM(school))    = LOWER(TRIM(?))
+                  AND LOWER(TRIM(color))     = LOWER(TRIM(?))
+                  AND LOWER(TRIM(size))      = LOWER(TRIM(?))
+                  AND warehouse_no = ?
+                ORDER BY id ASC
+                """,
+                (
+                    str(item_type or "").strip(),
+                    str(school or "").strip(),
+                    str(color or "").strip(),
+                    str(size or "").strip(),
+                    wh,
+                ),
+            )
+            return [int(r["id"]) for r in cur.fetchall()]
+        finally:
+            cur.close()
 
 
     def _cascade_spec_rename(
@@ -4922,6 +5373,7 @@ class SqliteDatabase:
         customer: str,
         bill_lines: List[Dict[str, Any]],
         target_pos: Optional[str] = None,
+        note: str = "",
     ) -> int:
         """
         Creates a bill from planned lines.
@@ -4940,12 +5392,13 @@ class SqliteDatabase:
         if not bill_lines:
             raise ValueError("Bill has no items")
         self.validate_stock_available_for_bill_lines(bill_lines)
+        clean_note = (note or "").strip()
 
         with self.conn:
             # create bill shell
             bill_cur = self.conn.execute(
-                "INSERT INTO bills(created_at,customer,total,status) VALUES(?,?,?,?)",
-                (now_iso(), (customer or "").strip() or None, 0.0, "CONFIRMED"),
+                "INSERT INTO bills(created_at,customer,total,status,note) VALUES(?,?,?,?,?)",
+                (now_iso(), (customer or "").strip() or None, 0.0, "CONFIRMED", clean_note or None),
             )
             bill_id = int(bill_cur.lastrowid)
             total = 0.0
@@ -5180,7 +5633,7 @@ class SqliteDatabase:
                 self._record_branch_shipment_event(
                     shipment_uuid=(bill_uuid_row[0] if bill_uuid_row else None) or "",
                     target_name=tp,
-                    note=f"bill #{bill_id}",
+                    note=clean_note or f"bill #{bill_id}",
                     lines=shipment_items,
                 )
             else:
@@ -5188,6 +5641,7 @@ class SqliteDatabase:
                     "bill_uuid": bill_uuid_row[0] if bill_uuid_row else None,
                     "bill_id":   bill_id,
                     "customer":  (customer or "").strip() or None,
+                    "note": clean_note or None,
                     "total":     float(total),
                     "items":     items_payload,
                 })
@@ -5234,7 +5688,7 @@ class SqliteDatabase:
     # -------- Bill history APIs --------
     def list_bills(self) -> List[Dict[str, Any]]:
         cur = self.conn.cursor()
-        cur.execute("SELECT id,created_at,customer,total,COALESCE(status,'CONFIRMED') AS status FROM bills ORDER BY id DESC")
+        cur.execute("SELECT id,uuid,created_at,customer,total,COALESCE(status,'CONFIRMED') AS status,COALESCE(note,'') AS note FROM bills ORDER BY id DESC")
         rows = [dict(r) for r in cur.fetchall()]
         cur.close()
         for row in rows:
@@ -6018,34 +6472,76 @@ class SqliteDatabase:
             try:
                 rows = self.conn.execute(
                     """
-                    SELECT source_device, payload_json
-                      FROM sync_inbox
-                     WHERE source_device IS NOT NULL
-                       AND TRIM(source_device) != ''
-                       AND payload_json IS NOT NULL
+                    WITH latest_source_events AS (
+                        SELECT source_device, MAX(server_seq) AS max_seq
+                          FROM sync_inbox
+                         WHERE source_device IS NOT NULL
+                           AND TRIM(source_device) != ''
+                           AND payload_json IS NOT NULL
+                           AND event_type IN (
+                               'POS_STOCK_SNAPSHOT',
+                               'POS_STOCK_AUDIT_SNAPSHOT',
+                               'POS_FINANCIAL_SNAPSHOT',
+                               'POS_STOCK_AUDIT_APPLIED'
+                           )
+                         GROUP BY source_device
+                    )
+                    SELECT si.source_device,
+                           json_extract(payload_json, '$.source_device_name') AS source_device_name,
+                           json_extract(payload_json, '$.device_name') AS device_name,
+                           json_extract(payload_json, '$.branch_device') AS branch_device,
+                           json_extract(payload_json, '$.branch_name') AS branch_name,
+                           json_extract(payload_json, '$.pos_name') AS pos_name,
+                           json_extract(payload_json, '$.source_name') AS source_name
+                      FROM sync_inbox si
+                      JOIN latest_source_events le
+                        ON le.source_device = si.source_device
+                       AND le.max_seq = si.server_seq
                     """
                 ).fetchall()
             except sqlite3.OperationalError:
-                rows = []
+                try:
+                    rows = self.conn.execute(
+                        """
+                        SELECT source_device, payload_json
+                          FROM sync_inbox
+                         WHERE source_device IS NOT NULL
+                           AND TRIM(source_device) != ''
+                           AND payload_json IS NOT NULL
+                        """
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
             for row in rows:
                 src = str(row["source_device"] or "").strip()
                 if not src:
                     continue
-                try:
-                    payload = json.loads(row["payload_json"] or "{}")
-                except Exception:
-                    payload = {}
-                if not isinstance(payload, dict):
-                    payload = {}
                 _add_alias(src, src)
-                for c in (
-                    payload.get("source_device_name"),
-                    payload.get("device_name"),
-                    payload.get("branch_device"),
-                    payload.get("branch_name"),
-                    payload.get("pos_name"),
-                    payload.get("source_name"),
-                ):
+                if "payload_json" in row.keys():
+                    try:
+                        payload = json.loads(row["payload_json"] or "{}")
+                    except Exception:
+                        payload = {}
+                    if not isinstance(payload, dict):
+                        payload = {}
+                    candidates = (
+                        payload.get("source_device_name"),
+                        payload.get("device_name"),
+                        payload.get("branch_device"),
+                        payload.get("branch_name"),
+                        payload.get("pos_name"),
+                        payload.get("source_name"),
+                    )
+                else:
+                    candidates = (
+                        row["source_device_name"],
+                        row["device_name"],
+                        row["branch_device"],
+                        row["branch_name"],
+                        row["pos_name"],
+                        row["source_name"],
+                    )
+                for c in candidates:
                     _add_alias(c, src)
             cache["by_name"] = by_name
 
@@ -6120,14 +6616,14 @@ class SqliteDatabase:
         return float((row[0] if row else 0.0) or 0.0)
 
     def repair_pos_stock_mirror_duplicates(self) -> Dict[str, int]:
-        """Collapse duplicate POS mirror rows to one row per branch/item spec."""
+        """Collapse duplicate POS mirror rows without merging different prices."""
         result = {"groups": 0, "deleted_rows": 0}
         try:
             groups = self.conn.execute(
                 """
-                SELECT source_device, item_type, school, color, size, COUNT(*) AS c
+                SELECT source_device, item_type, school, color, size, unit_price, COUNT(*) AS c
                   FROM pos_stocks_mirror
-                 GROUP BY source_device, item_type, school, color, size
+                 GROUP BY source_device, item_type, school, color, size, unit_price
                 HAVING COUNT(*) > 1
                 """
             ).fetchall()
@@ -6144,24 +6640,31 @@ class SqliteDatabase:
                        AND school = ?
                        AND color = ?
                        AND size = ?
+                       AND unit_price = ?
                      ORDER BY snapshot_at DESC, count DESC, id DESC
                     """,
-                    (g["source_device"], g["item_type"], g["school"], g["color"], g["size"]),
+                    (
+                        g["source_device"],
+                        g["item_type"],
+                        g["school"],
+                        g["color"],
+                        g["size"],
+                        g["unit_price"],
+                    ),
                 ).fetchall()
                 if not rows:
                     continue
                 keep = rows[0]
                 keep_id = int(keep["id"])
                 keep_count = max(int(r["count"] or 0) for r in rows)
-                keep_price = float(keep["unit_price"] or 0.0)
                 keep_snapshot = str(keep["snapshot_at"] or "")
                 self.conn.execute(
                     """
                     UPDATE pos_stocks_mirror
-                       SET unit_price = ?, count = ?, snapshot_at = ?
+                       SET count = ?, snapshot_at = ?
                      WHERE id = ?
                     """,
-                    (keep_price, keep_count, keep_snapshot, keep_id),
+                    (keep_count, keep_snapshot, keep_id),
                 )
                 delete_ids = [int(r["id"]) for r in rows if int(r["id"]) != keep_id]
                 if delete_ids:
@@ -6437,7 +6940,9 @@ class SqliteDatabase:
             qty = int(out.get("agg_qty") or 0)
             total = float(out.get("sum_total_amount") or 0.0)
             out["avg_unit_price"] = round(total / qty, 2) if qty > 0 else 0.0
-            out["pos_device_count"] = len(device_sets.get(key) or set())
+            sources = sorted(device_sets.get(key) or set(), key=lambda x: x.casefold())
+            out["pos_device_count"] = len(sources)
+            out["source_devices"] = ",".join(sources)
         return sorted(
             merged.values(),
             key=lambda r: (
@@ -7127,7 +7632,6 @@ class SqliteDatabase:
                     "sync_age_min": None,
                     "snapshot_at": "",
                     "snapshot_age_min": None,
-                    "app_version": "",
                     "stock_rows": 0,
                     "stock_qty": 0,
                     "stock_value": 0.0,
@@ -7154,7 +7658,6 @@ class SqliteDatabase:
                     "dead_letters": 0,
                     "status": "",
                     "notes": "",
-                    "_app_version_seen_at": "",
                 }
             return out[dev]
 
@@ -7184,7 +7687,6 @@ class SqliteDatabase:
             snaps = self.conn.execute(
                 """
                 SELECT pm.source_device, pm.snapshot_at, pm.row_count, pm.total_value,
-                       COALESCE(pm.app_version, '') AS app_version,
                        COALESCE(kd.device_name, pm.source_device) AS branch_name
                   FROM pos_stocks_snapshot_meta pm
              LEFT JOIN known_devices kd
@@ -7204,7 +7706,6 @@ class SqliteDatabase:
             row = _ensure(branch_dev)
             if not row["snapshot_at"] or snap > str(row["snapshot_at"]):
                 row["snapshot_at"] = snap
-                row["app_version"] = str(r["app_version"] or "").strip()
             row["last_sync_at"] = latest_timestamp_text(row.get("last_sync_at"), snap)
 
         try:
@@ -7235,73 +7736,19 @@ class SqliteDatabase:
             row["stock_qty"] = int(sr["stock_qty"] or 0)
             row["stock_value"] = float(sr["stock_value"] or 0.0)
 
-        try:
-            version_rows = self.conn.execute(
-                """
-                SELECT source_device, payload_json, COALESCE(apply_at, applied_at, '') AS seen_at
-                  FROM sync_inbox
-                 WHERE event_type = 'POS_STOCK_SNAPSHOT'
-                   AND payload_json LIKE '%"app_version"%'
-                 ORDER BY server_seq DESC
-                 LIMIT 300
-                """
-            ).fetchall()
-        except sqlite3.OperationalError:
-            version_rows = []
-        for vr in version_rows:
-            try:
-                payload = json.loads(vr["payload_json"] or "{}")
-            except Exception:
-                continue
-            app_version = str(payload.get("app_version") or "").strip()
-            if not app_version:
-                continue
-            source_name = str(payload.get("source_device_name") or vr["source_device"] or "").strip()
-            branch_dev = configured_branch_device_name(source_name)
-            if not branch_dev:
-                try:
-                    row = self.conn.execute(
-                        """
-                        SELECT device_name FROM known_devices
-                         WHERE TRIM(device_uuid) = TRIM(?)
-                            OR LOWER(TRIM(device_name)) = LOWER(?)
-                         LIMIT 1
-                        """,
-                        (source_name, source_name),
-                    ).fetchone()
-                    if row and row[0]:
-                        branch_dev = configured_branch_device_name(str(row[0] or ""))
-                except sqlite3.OperationalError:
-                    branch_dev = None
-            if not branch_dev:
-                continue
-            row = _ensure(branch_dev)
-            seen_at = str(
-                payload.get("snapshot_at")
-                or payload.get("event_at")
-                or payload.get("created_at")
-                or payload.get("ts")
-                or vr["seen_at"]
-                or ""
-            )
-            latest_seen = latest_timestamp_text(row.get("_app_version_seen_at"), seen_at)
-            if latest_seen == seen_at or not row.get("app_version"):
-                row["app_version"] = app_version
-                row["_app_version_seen_at"] = seen_at
-            if seen_at:
-                row["last_sync_at"] = latest_timestamp_text(row.get("last_sync_at"), seen_at)
-
         for dev, row in out.items():
             row["sync_age_min"] = timestamp_age_minutes(row.get("last_sync_at"))
             snap = str(row.get("snapshot_at") or "")
             if snap:
                 row["snapshot_age_min"] = timestamp_age_minutes(snap)
+        today_text = date.today().isoformat()
         all_devices = list(out.keys())
         for dev in all_devices:
             row = _ensure(dev)
             frag, frag_args = self.resolve_pos_mirror_device_sql_filter(dev)
             sql = """
                 SELECT
+                    day,
                     SUM(CASE WHEN category = 'sale' THEN COALESCE(gross_amount, amount) ELSE 0 END) AS sales_amt,
                     SUM(CASE WHEN category = 'return_bill' THEN amount ELSE 0 END) AS returns_amt,
                     SUM(CASE WHEN category = 'void_bill' THEN amount ELSE 0 END) AS voids_amt,
@@ -7340,19 +7787,159 @@ class SqliteDatabase:
             if dt:
                 sql += " AND day <= ?"
                 args.append(dt)
+            sql += " GROUP BY day"
+            ledger_by_day: Dict[str, Dict[str, float]] = {}
             try:
-                frow = self.conn.execute(sql, args).fetchone()
-                if frow:
-                    row["sales_amt"] = float(frow["sales_amt"] or 0.0)
-                    row["returns_amt"] = float(frow["returns_amt"] or 0.0)
-                    row["voids_amt"] = float(frow["voids_amt"] or 0.0)
-                    row["exchange_amt"] = float(frow["exchange_amt"] or 0.0)
-                    row["reservation_cash"] = float(frow["reservation_cash"] or 0.0)
-                    row["cash_net"] = float(frow["cash_net"] or 0.0)
-                    row["visa_net"] = float(frow["visa_net"] or 0.0)
-                    row["total_collected"] = float(frow["total_collected"] or 0.0)
+                for frow in self.conn.execute(sql, args).fetchall():
+                    day_key = str(frow["day"] or "").strip()[:10]
+                    if not day_key:
+                        continue
+                    values = {
+                        "sales_amt": float(frow["sales_amt"] or 0.0),
+                        "returns_amt": float(frow["returns_amt"] or 0.0),
+                        "voids_amt": float(frow["voids_amt"] or 0.0),
+                        "exchange_amt": float(frow["exchange_amt"] or 0.0),
+                        "reservation_cash": float(frow["reservation_cash"] or 0.0),
+                        "cash_net": float(frow["cash_net"] or 0.0),
+                        "visa_net": float(frow["visa_net"] or 0.0),
+                        "total_collected": float(frow["total_collected"] or 0.0),
+                    }
+                    ledger_by_day[day_key] = values
+                    row["sales_amt"] = float(row.get("sales_amt") or 0.0) + values["sales_amt"]
+                    row["returns_amt"] = float(row.get("returns_amt") or 0.0) + values["returns_amt"]
+                    row["voids_amt"] = float(row.get("voids_amt") or 0.0) + values["voids_amt"]
+                    row["exchange_amt"] = float(row.get("exchange_amt") or 0.0) + values["exchange_amt"]
+                    row["reservation_cash"] = float(row.get("reservation_cash") or 0.0) + values["reservation_cash"]
             except sqlite3.OperationalError:
                 pass
+
+            shift_by_day: Dict[str, Dict[str, float]] = {}
+            shift_sql = """
+                SELECT source_device, shift_key, shift_id, started_at, ended_at, summary_json
+                  FROM pos_shifts_mirror
+                 WHERE status = 'CLOSED'
+                   AND COALESCE(summary_json, '') != ''
+            """
+            shift_args: List[Any] = []
+            if frag:
+                shift_sql += frag
+                shift_args.extend(frag_args)
+            try:
+                shift_seen: Set[Tuple[str, str]] = set()
+                for sr in self.conn.execute(shift_sql, shift_args).fetchall():
+                    day_key = str(sr["ended_at"] or sr["started_at"] or "").strip()[:10]
+                    if not day_key:
+                        continue
+                    if df and day_key < df:
+                        continue
+                    if dt and day_key > dt:
+                        continue
+                    src_key = str(sr["source_device"] or "").strip()
+                    shift_key = str(sr["shift_key"] or "").strip()
+                    if not shift_key:
+                        shift_key = f"id:{sr['shift_id']}" if sr["shift_id"] is not None else ""
+                    dedupe_key = (src_key, shift_key)
+                    if shift_key and dedupe_key in shift_seen:
+                        continue
+                    if shift_key:
+                        shift_seen.add(dedupe_key)
+                    try:
+                        summary = json.loads(sr["summary_json"] or "{}")
+                    except Exception:
+                        summary = {}
+                    if not isinstance(summary, dict):
+                        summary = {}
+                    try:
+                        cash_value = float(summary.get("cash_collected") or 0.0)
+                    except (TypeError, ValueError):
+                        cash_value = 0.0
+                    try:
+                        visa_value = float(summary.get("visa_collected") or 0.0)
+                    except (TypeError, ValueError):
+                        visa_value = 0.0
+                    bucket = shift_by_day.setdefault(day_key, {"cash_net": 0.0, "visa_net": 0.0})
+                    bucket["cash_net"] += cash_value
+                    bucket["visa_net"] += visa_value
+            except sqlite3.OperationalError:
+                pass
+
+            snapshot_latest: Dict[Tuple[str, str], Dict[str, Any]] = {}
+            snap_sql = """
+                SELECT source_device, day, cash_total, visa_total, total_collected, snapshot_at, id
+                  FROM pos_financial_daily_snapshot
+                 WHERE 1=1
+            """
+            snap_args: List[Any] = []
+            if frag:
+                snap_sql += frag
+                snap_args.extend(frag_args)
+            if df:
+                snap_sql += " AND day >= ?"
+                snap_args.append(df)
+            if dt:
+                snap_sql += " AND day <= ?"
+                snap_args.append(dt)
+            try:
+                for snap_row in self.conn.execute(snap_sql, snap_args).fetchall():
+                    src_key = str(snap_row["source_device"] or "").strip()
+                    day_key = str(snap_row["day"] or "").strip()[:10]
+                    if not src_key or not day_key:
+                        continue
+                    key = (src_key, day_key)
+                    marker = (str(snap_row["snapshot_at"] or ""), int(snap_row["id"] or 0))
+                    current = snapshot_latest.get(key)
+                    current_marker = (
+                        str(current.get("snapshot_at") or ""),
+                        int(current.get("id") or 0),
+                    ) if current else ("", 0)
+                    if current is None or marker > current_marker:
+                        snapshot_latest[key] = dict(snap_row)
+            except sqlite3.OperationalError:
+                pass
+            snapshot_by_day: Dict[str, Dict[str, float]] = {}
+            for snap_row in snapshot_latest.values():
+                day_key = str(snap_row.get("day") or "").strip()[:10]
+                bucket = snapshot_by_day.setdefault(day_key, {"cash_net": 0.0, "visa_net": 0.0})
+                bucket["cash_net"] += float(snap_row.get("cash_total") or 0.0)
+                bucket["visa_net"] += float(snap_row.get("visa_total") or 0.0)
+
+            chosen_cash = 0.0
+            chosen_visa = 0.0
+            diff_notes: List[str] = []
+            all_money_days = sorted(set(ledger_by_day) | set(shift_by_day) | set(snapshot_by_day))
+            for day_key in all_money_days:
+                ledger_values = ledger_by_day.get(day_key, {})
+                shift_values = shift_by_day.get(day_key)
+                snapshot_values = snapshot_by_day.get(day_key)
+                if day_key == today_text:
+                    source_values = ledger_values
+                    source_label = "ledger"
+                elif shift_values is not None:
+                    source_values = shift_values
+                    source_label = "shift"
+                elif snapshot_values is not None:
+                    source_values = snapshot_values
+                    source_label = "snapshot"
+                else:
+                    source_values = ledger_values
+                    source_label = "ledger"
+                cash_value = float(source_values.get("cash_net") or 0.0)
+                visa_value = float(source_values.get("visa_net") or 0.0)
+                chosen_cash += cash_value
+                chosen_visa += visa_value
+
+                ledger_total = float(ledger_values.get("cash_net") or 0.0) + float(ledger_values.get("visa_net") or 0.0)
+                chosen_total = cash_value + visa_value
+                if source_label != "ledger" and abs(chosen_total - ledger_total) >= 1.0:
+                    diff = chosen_total - ledger_total
+                    if diff > 0:
+                        diff_notes.append(f"{day_key}: إجمالي الوردية أعلى من التفصيلي بـ {format_money(diff)}")
+                    else:
+                        diff_notes.append(f"{day_key}: التفصيلي أعلى من إجمالي الوردية بـ {format_money(abs(diff))}")
+            row["cash_net"] = chosen_cash
+            row["visa_net"] = chosen_visa
+            row["total_collected"] = chosen_cash + chosen_visa
+            row["_money_diff_notes"] = diff_notes
 
             sql = """
                 SELECT COUNT(*) AS c,
@@ -7467,6 +8054,16 @@ class SqliteDatabase:
                     notes.append("الوردية مفتوحة من يوم سابق - لم يصل حدث إغلاق")
             if int(row.get("inbox_errors") or 0) or int(row.get("dead_letters") or 0):
                 notes.append("أخطاء مزامنة")
+            money_diff_notes = [
+                str(x or "").strip()
+                for x in (row.get("_money_diff_notes") or [])
+                if str(x or "").strip()
+            ]
+            if money_diff_notes:
+                extra_note = "؛ ".join(money_diff_notes[:3])
+                if len(money_diff_notes) > 3:
+                    extra_note += f"؛ +{len(money_diff_notes) - 3} أيام"
+                notes.append(extra_note)
             audit = self.sum_pos_stock_audit_adjustments(dev, date_from=df, date_to=dt)
             row["audit_adjust_count"] = int(audit.get("audit_count") or 0)
             row["audit_adjust_qty"] = int(audit.get("audit_qty") or 0)
@@ -7489,6 +8086,7 @@ class SqliteDatabase:
             else:
                 row["status"] = "تحذير"
                 row["notes"] = "، ".join(notes)
+            row.pop("_money_diff_notes", None)
 
         rows = list(out.values())
         rows.sort(key=lambda r: str(r.get("branch_name") or ""))
@@ -7679,52 +8277,154 @@ class SqliteDatabase:
         target_name: str,
         note: str = "",
     ) -> None:
-        item = self.get_branch_inventory_queue_item(queue_id)
-        if not item:
-            raise ValueError("العنصر المطلوب غير موجود.")
-        if (item.get("status") or "").upper() != "PENDING":
-            raise ValueError("تمت معالجة هذا العنصر بالفعل.")
+        self.reroute_branch_inventory_queue_items([int(queue_id)], target_name, note)
+
+    def _record_rerouted_branch_shipment_bill(
+        self,
+        target_name: str,
+        lines: List[Dict[str, Any]],
+        note: str = "",
+    ) -> int:
+        target = canonical_branch_device_name(
+            target_name,
+            self.list_known_pos_device_names() or [],
+        ) or (target_name or "").strip()
+        customer = branch_display_name(target)
+        total = sum(float(line.get("unit_price") or 0.0) * int(line.get("qty") or 0) for line in lines)
+        bill_cur = self.conn.execute(
+            "INSERT INTO bills(created_at,customer,total,status,bill_type,note) VALUES(?,?,?,?,?,?)",
+            (now_iso(), customer or target or None, float(total), "CONFIRMED", "BRANCH_SHIPMENT", (note or "").strip() or None),
+        )
+        bill_id = int(bill_cur.lastrowid)
+        for line in lines:
+            qty = int(line.get("qty") or 0)
+            if qty <= 0:
+                continue
+            unit_price = float(line.get("unit_price") or 0.0)
+            self.conn.execute(
+                """INSERT INTO bill_items
+                (bill_id,item_type,school,color,size,warehouse_no,package_no,unit_price,qty,line_total,origin,has_badge)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    bill_id,
+                    str(line.get("item_type") or "").strip(),
+                    str(line.get("school") or "").strip(),
+                    str(line.get("color") or "").strip(),
+                    str(line.get("size") or "").strip(),
+                    0,
+                    0,
+                    unit_price,
+                    qty,
+                    unit_price * qty,
+                    "BRANCH_REROUTE",
+                    int(line.get("has_badge") or 0),
+                ),
+            )
+        return bill_id
+
+    def reroute_branch_inventory_queue_items(
+        self,
+        queue_ids: List[int],
+        target_name: str,
+        note: str = "",
+    ) -> int:
+        ids = [int(qid) for qid in (queue_ids or []) if int(qid or 0) > 0]
+        if not ids:
+            raise ValueError("اختر عنصرًا واحدًا أو أكثر أولاً.")
 
         target = (target_name or "").strip()
         if not target:
             raise ValueError("اسم الفرع المطلوب غير صالح.")
-        with self.conn:
-            import uuid as _uuid
 
-            original_ref = item.get("external_ref") or item.get("sync_event_uuid") or ""
-            shipment_uuid = str(_uuid.uuid4())
+        items: List[Dict[str, Any]] = []
+        for queue_id in ids:
+            item = self.get_branch_inventory_queue_item(queue_id)
+            if not item:
+                raise ValueError(f"العنصر #{queue_id} غير موجود.")
+            if (item.get("status") or "").upper() != "PENDING":
+                raise ValueError(f"تمت معالجة العنصر #{queue_id} بالفعل.")
+            items.append(item)
+
+        with self.conn:
             processed_note = (note or "").strip() or f"Rerouted to {target}"
-            if original_ref:
-                processed_note = f"{processed_note} | original_ref={original_ref}"
+            refs = [
+                str(item.get("external_ref") or item.get("sync_event_uuid") or "").strip()
+                for item in items
+                if str(item.get("external_ref") or item.get("sync_event_uuid") or "").strip()
+            ]
+            if refs:
+                processed_note = f"{processed_note} | original_ref={','.join(refs[:5])}"
+                if len(refs) > 5:
+                    processed_note = f"{processed_note},+{len(refs) - 5}"
+
+            merged: Dict[Tuple[str, str, str, str, float, int], Dict[str, Any]] = {}
+            for item in items:
+                key = (
+                    str(item.get("item_type") or "").strip(),
+                    str(item.get("school") or "").strip(),
+                    str(item.get("color") or "").strip(),
+                    str(item.get("size") or "").strip(),
+                    float(item.get("unit_price") or 0.0),
+                    int(item.get("has_badge") or 0),
+                )
+                row = merged.setdefault(
+                    key,
+                    {
+                        "item_type": key[0],
+                        "school": key[1],
+                        "color": key[2],
+                        "size": key[3],
+                        "unit_price": key[4],
+                        "has_badge": key[5],
+                        "qty": 0,
+                    },
+                )
+                row["qty"] = int(row.get("qty") or 0) + int(item.get("qty") or 0)
+            lines = [line for line in merged.values() if int(line.get("qty") or 0) > 0]
+            bill_id = self._record_rerouted_branch_shipment_bill(target, lines, processed_note)
+            bill_uuid_row = self.conn.execute(
+                "SELECT uuid FROM bills WHERE id=?",
+                (int(bill_id),),
+            ).fetchone()
+            shipment_uuid = str(bill_uuid_row[0] if bill_uuid_row else "").strip()
+            if not shipment_uuid:
+                import uuid as _uuid
+                shipment_uuid = str(_uuid.uuid4())
+
             self._record_branch_shipment_event(
                 shipment_uuid=shipment_uuid,
                 target_name=target,
-                note=processed_note,
-                lines=[{
-                    "item_type": item["item_type"],
-                    "school": item["school"],
-                    "color": item["color"],
-                    "size": item["size"],
-                    "unit_price": float(item.get("unit_price") or 0),
-                    "qty": int(item["qty"]),
-                }],
+                note=f"{processed_note} | bill #{bill_id}",
+                lines=[
+                    {
+                        "item_type": line["item_type"],
+                        "school": line["school"],
+                        "color": line["color"],
+                        "size": line["size"],
+                        "unit_price": float(line.get("unit_price") or 0),
+                        "qty": int(line["qty"]),
+                    }
+                    for line in lines
+                ],
             )
-            self.conn.execute(
-                """
-                UPDATE branch_inventory_queue
-                   SET status = 'REROUTED',
-                       processed_at = ?,
-                       processed_note = ?,
-                       rerouted_target_device = ?
-                 WHERE id = ?
-                """,
-                (
-                    now_iso(),
-                    processed_note,
-                    target,
-                    int(queue_id),
-                ),
-            )
+            for queue_id in ids:
+                self.conn.execute(
+                    """
+                    UPDATE branch_inventory_queue
+                       SET status = 'REROUTED',
+                           processed_at = ?,
+                           processed_note = ?,
+                           rerouted_target_device = ?
+                     WHERE id = ?
+                    """,
+                    (
+                        now_iso(),
+                        f"{processed_note} | bill #{bill_id}",
+                        target,
+                        int(queue_id),
+                    ),
+                )
+            return bill_id
 
     def _branch_shipment_size_profiles(self, lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         keys = {
@@ -7967,6 +8667,106 @@ class SqliteDatabase:
                     now_iso(),
                 ),
             )
+        return str(event_uuid)
+
+    def resend_branch_shipment_bill(self, bill_id: int, note: str = "") -> str:
+        bill_id = int(bill_id or 0)
+        row = self.conn.execute(
+            """
+            SELECT id, uuid, customer, COALESCE(status, 'CONFIRMED') AS status
+              FROM bills
+             WHERE id = ?
+            """,
+            (bill_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError("الفاتورة غير موجودة.")
+        if str(row["status"] or "").upper() != "CONFIRMED":
+            raise ValueError("يمكن إعادة إرسال فواتير الشحن المؤكدة فقط.")
+        target = normalize_branch_customer_name(row["customer"])
+        if not target:
+            raise ValueError("هذه الفاتورة ليست فاتورة شحن فرع.")
+        items = self.conn.execute(
+            """
+            SELECT item_type, school, color, size, unit_price, qty
+              FROM bill_items
+             WHERE bill_id = ?
+               AND COALESCE(qty, 0) > 0
+             ORDER BY id
+            """,
+            (bill_id,),
+        ).fetchall()
+        lines = [
+            {
+                "item_type": str(r["item_type"] or "").strip(),
+                "school": str(r["school"] or "").strip(),
+                "color": str(r["color"] or "").strip(),
+                "size": str(r["size"] or "").strip(),
+                "unit_price": float(r["unit_price"] or 0.0),
+                "qty": int(r["qty"] or 0),
+            }
+            for r in items
+            if int(r["qty"] or 0) > 0
+        ]
+        if not lines:
+            raise ValueError("لا توجد بنود صالحة لإعادة الإرسال.")
+        shipment_uuid = str(row["uuid"] or "").strip()
+        if not shipment_uuid:
+            raise ValueError("الفاتورة لا تحتوي على مرجع شحنة.")
+        resend_note = (note or "").strip() or f"bill #{bill_id} resend"
+        return self._record_branch_shipment_event(
+            shipment_uuid=shipment_uuid,
+            target_name=target,
+            note=resend_note,
+            lines=lines,
+        )
+
+    def branch_shipment_receipt_state(self, bill: Dict[str, Any]) -> str:
+        if (bill or {}).get("bill_kind") != "BRANCH_SHIPMENT":
+            return ""
+        shipment_uuid = str((bill or {}).get("uuid") or "").strip()
+        if not shipment_uuid:
+            return "لا يوجد مرجع"
+        try:
+            review = self.conn.execute(
+                """
+                SELECT has_diff
+                  FROM shipment_receipt_reviews
+                 WHERE shipment_uuid = ?
+                 ORDER BY id DESC
+                 LIMIT 1
+                """,
+                (shipment_uuid,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            review = None
+        if review is not None:
+            return "استلم بفرق" if int(review["has_diff"] or 0) else "استلمه الفرع"
+
+        try:
+            ev = self.conn.execute(
+                """
+                SELECT status, COALESCE(last_error, '') AS last_error
+                  FROM sync_outbox
+                 WHERE event_type = 'STOCK_TRANSFER_OUT'
+                   AND payload_json LIKE ?
+                 ORDER BY local_seq DESC
+                 LIMIT 1
+                """,
+                (f"%{shipment_uuid}%",),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            ev = None
+        if ev is None:
+            return "لم يرسل"
+        status = str(ev["status"] or "").strip().lower()
+        if status == "pending":
+            return "بانتظار الإرسال"
+        if status == "acked":
+            return "مرسل - لم يؤكد"
+        if status == "failed":
+            return "فشل الإرسال"
+        return status or "غير معروف"
 
     def _record_branch_shipment_cancel_event(
         self,
@@ -10322,14 +11122,19 @@ class ToolTip:
 def apply_zebra_tags(tree, skip_tags: Optional[set] = None):
     """Apply alternating row colors to a treeview."""
     skip_tags = skip_tags or set()
-    tree.tag_configure("oddrow", background=_UI["ROW_ODD"])
-    tree.tag_configure("evenrow", background=_UI["ROW_EVEN"])
-    for i, item in enumerate(tree.get_children("")):
-        existing = tuple(tree.item(item, "tags") or ())
-        if any(t in skip_tags for t in existing):
-            continue
-        tag = "evenrow" if i % 2 == 0 else "oddrow"
-        tree.item(item, tags=(tag,))
+    try:
+        if not tree.winfo_exists():
+            return
+        tree.tag_configure("oddrow", background=_UI["ROW_ODD"])
+        tree.tag_configure("evenrow", background=_UI["ROW_EVEN"])
+        for i, item in enumerate(tree.get_children("")):
+            existing = tuple(tree.item(item, "tags") or ())
+            if any(t in skip_tags for t in existing):
+                continue
+            tag = "evenrow" if i % 2 == 0 else "oddrow"
+            tree.item(item, tags=(tag,))
+    except tk.TclError:
+        return
 
 
 def add_context_menu(tree, extra_commands=None):
@@ -11846,6 +12651,8 @@ class OutcomeFrame(ttk.Frame):
         self._qty_entry = ttk.Entry(act_inner, textvariable=self.qty_var, width=5, justify="center",
                                     font=_FONTS["body"])
         self._qty_entry.pack(side=tk.LEFT, padx=2)
+        self._qty_entry.bind("<Return>", self._on_qty_entry_return, add="+")
+        self._qty_entry.bind("<KP_Enter>", self._on_qty_entry_return, add="+")
         _qp = tk.Button(act_inner, text="+",
                          command=lambda: self.qty_var.set(str((parse_int_text(self.qty_var.get(), 1) or 1) + 1)),
                          bg=_UI["SURFACE"], fg=_UI["TEXT"], font=("Segoe UI", 11, "bold"),
@@ -12028,6 +12835,10 @@ class OutcomeFrame(ttk.Frame):
         self._render_schools()
 
     # ---------------- Stage renders ----------------
+    def _on_qty_entry_return(self, event=None):
+        self._add_current_selection()
+        return "break"
+
     def _clear_grid(self):
         for w in self._grid_host.winfo_children():
             w.destroy()
@@ -13512,7 +14323,7 @@ class InventoryWindow(tk.Toplevel):
         _bp = ttk.Button(bar, text="تعديل السعر…", command=self._edit_price_dialog); _bp.pack(side=tk.RIGHT, padx=(8, 0))
         ToolTip(_bp, "تعديل سعر الأصناف المطابقة للفلاتر")
         _bs = ttk.Button(bar, text="تعديل المواصفات…", command=self._edit_specs_dialog); _bs.pack(side=tk.RIGHT, padx=(8, 0))
-        ToolTip(_bs, "تعديل المخزن/العبوة للأصناف المطابقة")
+        ToolTip(_bs, "تعديل مواصفات الأصناف المحددة")
         _bd = ttk.Button(bar, text="حذف المحدد…", command=self._remove_selected_dialog); _bd.pack(side=tk.RIGHT, padx=(8, 0))
         ToolTip(_bd, "حذف الصفوف المحددة من المخزون")
 
@@ -13640,8 +14451,8 @@ class InventoryWindow(tk.Toplevel):
 
     def _get_selected_price_profile_targets(self):
         """
-        Price profiles can be assigned to mixed item types/colors, but
-        the selected rows must belong to one school.
+        Price profiles are assigned by school.  Selected rows are only used
+        to choose the target school.
         """
         sel = self.table.selection()
         if not sel:
@@ -13877,16 +14688,16 @@ class InventoryWindow(tk.Toplevel):
         if picked:
             item_type, school, color = picked
         else:
-            item_type = (self.f_type.get() or "").strip()
             school = (self.f_school.get() or "").strip()
-            color = (self.f_color.get() or "").strip()
-            if not (item_type and school and color):
+            if not school:
                 messagebox.showwarning(
-                    "حدد الصنف",
-                    "حدد صفوفاً من الجدول أو اختر (النوع، المدرسة، اللون) أولاً.",
+                    "حدد المدرسة",
+                    "حدد صفوفاً من الجدول أو اختر المدرسة أولاً.",
                     parent=self,
                 )
                 return
+            item_type = ""
+            color = ""
             targets = [(item_type, school, color)]
 
         profiles = self.db.list_price_profiles()
@@ -13915,9 +14726,7 @@ class InventoryWindow(tk.Toplevel):
 
         frm = ttk.Frame(dlg, padding=12)
         frm.pack(fill=tk.BOTH, expand=True)
-        target_text = f"{item_type} / {school} / {color}"
-        if len(targets) > 1:
-            target_text = f"{school} - {len(targets)} نوع/لون محدد"
+        target_text = f"المدرسة: {school}"
         ttk.Label(frm, text=target_text, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 10))
 
         selected_name = tk.StringVar(value=next(iter(current_names)) if len(current_names) == 1 else "")
@@ -13940,10 +14749,10 @@ class InventoryWindow(tk.Toplevel):
                 result = self.db.apply_price_profile_to_stock(
                     profile_id,
                     targets,
-                    stock_ids=selected_stock_ids if has_selection else None,
+                    stock_ids=None,
                     note=f"Price profile applied: {label}",
                 )
-                catalog_sent = 0 if has_selection else self._send_profile_catalog_to_all_pos(profile_id, targets, label)
+                catalog_sent = self._send_profile_catalog_to_all_pos(profile_id, targets, label)
                 show_toast(
                     dlg,
                     f"تم حفظ البروفايل وتحديث {result.get('updated', 0)} صف، وتخطي {result.get('skipped', 0)}",
@@ -13958,7 +14767,7 @@ class InventoryWindow(tk.Toplevel):
             try:
                 for t_item, t_school, t_color in targets:
                     self.db.clear_price_profile_assignment(t_item, t_school, t_color)
-                show_toast(dlg, f"تم مسح الربط من {len(targets)} نوع/لون")
+                show_toast(dlg, f"تم مسح ربط السعر من المدرسة: {school}")
                 dlg.destroy()
             except Exception as ex:
                 messagebox.showerror("خطأ", str(ex), parent=dlg)
@@ -14128,7 +14937,7 @@ class InventoryWindow(tk.Toplevel):
 
                     for r in items:
                         sz = _normalize_size_label(r.get("size") or "")
-                        size_counts[sz] += int(r.get("count") or 0)
+                        size_counts[sz] += parse_int_text(r.get("count"), 0) or 0
                         used_sizes.add(sz)
 
                     profile = self.db.get_size_profile(t, sch, clr)
@@ -14151,7 +14960,7 @@ class InventoryWindow(tk.Toplevel):
                     def row_counts(labels):
                         out = []
                         for lbl in labels:
-                            v = int(size_counts.get(lbl, 0))
+                            v = parse_int_text(size_counts.get(lbl, 0), 0) or 0
                             out.append("" if v == 0 else str(v))
                         return out
 
@@ -14713,14 +15522,37 @@ try {{ window.print(); }} catch(e) {{}}
         sel = self.table.selection()
         ids: List[int] = []
         if sel:
-            # target selected rows
+            # Target the selected visible specs, expanded across all packages
+            # inside the same warehouse.  The visible inventory row can be a
+            # package aggregate such as "94, 95, 96, 97", so one displayed row
+            # may represent many underlying stock rows.
+            expanded_ids: List[int] = []
             for iid in sel:
                 vals = self.table.item(iid, "values")
                 stock_id = parse_int_text(vals[0])
                 if stock_id is None:
                     raise ValueError(f"معرف صف غير صالح: {vals[0]}")
+                if len(vals) >= 6:
+                    matches = self.db.stock_ids_for_spec_in_warehouse(
+                        item_type=vals[1],
+                        school=vals[2],
+                        color=vals[3],
+                        size=vals[4],
+                        warehouse_no=vals[5],
+                    )
+                    expanded_ids.extend(matches or [stock_id])
+                else:
+                    expanded_ids.append(stock_id)
+
+            seen: Set[int] = set()
+            ids = []
+            for stock_id in expanded_ids:
+                if stock_id in seen:
+                    continue
+                seen.add(stock_id)
                 ids.append(stock_id)
-            scope_text = f"عدد الصفوف المحددة: {len(ids)}"
+
+            scope_text = f"عدد الصفوف المحددة: {len(sel)} (سيتم تعديل {len(ids)} صف مخزون عبر كل العبوات المطابقة)"
             scope_mode = "ids"
         else:
             # fall back to package filters
@@ -14949,6 +15781,8 @@ class BillsHistoryWindow(tk.Toplevel):
         ToolTip(_bdel, "حذف المسودة نهائياً")
         _bret = ttk.Button(top, text="مرتجع", command=self._process_return); _bret.pack(side=tk.RIGHT, padx=4)
         ToolTip(_bret, "معالجة مرتجع لفاتورة مؤكدة")
+        _bresend = ttk.Button(top, text="إعادة إرسال للفرع", command=self._resend_branch_shipment); _bresend.pack(side=tk.RIGHT, padx=4)
+        ToolTip(_bresend, "إعادة إرسال فاتورة شحن الفرع المحددة بدون خصم المخزون مرة أخرى")
 
         filters = ttk.Frame(self)
         filters.pack(fill=tk.X, padx=8, pady=(0, 8))
@@ -14965,9 +15799,9 @@ class BillsHistoryWindow(tk.Toplevel):
         bills_wrap = ttk.Frame(self)
         bills_wrap.pack(fill=tk.BOTH, expand=False, padx=8, pady=(0, 6))
         self.bills_table = ttk.Treeview(
-            bills_wrap, columns=("id", "created_at", "kind", "customer", "total", "status"), show="headings", height=10
+            bills_wrap, columns=("id", "created_at", "kind", "customer", "total", "status", "receipt", "note"), show="headings", height=10
         )
-        for col, txt, w in [("id","المعرّف",80), ("created_at","التاريخ",180), ("kind","النوع",120), ("customer","العميل",200), ("total","الإجمالي",120), ("status","الحالة",90)]:
+        for col, txt, w in [("id","المعرّف",80), ("created_at","التاريخ",180), ("kind","النوع",120), ("customer","العميل",200), ("total","الإجمالي",120), ("status","الحالة",90), ("receipt","استلام الفرع",140), ("note","ملاحظة",260)]:
             self.bills_table.heading(col, text=txt)
             self.bills_table.column(col, width=w, anchor="center")
         bills_ysb = ttk.Scrollbar(bills_wrap, orient="vertical", command=self.bills_table.yview)
@@ -15050,6 +15884,7 @@ class BillsHistoryWindow(tk.Toplevel):
             status = b.get("status", "CONFIRMED")
             status_txt = status_map.get(status, b.get("status", ""))
             kind_txt = "شحن فرع" if b.get("bill_kind") == "BRANCH_SHIPMENT" else "فاتورة"
+            receipt_txt = self.db.branch_shipment_receipt_state(b) if b.get("bill_kind") == "BRANCH_SHIPMENT" else ""
             bill_total = float(b.get("total") or 0.0)
             shown_count += 1
             if not is_canceled_bill_status(status) and not is_canceled_bill_status(status_txt):
@@ -15057,7 +15892,7 @@ class BillsHistoryWindow(tk.Toplevel):
             self.bills_table.insert(
                 "", tk.END, iid=str(b["id"]),
                 values=(b["id"], fmt_local_ts(b["created_at"], ""), kind_txt, customer,
-                        f"{format_money(bill_total)}", status_txt)
+                        f"{format_money(bill_total)}", status_txt, receipt_txt, b.get("note") or "")
             )
         apply_zebra_tags(self.bills_table)
         # Color-code by status
@@ -15131,6 +15966,49 @@ class BillsHistoryWindow(tk.Toplevel):
             messagebox.showwarning("غير متاح", "المرتجعات متاحة فقط للفواتير المؤكدة.", parent=self)
             return
         ReturnDialog(self, self.db, bill_id, on_done=self._refresh)
+
+    def _resend_branch_shipment(self):
+        bill_id = self._get_selected_bill_id()
+        if bill_id is None:
+            messagebox.showwarning("لم يتم التحديد", "اختر فاتورة شحن فرع أولاً.", parent=self)
+            return
+        bill = None
+        for b in self.db.list_bills():
+            if int(b["id"]) == bill_id:
+                bill = b
+                break
+        if not bill or bill.get("bill_kind") != "BRANCH_SHIPMENT":
+            messagebox.showwarning("غير متاح", "إعادة الإرسال متاحة لفواتير شحن الفروع فقط.", parent=self)
+            return
+        if bill.get("status") != "CONFIRMED":
+            messagebox.showwarning("غير متاح", "يمكن إعادة إرسال فواتير الشحن المؤكدة فقط.", parent=self)
+            return
+        state = self.db.branch_shipment_receipt_state(bill)
+        if state in ("استلمه الفرع", "استلم بفرق"):
+            if not messagebox.askyesno(
+                "تأكيد إعادة الإرسال",
+                "هذه الشحنة عليها تأكيد استلام من الفرع. هل تريد إعادة إرسالها رغم ذلك؟",
+                parent=self,
+            ):
+                return
+        else:
+            if not messagebox.askyesno(
+                "تأكيد إعادة الإرسال",
+                "سيتم إنشاء حدث إرسال جديد لنفس فاتورة الشحن بدون خصم المخزون مرة أخرى. هل تريد المتابعة؟",
+                parent=self,
+            ):
+                return
+        try:
+            event_uuid = self.db.resend_branch_shipment_bill(bill_id)
+            show_toast(self, f"تم تجهيز إعادة إرسال الفاتورة #{bill_id}")
+            messagebox.showinfo(
+                "تم التجهيز",
+                f"تم وضع إعادة الإرسال في قائمة المزامنة.\nEvent: {event_uuid}\nاضغط مزامنة الآن لإرساله للسيرفر.",
+                parent=self,
+            )
+            self._refresh()
+        except Exception as ex:
+            messagebox.showerror("فشل إعادة الإرسال", str(ex), parent=self)
 
     def _get_selected_bill_id(self) -> Optional[int]:
         sel = self.bills_table.selection()
@@ -17216,16 +18094,8 @@ class BranchInventoryQueueWindow(tk.Toplevel):
             messagebox.showerror("بيانات ناقصة", "اختر الفرع الهدف أولاً.", parent=self)
             return
         try:
-            errors = []
-            for queue_id in queue_ids:
-                try:
-                    self.db.reroute_branch_inventory_queue_item(queue_id, target, self._note_var.get())
-                except Exception as ex:
-                    errors.append(f"#{queue_id}: {ex}")
-            if errors:
-                self._refresh()
-                raise RuntimeError("\n".join(errors))
-            show_toast(self, f"تم تحويل {len(queue_ids)} عنصر إلى الفرع {branch_display_name(target)}")
+            bill_id = self.db.reroute_branch_inventory_queue_items(queue_ids, target, self._note_var.get())
+            show_toast(self, f"تم تحويل {len(queue_ids)} عنصر إلى {branch_display_name(target)} في فاتورة #{bill_id}")
             self._note_var.set("")
             self._refresh()
         except Exception as ex:
@@ -17240,20 +18110,24 @@ class BranchInventoryQueueWindow(tk.Toplevel):
             return
         try:
             errors = []
+            grouped: Dict[str, List[int]] = {}
             for row in rows:
                 queue_id = int(row.get("id") or 0)
                 target = str(row.get("source_device") or "").strip()
                 if not target:
                     errors.append(f"#{queue_id}: لا يوجد فرع مرسل.")
                     continue
+                grouped.setdefault(target, []).append(queue_id)
+            bills_created = []
+            for target, ids in grouped.items():
                 try:
-                    self.db.reroute_branch_inventory_queue_item(queue_id, target, self._note_var.get())
+                    bills_created.append(self.db.reroute_branch_inventory_queue_items(ids, target, self._note_var.get()))
                 except Exception as ex:
-                    errors.append(f"#{queue_id}: {ex}")
+                    errors.append(f"{branch_display_name(target)}: {ex}")
             if errors:
                 self._refresh()
                 raise RuntimeError("\n".join(errors))
-            show_toast(self, f"تم إرجاع {len(rows)} عنصر إلى الفروع المرسلة")
+            show_toast(self, f"تم إرجاع {len(rows)} عنصر في {len(bills_created)} فاتورة")
             self._note_var.set("")
             self._refresh()
         except Exception as ex:
@@ -17371,6 +18245,8 @@ class BranchStockWindow(tk.Toplevel):
         ttk.Button(btns, text="طباعة جدول المقاسات", command=self._print_size_sheets).pack(side=tk.LEFT, padx=8)
         ttk.Button(btns, text="تعديل نطاقات المقاسات…", command=self._edit_branch_size_profile_dialog).pack(side=tk.LEFT, padx=8)
         ttk.Button(btns, text="تعيين بروفايل سعر…", command=self._edit_branch_price_profile_dialog).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btns, text="استثناء سعر يدوي", command=self._set_selected_manual_price_overrides).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btns, text="إلغاء الاستثناء", command=self._clear_selected_manual_price_overrides).pack(side=tk.LEFT, padx=8)
         _cz = ttk.Checkbutton(
             btns,
             text="إظهار الكميات الصفرية",
@@ -17409,6 +18285,8 @@ class BranchStockWindow(tk.Toplevel):
         self._tree.tag_configure("zero_stock", background="#f3f4f6", foreground="#6b7280")
         self._tree.tag_configure("low_stock", background="#fff7ed", foreground="#9a3412")
         self._tree.tag_configure("warehouse_available", background="#dcfce7", foreground="#166534")
+        self._tree.tag_configure("price_profile_issue", background="#fee2e2", foreground="#b91c1c")
+        self._tree.tag_configure("manual_price_override", background="#e0f2fe", foreground="#075985")
         apply_zebra_tags(self._tree)
         _bind_mousewheel(self._tree)
 
@@ -18007,9 +18885,8 @@ class BranchStockWindow(tk.Toplevel):
         dlg.grab_set()
         frm = ttk.Frame(dlg, padding=12)
         frm.pack(fill=tk.BOTH, expand=True)
-        target_text = f"{branch_display_name(branch_device)} - {len(targets)} نوع/لون محدد"
-        if len(targets) == 1:
-            target_text = f"{branch_display_name(branch_device)}: {targets[0][0]} / {targets[0][1]} / {targets[0][2]}"
+        schools = sorted({str(t[1] or "").strip() for t in targets if str(t[1] or "").strip()})
+        target_text = f"{branch_display_name(branch_device)} - المدارس: {', '.join(schools)}"
         ttk.Label(frm, text=target_text, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 10))
         selected_name = tk.StringVar(value=next(iter(current_names)) if len(current_names) == 1 else "")
         ttk.Label(frm, text="بروفايل السعر").pack(anchor="w")
@@ -18025,7 +18902,7 @@ class BranchStockWindow(tk.Toplevel):
                 messagebox.showwarning("اختر بروفايل", "اختر بروفايل سعر قبل الحفظ.", parent=dlg)
                 return
             try:
-                profile_rows = self.db.price_profile_catalog_rows_for_targets(profile_id, targets)
+                profile_rows = self.db.price_profile_catalog_rows_for_targets(profile_id, targets, pos_device=branch_device)
                 if not profile_rows:
                     messagebox.showwarning(
                         "بروفايل فارغ",
@@ -18067,7 +18944,7 @@ class BranchStockWindow(tk.Toplevel):
                 for item_type, school, color in targets:
                     self.db.clear_price_profile_assignment(item_type, school, color)
                 dlg.destroy()
-                show_toast(self, f"تم مسح ربط السعر من {len(targets)} نوع/لون")
+                show_toast(self, f"تم مسح ربط السعر من {len(schools)} مدرسة")
             except Exception as ex:
                 messagebox.showerror("خطأ", str(ex), parent=dlg)
 
@@ -18948,11 +19825,17 @@ try {{ window.print(); }} catch(e) {{}}
         self._tree.delete(*self._tree.get_children())
         rows = self._filtered_branch_rows()
         warehouse_available = self._warehouse_available_qty_by_spec(rows)
+        manual_override_keys = self._manual_price_override_keys(rows)
+        price_profile_issues = self._price_profile_issue_keys(rows)
         total_qty = sum(int(row[5] or 0) for row in rows)
         total_val = sum(float(row[4] or 0) * int(row[5] or 0) for row in rows)
+        issue_count = len(price_profile_issues)
+        manual_count = len(manual_override_keys)
+        issue_text = f"  |  تنبيهات السعر: {issue_count}" if issue_count else ""
+        manual_text = f"  |  أسعار يدوية: {manual_count}" if manual_count else ""
         self._status_var.set(
             f"يُعرض {len(rows)} صف  |  الكمية: {total_qty}  |  "
-            f"القيمة: {format_money(total_val)}"
+            f"القيمة: {format_money(total_val)}{issue_text}{manual_text}"
         )
 
         generation = self._load_generation
@@ -18971,7 +19854,11 @@ try {{ window.print(); }} catch(e) {{}}
                     _normalize_size_label(_strip_digit_marks(sz)).casefold(),
                 )
                 warehouse_qty = int(warehouse_available.get(spec_key, 0) or 0)
-                if warehouse_qty > 0:
+                if spec_key in manual_override_keys:
+                    tags = ("manual_price_override",)
+                elif spec_key in price_profile_issues:
+                    tags = ("price_profile_issue",)
+                elif warehouse_qty > 0:
                     tags = ("warehouse_available",)
                 elif int(count or 0) == 0:
                     tags = ("zero_stock",)
@@ -18990,7 +19877,10 @@ try {{ window.print(); }} catch(e) {{}}
                 self._render_job = self.after(1, lambda: render_chunk(end))
                 return
             self._render_job = None
-            apply_zebra_tags(self._tree, skip_tags={"zero_stock", "low_stock", "warehouse_available"})
+            apply_zebra_tags(
+                self._tree,
+                skip_tags={"zero_stock", "low_stock", "warehouse_available", "price_profile_issue", "manual_price_override"},
+            )
             try:
                 if logging_setup is not None:  # type: ignore[name-defined]
                     logging_setup.log_event(
@@ -19002,6 +19892,178 @@ try {{ window.print(); }} catch(e) {{}}
                 pass
 
         render_chunk(0)
+
+    def _manual_price_override_keys(
+        self,
+        rows: Sequence[Tuple[str, str, str, str, float, int]],
+    ) -> Set[Tuple[str, str, str, str]]:
+        specs = [
+            (
+                str(it or "").strip(),
+                str(sc or "").strip(),
+                str(cl or "").strip(),
+                _normalize_size_label(_strip_digit_marks(sz)),
+            )
+            for it, sc, cl, sz, _price, _count in rows
+        ]
+        branch_device, _source_name = self._current_branch_names()
+        return self.db.manual_price_profile_override_keys(branch_device, specs)
+
+    def _set_selected_manual_price_overrides(self):
+        rows = self._selected_branch_rows()
+        if not rows:
+            messagebox.showwarning(
+                "حدد صفوفاً",
+                "اختر الصفوف التي تريد تثبيت سعرها يدوياً أولاً.",
+                parent=self,
+            )
+            return
+        branch_device, _source_name = self._current_branch_names()
+        if not branch_device:
+            messagebox.showwarning("حدد الفرع", "اختر فرع POS أولاً.", parent=self)
+            return
+        try:
+            saved = self.db.set_price_profile_manual_overrides(
+                branch_device,
+                rows,
+                note="Branch stock manual price override",
+            )
+            show_toast(self, f"تم تثبيت السعر اليدوي لـ {saved} مقاس")
+            self._reload_stock()
+        except Exception as ex:
+            messagebox.showerror("خطأ", str(ex), parent=self)
+
+    def _clear_selected_manual_price_overrides(self):
+        rows = self._selected_branch_rows()
+        if not rows:
+            messagebox.showwarning(
+                "حدد صفوفاً",
+                "اختر الصفوف التي تريد إرجاعها للبروفايل أولاً.",
+                parent=self,
+            )
+            return
+        branch_device, _source_name = self._current_branch_names()
+        if not branch_device:
+            messagebox.showwarning("حدد الفرع", "اختر فرع POS أولاً.", parent=self)
+            return
+        try:
+            deleted = self.db.clear_price_profile_manual_overrides(branch_device, rows)
+            sent = 0
+            for row in rows:
+                item_type = str(row.get("item_type") or "").strip()
+                school = str(row.get("school") or "").strip()
+                color = str(row.get("color") or "").strip()
+                size = _normalize_size_label(_strip_digit_marks(row.get("size")))
+                if not (item_type and school and color and size):
+                    continue
+                profile_id = self.db.resolve_price_profile_id(item_type, school, color)
+                if not profile_id:
+                    continue
+                price = self.db.get_price_profile_price(int(profile_id), item_type, size)
+                if price is None:
+                    continue
+                event_uuids = self.db.emit_price_update_sync_events(
+                    filters={
+                        "item_type": item_type,
+                        "school": school,
+                        "color": color,
+                        "size": size,
+                    },
+                    new_price=float(price),
+                    note="Manual price override cleared; return to profile",
+                    sync_mode="selected-pos",
+                    sync_pos_devices=[branch_device],
+                    audit_mode="branch-inventory-clear-manual-price-override",
+                    allow_catalog_definition=True,
+                )
+                sent += len(event_uuids)
+            show_toast(self, f"تم إلغاء الاستثناء عن {deleted} مقاس وإرسال {sent} تحديث سعر")
+            self._reload_stock()
+        except Exception as ex:
+            messagebox.showerror("خطأ", str(ex), parent=self)
+
+    def _price_profile_issue_keys(
+        self,
+        rows: Sequence[Tuple[str, str, str, str, float, int]],
+    ) -> Set[Tuple[str, str, str, str]]:
+        issues: Set[Tuple[str, str, str, str]] = set()
+        specs: List[Tuple[str, str, str, str, float]] = []
+        schools: Set[str] = set()
+        for it, sc, cl, sz, price, _count in rows:
+            item = str(it or "").strip()
+            school = str(sc or "").strip()
+            color = str(cl or "").strip()
+            size = _normalize_size_label(_strip_digit_marks(sz))
+            if not (item and school and color and size):
+                continue
+            specs.append((item, school, color, size, float(price or 0)))
+            schools.add(school)
+        if not specs:
+            return issues
+        branch_device, _source_name = self._current_branch_names()
+        manual_override_keys = self.db.manual_price_profile_override_keys(
+            branch_device,
+            [(item, school, color, size) for item, school, color, size, _price in specs]
+        )
+
+        assignment_by_school: Dict[str, Optional[Dict[str, Any]]] = {}
+        profile_ids: Set[int] = set()
+        for school in schools:
+            assignment = self.db.get_price_profile_assignment("", school, "") or None
+            key = school.casefold()
+            assignment_by_school[key] = assignment
+            if assignment and assignment.get("profile_id") is not None:
+                try:
+                    profile_ids.add(int(assignment["profile_id"]))
+                except (TypeError, ValueError):
+                    pass
+
+        price_by_profile_item_size: Dict[Tuple[int, str, str], float] = {}
+        if profile_ids:
+            placeholders = ",".join("?" for _ in profile_ids)
+            try:
+                rows_db = self.db.conn.execute(
+                    f"""
+                    SELECT profile_id, item_type, size, price
+                      FROM price_profile_lines
+                     WHERE profile_id IN ({placeholders})
+                    """,
+                    tuple(sorted(profile_ids)),
+                ).fetchall()
+            except Exception:
+                rows_db = []
+            for r in rows_db:
+                try:
+                    pid = int(r["profile_id"])
+                    profile_price = float(r["price"])
+                except (TypeError, ValueError):
+                    continue
+                item_key = str(r["item_type"] or "").strip().casefold()
+                size_key = _normalize_size_label(_strip_digit_marks(r["size"])).casefold()
+                if item_key and size_key:
+                    price_by_profile_item_size[(pid, item_key, size_key)] = profile_price
+
+        for item, school, _color, size, pos_price in specs:
+            spec_key = (
+                item.casefold(),
+                school.casefold(),
+                _color.casefold(),
+                size.casefold(),
+            )
+            if spec_key in manual_override_keys:
+                continue
+            assignment = assignment_by_school.get(school.casefold())
+            if not assignment:
+                issues.add(spec_key)
+                continue
+            try:
+                profile_id = int(assignment.get("profile_id") or 0)
+            except (TypeError, ValueError):
+                profile_id = 0
+            profile_price = price_by_profile_item_size.get((profile_id, item.casefold(), size.casefold()))
+            if profile_price is None or abs(float(pos_price or 0) - float(profile_price or 0)) >= 0.001:
+                issues.add(spec_key)
+        return issues
 
     def _run_sync_and_reload(self):
         # Open the existing sync dialog so the user sees the live log
@@ -20556,7 +21618,7 @@ class BranchBillsSyncLogWindow(tk.Toplevel):
         ttk.Button(top_b, text="تحديث", command=lambda: self._fill_branch_bills()).pack(side=tk.RIGHT)
         wrap_b = ttk.Frame(tab_b)
         wrap_b.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 4))
-        cols_b = ("id", "created_at", "customer", "total", "status")
+        cols_b = ("id", "created_at", "customer", "total", "status", "note")
         self._tree_b = ttk.Treeview(wrap_b, columns=cols_b, show="headings", height=18)
         for col, txt, w in [
             ("id", "#", 70),
@@ -20564,6 +21626,7 @@ class BranchBillsSyncLogWindow(tk.Toplevel):
             ("customer", "الفرع / العميل", 260),
             ("total", "الإجمالي", 100),
             ("status", "الحالة", 90),
+            ("note", "ملاحظة", 260),
         ]:
             self._tree_b.heading(col, text=txt)
             self._tree_b.column(col, width=w, anchor="center")
@@ -20643,6 +21706,7 @@ class BranchBillsSyncLogWindow(tk.Toplevel):
                     customer,
                     f"{format_money(total)}",
                     st,
+                    b.get("note") or "",
                 ),
             )
             shown_count += 1
@@ -20698,6 +21762,14 @@ class PosBranchMonitorWindow(tk.Toplevel):
         self.title("لوحة متابعة الفروع")
         self.geometry("1540x660")
         self._build()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self) -> None:
+        self._refresh_generation += 1
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
 
     def _build(self):
         top = ttk.Frame(self)
@@ -20712,7 +21784,7 @@ class PosBranchMonitorWindow(tk.Toplevel):
         ttk.Button(top, text="مزامنة الآن…", command=self._run_sync_and_reload).pack(side=tk.LEFT, padx=(8, 0))
 
         cols = (
-            "branch", "status", "last_sync", "app_version",
+            "branch", "status", "last_sync",
             "day_total", "cash", "visa",
             "shift_status", "shift_start", "shift_end", "errors", "notes",
         )
@@ -20723,7 +21795,6 @@ class PosBranchMonitorWindow(tk.Toplevel):
             ("branch", "الفرع", 150),
             ("status", "الحالة", 70),
             ("last_sync", "آخر اتصال/لقطة", 145),
-            ("app_version", "إصدار البرنامج", 110),
             ("day_total", "إجمالي اليوم", 110),
             ("cash", "إجمالي كاش", 105),
             ("visa", "إجمالي فيزا", 105),
@@ -20777,6 +21848,11 @@ class PosBranchMonitorWindow(tk.Toplevel):
     def _refresh(self):
         self._refresh_generation += 1
         generation = self._refresh_generation
+        try:
+            if not self.winfo_exists() or not self._tree.winfo_exists():
+                return
+        except tk.TclError:
+            return
         self._tree.delete(*self._tree.get_children())
         df = (self._df.get() or "").strip() or None
         dt = (self._dt.get() or "").strip() or None
@@ -20798,7 +21874,7 @@ class PosBranchMonitorWindow(tk.Toplevel):
                 worker_db = object.__new__(SqliteDatabase)
                 worker_db.path = self.db.path
                 worker_db.conn = conn
-                rows = worker_db.list_pos_branch_monitor(df, dt, read_only=False)
+                rows = worker_db.list_pos_branch_monitor(df, dt, read_only=True)
                 sec = worker_db.admin_security_summary(days=7)
             except Exception as ex:
                 err = str(ex)
@@ -20810,7 +21886,14 @@ class PosBranchMonitorWindow(tk.Toplevel):
                     pass
 
             def done() -> None:
-                if generation != self._refresh_generation:
+                try:
+                    if (
+                        generation != self._refresh_generation
+                        or not self.winfo_exists()
+                        or not self._tree.winfo_exists()
+                    ):
+                        return
+                except tk.TclError:
                     return
                 if err:
                     self._sum.set(f"فشل تحميل لوحة الفروع: {err}")
@@ -20825,6 +21908,11 @@ class PosBranchMonitorWindow(tk.Toplevel):
         threading.Thread(target=worker, daemon=True).start()
 
     def _render_rows(self, rows: List[Dict[str, Any]], sec: Dict[str, Any], started: float):
+        try:
+            if not self.winfo_exists() or not self._tree.winfo_exists():
+                return
+        except tk.TclError:
+            return
         self._tree.delete(*self._tree.get_children())
         totals = {
             "cash": 0.0,
@@ -20855,7 +21943,6 @@ class PosBranchMonitorWindow(tk.Toplevel):
                     r.get("branch_name") or "",
                     r.get("status") or "",
                     fmt_local_ts(r.get("last_sync_at") or r.get("snapshot_at") or "", ""),
-                    r.get("app_version") or "",
                     f"{format_money(float(r.get('total_collected') or 0.0))}",
                     f"{format_money(float(r.get('cash_net') or 0.0))}",
                     f"{format_money(float(r.get('visa_net') or 0.0))}",
@@ -20914,7 +22001,7 @@ class PosReservationsMirrorWindow(tk.Toplevel):
             top, textvariable=self._dev, values=pick, width=34, state="readonly",
         )
         self._dev_cb.pack(side=tk.RIGHT)
-        self._dev_cb.bind("<<ComboboxSelected>>", lambda _e: self._refresh())
+        self._dev_cb.bind("<<ComboboxSelected>>", self._on_device_selected)
         ttk.Label(top, text="المتاح من:").pack(side=tk.RIGHT, padx=(12, 4))
         stock_sources = ["كل فروع POS", "المخزن الرئيسي"] + [x for x in pick if str(x or "").strip()]
         self._stock_source = tk.StringVar(value="كل فروع POS")
@@ -20937,50 +22024,8 @@ class PosReservationsMirrorWindow(tk.Toplevel):
         nb = ttk.Notebook(self)
         nb.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-        tab_d = ttk.Frame(nb)
-        nb.add(tab_d, text="تفصيلي (كل حجز)")
-        ttk.Label(
-            tab_d,
-            text=(
-                "كل سطر هنا = سطر حجز واحد في المزامنة (معرّفات مختلفة تظهر منفصلة). "
-                "لرؤية إجمالي الكمية لنفس المنتج (نوع + مدرسة + لون + مقاس) بعد جمع كل الأسطر، "
-                "استخدم تبويب «مجمّع حسب المنتج» (يفتح افتراضياً)."
-            ),
-            wraplength=1100,
-        ).pack(anchor="w", padx=6, pady=(4, 2))
-        wrap = ttk.Frame(tab_d)
-        wrap.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-        cols = (
-            "device", "key", "customer", "type", "school", "color", "size",
-            "qty", "price", "total", "paid", "status", "updated",
-        )
-        self._tree = ttk.Treeview(wrap, columns=cols, show="headings", height=18)
-        heads = [
-            ("device", "الجهاز", 110),
-            ("key", "المعرّف", 180),
-            ("customer", "العميل", 120),
-            ("type", "النوع", 110),
-            ("school", "المدرسة", 110),
-            ("color", "اللون", 70),
-            ("size", "المقاس", 55),
-            ("qty", "الكمية", 50),
-            ("price", "السعر", 65),
-            ("total", "الإجمالي", 75),
-            ("paid", "المدفوع", 70),
-            ("status", "الحالة", 85),
-            ("updated", "آخر تحديث", 140),
-        ]
-        for col, txt, w in heads:
-            self._tree.heading(col, text=txt)
-            self._tree.column(col, width=w, anchor="center")
-        ysb = ttk.Scrollbar(wrap, orient="vertical", command=self._tree.yview)
-        self._tree.configure(yscrollcommand=ysb.set)
-        self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        ysb.pack(side=tk.RIGHT, fill=tk.Y)
-        _bind_mousewheel(self._tree)
-
         tab_a = ttk.Frame(nb)
-        nb.add(tab_a, text="مجمّع حسب المنتج")
+        nb.add(tab_a, text="الحجوزات حسب المنتج")
         hint = (
             "يعرض إجمالي القطع المحجوزة حالياً لكل صنف، مرتبة بحيث تظهر مقاسات نفس الصنف معاً. "
             "اترك نقطة البيع فارغة لجمع كل الفروع، أو اختر فرعاً لرؤية حجوزاته فقط."
@@ -21008,41 +22053,25 @@ class PosReservationsMirrorWindow(tk.Toplevel):
         asb.pack(side=tk.RIGHT, fill=tk.Y)
         _bind_mousewheel(self._tree_agg)
 
-        nb.select(tab_a)
+        self._refresh()
+
+    @staticmethod
+    def _resolve_branch_stock_source(selected_device: Optional[str], stock_pick: Optional[str]) -> str:
+        dev = str(selected_device or "").strip()
+        pick = str(stock_pick or "").strip()
+        if pick and pick not in ("كل فروع POS", "المخزن الرئيسي"):
+            return pick
+        if dev:
+            return dev
+        return "__ALL_POS__"
+
+    def _on_device_selected(self, _event=None) -> None:
+        dev = (self._dev.get() or "").strip()
+        self._stock_source.set(dev or "كل فروع POS")
         self._refresh()
 
     def _refresh(self) -> None:
-        self._refresh_detail()
         self._refresh_agg()
-
-    def _refresh_detail(self) -> None:
-        self._tree.delete(*self._tree.get_children())
-        dev = (self._dev.get() or "").strip() or None
-        rows = self.db.list_pos_reservations_mirror(
-            source_device=dev,
-            active_only=bool(self._active_only.get()),
-        )
-        for r in rows:
-            dev_show = self.db.display_name_for_sync_source(r.get("source_device"))
-            self._tree.insert(
-                "", tk.END,
-                values=(
-                    dev_show,
-                    r.get("reservation_key") or "",
-                    r.get("customer") or "",
-                    r.get("item_type") or "",
-                    r.get("school") or "",
-                    r.get("color") or "",
-                    r.get("size") or "",
-                    r.get("qty") or 0,
-                    f"{format_money(float(r.get('unit_price') or 0))}",
-                    f"{format_money(float(r.get('total_amount') or 0))}",
-                    f"{format_money(float(r.get('paid_amount') or 0))}",
-                    r.get("status") or "",
-                    r.get("updated_at") or "",
-                ),
-            )
-        apply_zebra_tags(self._tree)
 
     def _refresh_agg(self) -> None:
         self._tree_agg.delete(*self._tree_agg.get_children())
@@ -21051,6 +22080,7 @@ class PosReservationsMirrorWindow(tk.Toplevel):
             source_device=dev,
             active_only=bool(self._active_only.get()),
         )
+        rows = self._filter_aggregated_rows_for_device(rows, dev)
         def _sort_key(r: Dict[str, Any]) -> Tuple[Any, ...]:
             return (
                 str(r.get("school") or "").casefold(),
@@ -21074,24 +22104,56 @@ class PosReservationsMirrorWindow(tk.Toplevel):
             )
         apply_zebra_tags(self._tree_agg)
 
+    def _filter_aggregated_rows_for_device(
+        self,
+        rows: List[Dict[str, Any]],
+        source_device: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        dev = (source_device or "").strip()
+        if not dev:
+            return rows
+
+        _, filter_args = self.db.resolve_pos_mirror_device_sql_filter(dev)
+        allowed = {str(x or "").strip().casefold() for x in filter_args if str(x or "").strip()}
+        canonical = canonical_branch_device_name(dev, self.db.list_known_pos_device_names() or DEFAULT_BRANCH_POS_NAMES)
+        if canonical:
+            allowed.add(canonical.casefold())
+            allowed.add(branch_display_name(canonical).casefold())
+        if not allowed:
+            allowed.add(dev.casefold())
+
+        filtered: List[Dict[str, Any]] = []
+        for row in rows:
+            sources = [
+                str(x or "").strip()
+                for x in str(row.get("source_devices") or "").split(",")
+                if str(x or "").strip()
+            ]
+            if not sources:
+                continue
+            for src in sources:
+                src_cf = src.casefold()
+                src_canonical = canonical_branch_device_name(src, self.db.list_known_pos_device_names() or DEFAULT_BRANCH_POS_NAMES)
+                if src_cf in allowed or (src_canonical and src_canonical.casefold() in allowed):
+                    filtered.append(row)
+                    break
+        return filtered
+
     def _print_size_table(self) -> None:
         dev = (self._dev.get() or "").strip() or None
         rows = self.db.list_pos_reservations_mirror_aggregated(
             source_device=dev,
             active_only=bool(self._active_only.get()),
         )
+        rows = self._filter_aggregated_rows_for_device(rows, dev)
         if not rows:
             show_toast(self, "لا توجد حجوزات مطابقة للطباعة", bg="#f59e0b")
             return
 
         stock_pick = (self._stock_source.get() or "").strip()
-        if not stock_pick or stock_pick == "كل فروع POS":
-            stock_source = "__ALL_POS__"
-        elif stock_pick == "المخزن الرئيسي":
-            stock_source = None
-        else:
-            stock_source = stock_pick
-        availability = self.db.stock_availability_by_specs(source_device=stock_source)
+        branch_stock_source = self._resolve_branch_stock_source(dev, stock_pick)
+        branch_availability = self.db.stock_availability_by_specs(source_device=branch_stock_source)
+        warehouse_availability = self.db.stock_availability_by_specs(source_device=None)
 
         from collections import OrderedDict
         grouped: "OrderedDict[str, OrderedDict[Tuple[str, str], List[Dict[str, Any]]]]" = OrderedDict()
@@ -21112,11 +22174,12 @@ class PosReservationsMirrorWindow(tk.Toplevel):
                 if size and size.casefold() not in seen:
                     labels.append(size)
                     seen.add(size.casefold())
-            for key, qty in availability.items():
-                it_k, sc_k, cl_k, sz_k = key
-                if it_k == item.casefold() and sc_k == school.casefold() and cl_k == color.casefold() and sz_k not in seen:
-                    labels.append(sz_k.upper() if not sz_k.isdigit() else sz_k)
-                    seen.add(sz_k)
+            for source in (branch_availability, warehouse_availability):
+                for key, qty in source.items():
+                    it_k, sc_k, cl_k, sz_k = key
+                    if it_k == item.casefold() and sc_k == school.casefold() and cl_k == color.casefold() and sz_k not in seen:
+                        labels.append(sz_k.upper() if not sz_k.isdigit() else sz_k)
+                        seen.add(sz_k)
             labels.sort(key=warehouse_size_sort_key)
             return labels
 
@@ -21127,6 +22190,15 @@ class PosReservationsMirrorWindow(tk.Toplevel):
                 color.casefold(),
                 _normalize_size_label(size).casefold(),
             )
+
+        def _display_qty(qty: Any) -> str:
+            qty_int = int(qty or 0)
+            return "" if qty_int == 0 else str(qty_int)
+
+        if branch_stock_source == "__ALL_POS__":
+            source_label = "كل فروع POS"
+        else:
+            source_label = branch_display_name(branch_stock_source)
 
         tables_html: List[str] = []
         for school, item_groups in sorted(grouped.items(), key=lambda kv: kv[0].casefold()):
@@ -21145,25 +22217,22 @@ class PosReservationsMirrorWindow(tk.Toplevel):
                 def _cells(labels_chunk: List[str], mode: str) -> str:
                     vals = []
                     for label in labels_chunk:
-                        if mode == "reserved":
+                        key = _key(item, school, color, label)
+                        if mode == "branch":
+                            qty = branch_availability.get(key, 0)
+                        elif mode == "reserved":
                             qty = reserved_by_size.get(_normalize_size_label(label).casefold(), 0)
                         else:
-                            qty = availability.get(_key(item, school, color, label), 0)
-                        vals.append(f'<td class="num">{"" if int(qty or 0) == 0 else int(qty)}</td>')
+                            qty = warehouse_availability.get(key, 0)
+                        vals.append(f'<td class="num">{_display_qty(qty)}</td>')
                     return "".join(vals)
 
-                if stock_source == "__ALL_POS__":
-                    source_label = "كل فروع POS"
-                elif stock_source is None:
-                    source_label = "المخزن الرئيسي"
-                else:
-                    source_label = branch_display_name(stock_source)
                 head = f"""
                 <div class="hdr">
                     <span>النوع: {_html(item)}</span>
                     <span>المدرسة: {_html(school)}</span>
                     <span>اللون: {_html(color)}</span>
-                    <span>المتاح من: {_html(source_label)}</span>
+                    <span>الفرع: {_html(source_label)}</span>
                 </div>
                 """
 
@@ -21173,9 +22242,10 @@ class PosReservationsMirrorWindow(tk.Toplevel):
                     chunks.append(f"""
                     <table class="grid">
                     <tbody>
-                        <tr><th class="rowhead"></th>{''.join(f'<th>{_html(x)}</th>' for x in chunk)}</tr>
-                        <tr><th class="rowhead">محجوز</th>{_cells(chunk, "reserved")}</tr>
-                        <tr><th class="rowhead">متاح</th>{_cells(chunk, "available")}</tr>
+                        <tr><th class="rowhead">البيان</th>{''.join(f'<th>{_html(x)}</th>' for x in chunk)}</tr>
+                        <tr><th class="rowhead">الفرع</th>{_cells(chunk, "branch")}</tr>
+                        <tr><th class="rowhead">الحجوزات</th>{_cells(chunk, "reserved")}</tr>
+                        <tr><th class="rowhead">المخزن</th>{_cells(chunk, "warehouse")}</tr>
                     </tbody>
                     </table>
                     """)
@@ -21186,12 +22256,7 @@ class PosReservationsMirrorWindow(tk.Toplevel):
             return
 
         title_dev = branch_display_name(dev) if dev else "كل الفروع"
-        if stock_source == "__ALL_POS__":
-            title_stock = "كل فروع POS"
-        elif stock_source is None:
-            title_stock = "المخزن الرئيسي"
-        else:
-            title_stock = branch_display_name(stock_source)
+        title_stock = source_label
         active_txt = "المعلقة فقط" if self._active_only.get() else "كل الحجوزات"
         html = f"""<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -21218,13 +22283,13 @@ body {{
     text-align: center;
 }}
 .grid th {{ background: #eee; }}
-.rowhead {{ width: 70px; background: #f8fafc !important; }}
+.rowhead {{ width: 78px; background: #f8fafc !important; }}
 .num {{ font-variant-numeric: tabular-nums; }}
 </style>
 </head>
 <body>
 <div class="report-title">جدول حجوزات الفروع حسب المقاسات</div>
-<div class="meta">الحجوزات: {_html(title_dev)} | المتاح من: {_html(title_stock)} | النطاق: {_html(active_txt)} | التاريخ: {_html(fmt_local_ts(now_iso(), now_iso()))}</div>
+<div class="meta">الحجوزات: {_html(title_dev)} | الفرع: {_html(title_stock)} | النطاق: {_html(active_txt)} | التاريخ: {_html(fmt_local_ts(now_iso(), now_iso()))}</div>
 {''.join(tables_html)}
 <script>
 window.onload = function() {{
@@ -21242,7 +22307,7 @@ try {{ window.print(); }} catch(e) {{}}
         with open(path, "w", encoding="utf-8") as f:
             f.write(html)
         _print_html_auto(path, copies=1, parent=self)
-
+        return
 
 class PosBranchFinancialWindow(tk.Toplevel):
     """Day-by-day POS cashflow totals from synced events."""

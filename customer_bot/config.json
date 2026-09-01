@@ -1,0 +1,55 @@
+{
+  "warehouse_db_path": "Warehouse/warehouse_data.sqlite3",
+  "stock_stale_minutes": 30,
+  "branches": [
+    {
+      "device": "POS-ZAY",
+      "name": "فرع زايد",
+      "address": "عنوان مؤقت لفرع زايد",
+      "phone": "01000000001",
+      "maps_url": "https://maps.google.com/?q=فرع+زايد",
+      "hours": "يومياً من 10 صباحاً إلى 10 مساءً"
+    },
+    {
+      "device": "POS-OCT",
+      "name": "فرع اكتوبر",
+      "address": "عنوان مؤقت لفرع اكتوبر",
+      "phone": "01000000002",
+      "maps_url": "https://maps.google.com/?q=فرع+اكتوبر",
+      "hours": "يومياً من 10 صباحاً إلى 10 مساءً"
+    },
+    {
+      "device": "POS-OBO",
+      "name": "فرع العبور",
+      "address": "عنوان مؤقت لفرع العبور",
+      "phone": "01000000003",
+      "maps_url": "https://maps.google.com/?q=فرع+العبور",
+      "hours": "يومياً من 10 صباحاً إلى 10 مساءً"
+    },
+    {
+      "device": "POS-GESR",
+      "name": "فرع جسر السويس",
+      "address": "عنوان مؤقت لفرع جسر السويس",
+      "phone": "01000000004",
+      "maps_url": "https://maps.google.com/?q=فرع+جسر+السويس",
+      "hours": "يومياً من 10 صباحاً إلى 10 مساءً"
+    },
+    {
+      "device": "POS-BAH",
+      "name": "فرع بهتيم",
+      "address": "عنوان مؤقت لفرع بهتيم",
+      "phone": "01000000005",
+      "maps_url": "https://maps.google.com/?q=فرع+بهتيم",
+      "hours": "يومياً من 10 صباحاً إلى 10 مساءً"
+    },
+    {
+      "device": "POS-CEN",
+      "name": "فرع السنتر",
+      "address": "عنوان مؤقت لفرع السنتر",
+      "phone": "01000000006",
+      "maps_url": "https://maps.google.com/?q=فرع+السنتر",
+      "hours": "يومياً من 10 صباحاً إلى 10 مساءً"
+    }
+  ]
+}
+

@@ -54,9 +54,67 @@ def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     return any(r[1] == column for r in cur.fetchall())
 
 
+def _dedupe_pos_stocks_mirror_exact_prices(conn: sqlite3.Connection) -> Dict[str, int]:
+    """Collapse old duplicate mirror rows without merging different prices."""
+    result = {"groups": 0, "deleted_rows": 0}
+    try:
+        groups = conn.execute(
+            """
+            SELECT source_device, item_type, school, color, size, unit_price, COUNT(*) AS c
+              FROM pos_stocks_mirror
+             GROUP BY source_device, item_type, school, color, size, unit_price
+            HAVING COUNT(*) > 1
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return result
+
+    for g in groups:
+        source_device, item_type, school, color, size, unit_price = g[:6]
+        rows = conn.execute(
+            """
+            SELECT id, count, snapshot_at
+              FROM pos_stocks_mirror
+             WHERE source_device = ?
+               AND item_type = ?
+               AND school = ?
+               AND color = ?
+               AND size = ?
+               AND unit_price = ?
+             ORDER BY snapshot_at DESC, count DESC, id DESC
+            """,
+            (source_device, item_type, school, color, size, unit_price),
+        ).fetchall()
+        if not rows:
+            continue
+        keep = rows[0]
+        keep_id = int(keep[0])
+        keep_count = max(int((r[1] if len(r) > 1 else 0) or 0) for r in rows)
+        keep_snapshot = str((keep[2] if len(keep) > 2 else "") or "")
+        conn.execute(
+            """
+            UPDATE pos_stocks_mirror
+               SET count = ?, snapshot_at = ?
+             WHERE id = ?
+            """,
+            (keep_count, keep_snapshot, keep_id),
+        )
+        delete_ids = [int(r[0]) for r in rows if int(r[0]) != keep_id]
+        if delete_ids:
+            placeholders = ",".join("?" for _ in delete_ids)
+            conn.execute(
+                f"DELETE FROM pos_stocks_mirror WHERE id IN ({placeholders})",
+                delete_ids,
+            )
+        result["groups"] += 1
+        result["deleted_rows"] += len(delete_ids)
+    return result
+
+
 def _ensure_pos_stocks_mirror_price_unique_index(conn: sqlite3.Connection) -> None:
     """Allow one POS mirror spec to exist at multiple prices."""
     try:
+        _dedupe_pos_stocks_mirror_exact_prices(conn)
         conn.execute("DROP INDEX IF EXISTS idx_pos_stocks_mirror_unique_spec")
         conn.execute(
             """
@@ -64,7 +122,7 @@ def _ensure_pos_stocks_mirror_price_unique_index(conn: sqlite3.Connection) -> No
             ON pos_stocks_mirror(source_device, item_type, school, color, size, unit_price)
             """
         )
-    except sqlite3.OperationalError:
+    except (sqlite3.OperationalError, sqlite3.IntegrityError):
         pass
 
 
@@ -469,19 +527,25 @@ def _ensure_mirror_import_price_profile(
         """
         SELECT profile_id
           FROM price_profile_assignments
-         WHERE LOWER(TRIM(item_type)) = LOWER(TRIM(?))
-           AND LOWER(TRIM(school)) = LOWER(TRIM(?))
-           AND LOWER(TRIM(color)) = LOWER(TRIM(?))
+         WHERE LOWER(TRIM(school)) = LOWER(TRIM(?))
+         ORDER BY
+             CASE
+                 WHEN COALESCE(TRIM(item_type), '') = ''
+                  AND COALESCE(TRIM(color), '') = '' THEN 0
+                 ELSE 1
+             END,
+             updated_at DESC,
+             id DESC
          LIMIT 1
         """,
-        (item_type, school, color),
+        (school,),
     ).fetchone()
     profile_id: Optional[int] = None
     created_assignment = False
     if row:
         profile_id = int((row["profile_id"] if isinstance(row, sqlite3.Row) else row[0]) or 0) or None
     if profile_id is None:
-        base_name = f"Mirror import - {source_device} - {school} - {color}"
+        base_name = f"Mirror import - {source_device} - {school}"
         name = base_name[:140]
         conn.execute(
             """
@@ -500,7 +564,7 @@ def _ensure_mirror_import_price_profile(
             VALUES (?, ?, ?, ?, datetime('now'))
             ON CONFLICT(item_type, school, color) DO NOTHING
             """,
-            (item_type, school, color, profile_id),
+            ("", school, "", profile_id),
         )
         created_assignment = True
 
@@ -1163,17 +1227,32 @@ def apply_pos_stock_snapshot(
         )
         total_value += price * count
     if insert_rows:
-        conn.executemany(
-            """INSERT INTO pos_stocks_mirror
-               (source_device, item_type, school, color, size,
-                unit_price, count, snapshot_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(source_device, item_type, school, color, size, unit_price)
-               DO UPDATE SET
-                   count = COALESCE(pos_stocks_mirror.count, 0) + COALESCE(excluded.count, 0),
-                   snapshot_at = excluded.snapshot_at""",
-            insert_rows,
-        )
+        try:
+            conn.executemany(
+                """INSERT INTO pos_stocks_mirror
+                   (source_device, item_type, school, color, size,
+                    unit_price, count, snapshot_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(source_device, item_type, school, color, size, unit_price)
+                   DO UPDATE SET
+                       count = COALESCE(pos_stocks_mirror.count, 0) + COALESCE(excluded.count, 0),
+                       snapshot_at = excluded.snapshot_at""",
+                insert_rows,
+            )
+        except sqlite3.OperationalError as exc:
+            # Some live DBs/exes have a stale mirror unique index.  The snapshot
+            # path deletes this source_device first, and collapsed_rows is
+            # already unique by source/spec/price, so a plain insert preserves
+            # the intended full-snapshot mirror even if ON CONFLICT is unusable.
+            if "ON CONFLICT clause does not match" not in str(exc):
+                raise
+            conn.executemany(
+                """INSERT INTO pos_stocks_mirror
+                   (source_device, item_type, school, color, size,
+                    unit_price, count, snapshot_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                insert_rows,
+            )
     inserted = len(insert_rows)
     imported_catalog = ensure_warehouse_catalog_from_pos_mirror(conn, source_name)
 
@@ -2140,8 +2219,10 @@ def apply_wh_pos_ledger_sale_returned(
     if not src:
         raise ApplyError("SALE_RETURNED: missing source_device")
     total = float(payload.get("total") or 0)
+    bill_type = _clean(payload.get("bill_type")).upper() or "SALE"
     payment_method = _clean(payload.get("payment_method")).upper() or "CASH"
-    cash_amount = -abs(total) if payment_method == "CASH" else 0.0
+    signed_amount = abs(total) if bill_type == "RETURN" else -abs(total)
+    cash_amount = signed_amount if payment_method == "CASH" else 0.0
     day = _ledger_day(conn, event_uuid, payload)
     bid = payload.get("bill_id")
     try:
@@ -2175,8 +2256,10 @@ def apply_wh_pos_ledger_sale_voided(
     if not src:
         raise ApplyError("SALE_VOIDED: missing source_device")
     total = float(payload.get("total") or 0)
+    bill_type = _clean(payload.get("bill_type")).upper() or "SALE"
     payment_method = _clean(payload.get("payment_method")).upper() or "CASH"
-    cash_amount = -abs(total) if payment_method == "CASH" else 0.0
+    signed_amount = abs(total) if bill_type == "RETURN" else -abs(total)
+    cash_amount = signed_amount if payment_method == "CASH" else 0.0
     day = _ledger_day(conn, event_uuid, payload)
     bid = payload.get("bill_id")
     try:
@@ -2189,16 +2272,16 @@ def apply_wh_pos_ledger_sale_voided(
         event_uuid=event_uuid,
         event_type="SALE_VOIDED",
         category="void_bill",
-        amount=-abs(total),
+        amount=signed_amount,
         day=day,
         related_id=bid_int,
-        meta={"reason": _clean(payload.get("reason")), "payment_method": payment_method},
-        gross_amount=-abs(total),
+        meta={"reason": _clean(payload.get("reason")), "payment_method": payment_method, "bill_type": bill_type},
+        gross_amount=signed_amount,
         cash_amount=cash_amount,
         payment_method=payment_method,
         shift_id=_shift_id_from_payload(payload),
     )
-    return {"amount": -abs(total)}
+    return {"amount": signed_amount, "cash_amount": cash_amount, "payment_method": payment_method}
 
 
 def apply_wh_pos_ledger_sale_exchanged(

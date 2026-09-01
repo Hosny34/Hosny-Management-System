@@ -262,3 +262,36 @@
 [2026-07-29 01:33:33] duplicate shortcut removed: C:\Users\LENOVO\Desktop\Hosny POS.lnk
 [2026-07-29 01:33:33] restart launched: pid=29704 path=G:\TestManagementSystem\Hosny-Management-System\POS\HosnyPOS.exe
 [2026-07-29 01:33:33] update completed
+[2026-08-31 23:29:45] update started
+[2026-08-31 23:29:48] backup created at G:\TestManagementSystem\Hosny-Management-System\POS\backups\2026.8.2.84_20260831_232947
+[2026-08-31 23:29:48] copied build_pos.bat
+[2026-08-31 23:29:48] copied build_pos_win7_x64.bat
+[2026-08-31 23:29:48] copied build_pos_win7_x86.bat
+[2026-08-31 23:29:48] copied cacert.pem
+[2026-08-31 23:29:48] copied Fonts
+[2026-08-31 23:29:48] copied HosnyPOS-win7-x64.spec
+[2026-08-31 23:29:48] copied HosnyPOS-win7-x86.spec
+[2026-08-31 23:29:48] copied HosnyPOS.py
+[2026-08-31 23:29:48] copied HosnyPOS.spec
+[2026-08-31 23:29:48] copied logging_setup.py
+[2026-08-31 23:29:48] copied pos_db_backup.py
+[2026-08-31 23:29:48] copied pos_updater.py
+[2026-08-31 23:29:48] copied pos_version.py
+[2026-08-31 23:29:48] copied requirements-win7-x64.txt
+[2026-08-31 23:29:48] copied requirements-win7-x86.txt
+[2026-08-31 23:29:48] copied sync_appliers.py
+[2026-08-31 23:29:48] copied sync_client.py
+[2026-08-31 23:29:48] copied sync_core.py
+[2026-08-31 23:29:48] copied sync_periodic.py
+[2026-08-31 23:29:48] copied sync_ui.py
+[2026-08-31 23:29:48] copied update_client.py
+[2026-08-31 23:29:48] copied verify_pe_arch.py
+[2026-08-31 23:29:48] running G:\TestManagementSystem\Hosny-Management-System\POS\build_pos.bat
+[2026-08-31 23:29:48] clearing inherited TCL_LIBRARY before build
+[2026-08-31 23:29:48] clearing inherited TK_LIBRARY before build
+[2026-08-31 23:29:48] build output log: G:\TestManagementSystem\Hosny-Management-System\POS\logs\pos_update_build_2026.8.2.84.log
+[2026-08-31 23:30:44] executable promoted to G:\TestManagementSystem\Hosny-Management-System\POS\HosnyPOS.exe
+[2026-08-31 23:30:44] dist output promoted
+[2026-08-31 23:30:45] shortcut updated: C:\Users\LENOVO\OneDrive\Desktop\Hosny POS.lnk
+[2026-08-31 23:30:45] restart launched: pid=81816 path=G:\TestManagementSystem\Hosny-Management-System\POS\HosnyPOS.exe
+[2026-08-31 23:30:45] update completed
