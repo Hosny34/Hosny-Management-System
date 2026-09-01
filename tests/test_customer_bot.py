@@ -112,6 +112,11 @@ class TestCustomerBot(unittest.TestCase):
         self.assertIn("متوفر 3 قطعة", reply)
         self.assertIn("السعر 315 جنيه", reply)
 
+    def test_eis_text_does_not_match_size_s(self):
+        parsed = self.bot.parse("عندكم EIS ابتدائي تيشيرت خريفي مقاس 10؟")
+        self.assertEqual(parsed["size"], "10")
+        self.assertNotEqual(parsed["size"], "S")
+
     def test_branch_info_reply_is_arabic(self):
         reply = self.bot.reply("عنوان فرع العبور")
         self.assertIn("عنوان العبور", reply)

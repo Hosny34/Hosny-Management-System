@@ -31,8 +31,15 @@ def _find_number(text: str) -> str:
 
 
 def _find_size(text: str) -> str:
-    m = re.search(r"(?:مقاس|مقاسه|سايز|size)?\s*(\d{1,2}|[SMLX]{1,3})\b", text, flags=re.IGNORECASE)
-    return m.group(1).upper() if m else ""
+    prefixed = re.search(
+        r"(?:مقاس|مقاسه|سايز|size)\s*(\d{1,2}|[SMLX]{1,3})\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if prefixed:
+        return prefixed.group(1).upper()
+    numeric = re.search(r"(?<![\wء-ي])(\d{1,2})(?![\wء-ي])", text, flags=re.IGNORECASE)
+    return numeric.group(1).upper() if numeric else ""
 
 
 def _match_branch(text: str) -> str:
@@ -79,14 +86,22 @@ class ArabicCustomerBot:
         if any(w in text for w in ("حجز", "فاتوره", "فاتورة")):
             intent = "reservation"
 
+        school = _match_known(message, self.queries.known_values("school"))
+        item_type = _match_known(message, self.queries.known_values("item_type"))
+        color = _match_known(message, self.queries.known_values("color"))
+        if color and not any(w in text for w in ("لون", "اللون")):
+            norm_color = normalize_text(color)
+            if norm_color in normalize_text(item_type) or norm_color in normalize_text(school):
+                color = ""
+
         return {
             "intent": intent,
             "branch": _match_branch(message),
             "bill_number": _find_number(text),
             "size": _find_size(text),
-            "school": _match_known(message, self.queries.known_values("school")),
-            "item_type": _match_known(message, self.queries.known_values("item_type")),
-            "color": _match_known(message, self.queries.known_values("color")),
+            "school": school,
+            "item_type": item_type,
+            "color": color,
         }
 
     def reply(self, message: str) -> str:
