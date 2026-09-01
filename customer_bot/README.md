@@ -7,6 +7,10 @@ This first version is intentionally separate from the POS and Warehouse desktop
 apps. It reads Warehouse data in read-only mode and can be tested locally before
 connecting Meta WhatsApp Cloud API.
 
+For production, the bot can run on Railway and read a cached stock copy from
+the sync server. The Warehouse laptop refreshes that copy with a separate
+uploader whenever it is online.
+
 ## Run Locally
 
 No extra install is needed for the local test server:
@@ -24,6 +28,40 @@ Open:
 ```text
 http://127.0.0.1:8090/health
 ```
+
+## Upload Stock Cache
+
+Set the same secret token on Railway sync server and on the Warehouse laptop:
+
+```powershell
+$env:CUSTOMER_STOCK_UPLOAD_TOKEN="choose-a-long-random-secret"
+```
+
+Dry-run from the laptop:
+
+```powershell
+python -m customer_bot.upload_stock_snapshot --dry-run
+```
+
+Upload to the sync server:
+
+```powershell
+python -m customer_bot.upload_stock_snapshot --server-url https://web-production-e022.up.railway.app
+```
+
+The upload reads `Warehouse/warehouse_data.sqlite3` in read-only mode and sends
+only branch stock rows: branch device, item type, school, color, size, POS
+price, count, and sync time.
+
+## Railway Bot Data Source
+
+When the bot runs on Railway, point it at the cached stock API:
+
+```text
+CUSTOMER_STOCK_API_URL=https://web-production-e022.up.railway.app
+```
+
+If this variable is not set, the bot uses the local Warehouse DB path instead.
 
 ## Local Chat Test
 

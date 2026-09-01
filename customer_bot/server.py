@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .bot import ArabicCustomerBot
 from .config import load_config
-from .queries import WarehouseCustomerQueries
+from .runtime import make_queries
 from .whatsapp import extract_incoming_messages, send_text
 
 
@@ -17,7 +17,7 @@ def _json_bytes(payload: Dict[str, Any], status: int = 200) -> tuple[int, bytes]
 
 
 class BotHandler(BaseHTTPRequestHandler):
-    queries = WarehouseCustomerQueries(load_config())
+    queries = make_queries(load_config())
     bot = ArabicCustomerBot(queries)
 
     def _send_json(self, payload: Dict[str, Any], status: int = 200) -> None:
@@ -49,6 +49,7 @@ class BotHandler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "warehouse_db_path": str(cfg.warehouse_db_path),
+                    "customer_stock_api_url": cfg.customer_stock_api_url,
                     "stock_stale_minutes": cfg.stock_stale_minutes,
                     "branches": len(cfg.branches),
                 }
@@ -142,4 +143,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

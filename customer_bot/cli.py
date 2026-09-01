@@ -3,8 +3,7 @@ from __future__ import annotations
 import sys
 
 from .bot import ArabicCustomerBot
-from .config import load_config
-from .queries import WarehouseCustomerQueries
+from .runtime import make_queries
 
 
 def main() -> int:
@@ -12,11 +11,10 @@ def main() -> int:
     if not message:
         print("اكتب رسالة العميل بعد الأمر.")
         return 2
-    bot = ArabicCustomerBot(WarehouseCustomerQueries(load_config()))
+    bot = ArabicCustomerBot(make_queries())
     print(bot.reply(message))
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

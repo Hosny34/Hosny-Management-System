@@ -1,6 +1,7 @@
 {
   "warehouse_db_path": "Warehouse/warehouse_data.sqlite3",
   "stock_stale_minutes": 30,
+  "customer_stock_api_url": "",
   "branches": [
     {
       "device": "POS-ZAY",
@@ -52,4 +53,3 @@
     }
   ]
 }
-

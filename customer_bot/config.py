@@ -16,6 +16,7 @@ class BotConfig:
     warehouse_db_path: Path
     stock_stale_minutes: int
     branches: List[Dict[str, str]]
+    customer_stock_api_url: str = ""
 
 
 def load_config(path: str | os.PathLike[str] | None = None) -> BotConfig:
@@ -31,9 +32,14 @@ def load_config(path: str | os.PathLike[str] | None = None) -> BotConfig:
     except (TypeError, ValueError):
         stale_minutes = 30
     branches = [dict(b) for b in data.get("branches") or []]
+    stock_api_url = (
+        os.environ.get("CUSTOMER_STOCK_API_URL")
+        or data.get("customer_stock_api_url")
+        or ""
+    ).strip()
     return BotConfig(
         warehouse_db_path=db_path,
         stock_stale_minutes=stale_minutes,
         branches=branches,
+        customer_stock_api_url=stock_api_url,
     )
-

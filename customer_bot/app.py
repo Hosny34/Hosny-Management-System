@@ -9,12 +9,12 @@ from pydantic import BaseModel
 
 from .bot import ArabicCustomerBot
 from .config import load_config
-from .queries import WarehouseCustomerQueries
+from .runtime import make_queries
 from .whatsapp import extract_incoming_messages, send_text
 
 
 config = load_config()
-queries = WarehouseCustomerQueries(config)
+queries = make_queries(config)
 bot = ArabicCustomerBot(queries)
 app = FastAPI(title="Hosny Customer Bot", version="0.1.0")
 
@@ -28,6 +28,7 @@ def health() -> Dict[str, Any]:
     return {
         "ok": True,
         "warehouse_db_path": str(config.warehouse_db_path),
+        "customer_stock_api_url": config.customer_stock_api_url,
         "stock_stale_minutes": config.stock_stale_minutes,
         "branches": len(config.branches),
     }
@@ -110,4 +111,3 @@ async def receive_webhook(request: Request) -> Dict[str, Any]:
         reply = bot.reply(msg["text"])
         sent.append({"to": msg["from"], "reply": reply, "send_result": send_text(msg["from"], reply)})
     return {"ok": True, "messages": len(sent), "sent": sent}
-
