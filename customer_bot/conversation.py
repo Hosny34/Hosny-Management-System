@@ -41,6 +41,29 @@ class CustomerQueries(Protocol):
     ) -> List[Dict[str, Any]]:
         ...
 
+    def reserved_quantity(
+        self,
+        *,
+        source_device: str = "",
+        item_type: str = "",
+        school: str = "",
+        color: str = "",
+        size: str = "",
+    ) -> int:
+        ...
+
+    def reservation_matches(
+        self,
+        *,
+        source_device: str,
+        bill_number: str,
+        item_type: str = "",
+        school: str = "",
+        color: str = "",
+        size: str = "",
+    ) -> Dict[str, Any] | None:
+        ...
+
 
 @dataclass
 class MenuSession:
@@ -72,6 +95,10 @@ class MenuConversationBot:
             return self._handle_color(key, text)
         if session.step == "size":
             return self._handle_size(key, text)
+        if session.step == "reservation_offer":
+            return self._handle_reservation_offer(key, text)
+        if session.step == "reservation_bill":
+            return self._handle_reservation_bill(key, text)
         return self._reset_to_main(key)
 
     def _is_main_menu_request(self, text: str) -> bool:
@@ -232,23 +259,84 @@ class MenuConversationBot:
             item_type=session.data.get("item_type", ""),
             color=session.data.get("color", ""),
             size=size,
-            min_count=1,
+            min_count=0,
             limit=20,
         )
-        self.sessions[key] = MenuSession(step="main")
-        if not rows:
-            return "غير متوفر حالياً في الفرع المختار.\n\n" + self._main_menu()
-        lines = ["النتيجة:"]
-        for row in rows[:10]:
-            stale = " - آخر تحديث قديم، يفضل التأكيد قبل الذهاب" if row.get("stale") else ""
-            lines.append(
-                f"{row['branch']}: متوفر {row['count']} قطعة - "
-                f"{row['item_type']} {row['school']} {row['color']} مقاس {row['size']} - "
-                f"السعر {money(row['unit_price'])} جنيه{stale}"
+        session.data["size"] = size
+        physical_count = sum(max(0, int(row.get("count") or 0)) for row in rows)
+        reserved_count = self.queries.reserved_quantity(
+            source_device=session.data.get("branch", ""),
+            school=session.data.get("school", ""),
+            item_type=session.data.get("item_type", ""),
+            color=session.data.get("color", ""),
+            size=size,
+        )
+        available_count = max(0, physical_count - reserved_count)
+        if available_count <= 0:
+            session.step = "reservation_offer"
+            session.options = []
+            return (
+                "غير متوفر حالياً للشراء الجديد.\n"
+                "لو حضرتك حاجز قبل كده اضغط 1 واكتب رقم فاتورة الحجز.\n"
+                "0. القائمة الرئيسية"
             )
+        self.sessions[key] = MenuSession(step="main")
+        lines = ["النتيجة:"]
+        first = rows[0] if rows else {}
+        stale = " - آخر تحديث قديم، يفضل التأكيد قبل الذهاب" if any(row.get("stale") for row in rows) else ""
+        prices = sorted({float(row.get("unit_price") or 0.0) for row in rows})
+        price_text = ""
+        if len(prices) == 1:
+            price_text = f"السعر {money(prices[0])} جنيه"
+        elif len(prices) > 1:
+            price_text = f"السعر من {money(prices[0])} إلى {money(prices[-1])} جنيه"
+        lines.append(
+            f"{branch_display_name(session.data.get('branch'))}: متوفر {available_count} قطعة - "
+            f"{session.data.get('item_type', first.get('item_type', ''))} "
+            f"{session.data.get('school', first.get('school', ''))} "
+            f"{session.data.get('color', first.get('color', ''))} مقاس {size}"
+            + (f" - {price_text}" if price_text else "")
+            + stale
+        )
         lines.append("")
         lines.append(self._main_menu())
         return "\n".join(lines)
+
+    def _handle_reservation_offer(self, key: str, text: str) -> str:
+        session = self.sessions[key]
+        choice = text.translate(DIGIT_TRANSLATION).strip()
+        if choice == "1" or normalize_text(choice) in {"اه", "نعم", "عندي حجز", "حجز"}:
+            session.step = "reservation_bill"
+            return "اكتب رقم فاتورة الحجز فقط.\n0. القائمة الرئيسية"
+        return "اختيار غير صحيح.\nاضغط 1 لو عندك حجز، أو 0 للقائمة الرئيسية."
+
+    def _handle_reservation_bill(self, key: str, text: str) -> str:
+        session = self.sessions[key]
+        bill_number = text.translate(DIGIT_TRANSLATION).strip()
+        if not bill_number:
+            return "اكتب رقم فاتورة الحجز فقط.\n0. القائمة الرئيسية"
+        row = self.queries.reservation_matches(
+            source_device=session.data.get("branch", ""),
+            bill_number=bill_number,
+            school=session.data.get("school", ""),
+            item_type=session.data.get("item_type", ""),
+            color=session.data.get("color", ""),
+            size=session.data.get("size", ""),
+        )
+        self.sessions[key] = MenuSession(step="main")
+        if row:
+            return (
+                "الصنف متوفر ومحجوز لحضرتك.\n"
+                f"رقم الحجز: {bill_number}\n"
+                f"الكمية المحجوزة المتبقية: {int(row.get('pending_qty') or 0)}\n"
+                "برجاء التوجه للفرع لاستلامه.\n\n"
+                + self._main_menu()
+            )
+        return (
+            "لم أجد حجز مطابق لهذا الصنف في هذا الفرع.\n"
+            "ممكن تتأكد من رقم الفاتورة أو تكلم الفرع.\n\n"
+            + self._main_menu()
+        )
 
     def _choice(self, session: MenuSession, text: str) -> Dict[str, str] | None:
         clean_text = text.translate(DIGIT_TRANSLATION).strip()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
@@ -89,6 +90,41 @@ def _where_exact(field: str, value: Any, where: List[str], args: List[Any]) -> N
 
 def _allowed_devices(config: BotConfig) -> List[str]:
     return [clean(b.get("device")) for b in config.branches if clean(b.get("device"))]
+
+
+def _reservation_bill_numbers(conn: sqlite3.Connection) -> Dict[str, str]:
+    try:
+        rows = conn.execute(
+            "SELECT payload_json FROM sync_inbox WHERE event_type = 'RESERVATION_CREATED'"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    group_ids: Dict[str, List[int]] = {}
+    reservation_to_group: Dict[str, str] = {}
+    for row in rows:
+        raw = row["payload_json"] if isinstance(row, sqlite3.Row) else row[0]
+        try:
+            payload = json.loads(raw or "{}")
+        except Exception:
+            continue
+        group = clean(payload.get("reservation_group_uuid"))
+        lines = payload.get("reservations") or []
+        if not group or not isinstance(lines, list):
+            continue
+        for line in lines:
+            if not isinstance(line, dict):
+                continue
+            key = clean(line.get("reservation_uuid"))
+            try:
+                rid = int(line.get("reservation_id") or 0)
+            except (TypeError, ValueError):
+                rid = 0
+            if key:
+                reservation_to_group[key] = group
+            if rid > 0:
+                group_ids.setdefault(group, []).append(rid)
+    group_bill = {group: str(min(ids)) for group, ids in group_ids.items() if ids}
+    return {key: group_bill[group] for key, group in reservation_to_group.items() if group in group_bill}
 
 
 @dataclass
@@ -276,26 +312,139 @@ class WarehouseCustomerQueries:
             prices.append(row)
         return prices
 
+    def reserved_quantity(
+        self,
+        *,
+        source_device: str = "",
+        item_type: str = "",
+        school: str = "",
+        color: str = "",
+        size: str = "",
+    ) -> int:
+        where = ["TRIM(status) = ?"]
+        args: List[Any] = ["معلق"]
+        devices = _allowed_devices(self.config)
+        if devices:
+            where.append(f"source_device IN ({','.join('?' for _ in devices)})")
+            args.extend(devices)
+        for field, value in (
+            ("source_device", source_device),
+            ("item_type", item_type),
+            ("school", school),
+            ("color", color),
+            ("size", size),
+        ):
+            text = clean(value)
+            if text:
+                where.append(f"LOWER(TRIM({field})) = LOWER(?)")
+                args.append(text)
+        try:
+            with closing(self._connect()) as conn:
+                row = conn.execute(
+                    f"""
+                    SELECT COALESCE(SUM(qty), 0) AS pending_qty
+                      FROM pos_reservations_mirror
+                     WHERE {' AND '.join(where)}
+                    """,
+                    tuple(args),
+                ).fetchone()
+        except sqlite3.Error:
+            return 0
+        return int((row["pending_qty"] if row else 0) or 0)
+
+    def reservation_matches(
+        self,
+        *,
+        source_device: str,
+        bill_number: str,
+        item_type: str = "",
+        school: str = "",
+        color: str = "",
+        size: str = "",
+    ) -> Dict[str, Any] | None:
+        device = clean(source_device)
+        bill = clean(bill_number)
+        if not device or not bill:
+            return None
+        try:
+            with closing(self._connect()) as conn:
+                bill_numbers = _reservation_bill_numbers(conn)
+                where = ["source_device = ?", "TRIM(status) = ?"]
+                args: List[Any] = [device, "معلق"]
+                for field, value in (
+                    ("item_type", item_type),
+                    ("school", school),
+                    ("color", color),
+                    ("size", size),
+                ):
+                    text = clean(value)
+                    if text:
+                        where.append(f"LOWER(TRIM({field})) = LOWER(?)")
+                        args.append(text)
+                rows = conn.execute(
+                    f"""
+                    SELECT *
+                      FROM pos_reservations_mirror
+                     WHERE {' AND '.join(where)}
+                    """,
+                    tuple(args),
+                ).fetchall()
+        except sqlite3.Error:
+            return None
+        matched = []
+        for row in rows:
+            key = clean(row["reservation_key"])
+            row_bill = bill_numbers.get(key)
+            if not row_bill and key.startswith("id:"):
+                row_bill = key[3:].strip()
+            if row_bill == bill:
+                matched.append(row)
+        if not matched:
+            return None
+        return {
+            "source_device": device,
+            "bill_number": bill,
+            "pending_qty": sum(int(r["qty"] or 0) for r in matched),
+            "items": [
+                {
+                    "item_type": clean(r["item_type"]),
+                    "school": clean(r["school"]),
+                    "color": clean(r["color"]),
+                    "size": clean(r["size"]),
+                    "qty": int(r["qty"] or 0),
+                }
+                for r in matched
+            ],
+        }
+
     def reservation_status(self, *, branch: str, bill_number: str) -> Dict[str, Any] | None:
         device = canonical_branch(branch)
         bill = clean(bill_number)
         if not device or not bill:
             return None
-        candidates = [bill, f"id:{bill}"]
         try:
             with closing(self._connect()) as conn:
+                bill_numbers = _reservation_bill_numbers(conn)
                 rows = conn.execute(
-                    f"""
+                    """
                     SELECT *
                       FROM pos_reservations_mirror
-                     WHERE source_device = ?
-                       AND reservation_key IN ({','.join('?' for _ in candidates)})
-                     ORDER BY updated_at DESC
+                      WHERE source_device = ?
+                      ORDER BY updated_at DESC
                     """,
-                    (device, *candidates),
+                    (device,),
                 ).fetchall()
         except sqlite3.Error:
             return None
+        matched = []
+        for row in rows:
+            key = clean(row["reservation_key"])
+            row_bill = bill_numbers.get(key)
+            if not row_bill and key.startswith("id:"):
+                row_bill = key[3:].strip()
+            if row_bill == bill:
+                matched.append(row)
+        rows = matched
         if not rows:
             return None
         total = sum(float(r["total_amount"] or 0.0) for r in rows)

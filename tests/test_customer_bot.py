@@ -60,6 +60,13 @@ class TestCustomerBot(unittest.TestCase):
                     updated_at TEXT NOT NULL,
                     UNIQUE(source_device, reservation_key)
                 );
+                CREATE TABLE sync_inbox (
+                    event_uuid TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    server_seq INTEGER,
+                    source_device TEXT,
+                    payload_json TEXT
+                );
                 """
             )
             conn.execute(
@@ -101,6 +108,32 @@ class TestCustomerBot(unittest.TestCase):
                 INSERT INTO pos_reservations_mirror
                     (source_device,reservation_key,customer,item_type,school,color,size,qty,unit_price,total_amount,paid_amount,status,updated_at)
                 VALUES ('POS-CEN','id:558','عميل اختبار','تيشيرت صيفي','رجاك','احمر','10',2,270,540,200,'معلق','2099-01-01T10:00:00Z')
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO pos_reservations_mirror
+                    (source_device,reservation_key,customer,item_type,school,color,size,qty,unit_price,total_amount,paid_amount,status,updated_at)
+                VALUES ('POS-OBO','res-uuid-1','عميل حجز','تيشيرت خريفي','البيان','رمادي','10',2,315,630,315,'معلق','2099-01-01T10:00:00Z')
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO pos_reservations_mirror
+                    (source_device,reservation_key,customer,item_type,school,color,size,qty,unit_price,total_amount,paid_amount,status,updated_at)
+                VALUES ('POS-OBO','res-uuid-2','عميل مسلم','تيشيرت خريفي','البيان','رمادي','10',1,315,315,315,'تم التسليم','2099-01-01T10:00:00Z')
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO sync_inbox(event_uuid,event_type,server_seq,source_device,payload_json)
+                VALUES (
+                    'evt-res-1',
+                    'RESERVATION_CREATED',
+                    1,
+                    'POS-OBO',
+                    '{"reservation_group_uuid":"grp-test","reservations":[{"reservation_uuid":"res-uuid-1","reservation_id":700},{"reservation_uuid":"res-uuid-2","reservation_id":701}]}'
+                )
                 """
             )
         conn.close()
@@ -206,6 +239,43 @@ class TestCustomerBot(unittest.TestCase):
         self.assertIn("حجز رقم 558", reply)
         self.assertIn("الحالة: معلق", reply)
         self.assertIn("المتبقي: 340 جنيه", reply)
+
+    def test_menu_stock_result_subtracts_pending_reservations(self):
+        user = "whatsapp:+203333333333"
+        self.menu_bot.reply(user, "قائمة")
+        self.menu_bot.reply(user, "1")
+        self.menu_bot.reply(user, "1")
+        self.menu_bot.reply(user, "البيان")
+        self.menu_bot.reply(user, "تيشيرت خريفي")
+        result = self.menu_bot.reply(user, "10")
+        self.assertIn("متوفر 1 قطعة", result)
+        self.assertNotIn("متوفر 3 قطعة", result)
+
+    def test_menu_all_reserved_can_confirm_matching_reservation_bill(self):
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute(
+                """
+                UPDATE pos_reservations_mirror
+                   SET qty = 3
+                 WHERE reservation_key = 'res-uuid-1'
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        user = "whatsapp:+204444444444"
+        self.menu_bot.reply(user, "قائمة")
+        self.menu_bot.reply(user, "1")
+        self.menu_bot.reply(user, "1")
+        self.menu_bot.reply(user, "البيان")
+        self.menu_bot.reply(user, "تيشيرت خريفي")
+        offer = self.menu_bot.reply(user, "10")
+        self.assertIn("غير متوفر حالياً للشراء الجديد", offer)
+        self.assertIn("اكتب رقم فاتورة الحجز", self.menu_bot.reply(user, "1"))
+        confirmed = self.menu_bot.reply(user, "٧٠٠")
+        self.assertIn("الصنف متوفر ومحجوز لحضرتك", confirmed)
+        self.assertIn("الكمية المحجوزة المتبقية: 3", confirmed)
 
 
 if __name__ == "__main__":

@@ -159,5 +159,57 @@ class CloudCustomerQueries:
         limit = int(filters.pop("limit", 30) or 30)
         return self.search_stock(**filters, min_count=0, limit=limit)
 
+    def reserved_quantity(
+        self,
+        *,
+        source_device: str = "",
+        item_type: str = "",
+        school: str = "",
+        color: str = "",
+        size: str = "",
+    ) -> int:
+        try:
+            payload = self._get_json(
+                "/v1/customer/reservations/summary",
+                {
+                    "source_device": source_device,
+                    "item_type": item_type,
+                    "school": school,
+                    "color": color,
+                    "size": size,
+                },
+            )
+        except Exception:
+            return 0
+        return int(payload.get("pending_qty") or 0)
+
+    def reservation_matches(
+        self,
+        *,
+        source_device: str,
+        bill_number: str,
+        item_type: str = "",
+        school: str = "",
+        color: str = "",
+        size: str = "",
+    ) -> Dict[str, Any] | None:
+        try:
+            payload = self._get_json(
+                "/v1/customer/reservations/check",
+                {
+                    "source_device": source_device,
+                    "bill_number": bill_number,
+                    "item_type": item_type,
+                    "school": school,
+                    "color": color,
+                    "size": size,
+                },
+            )
+        except Exception:
+            return None
+        if not payload or "pending_qty" not in payload:
+            return None
+        return payload
+
     def reservation_status(self, *, branch: str, bill_number: str) -> Dict[str, Any] | None:
         return None
