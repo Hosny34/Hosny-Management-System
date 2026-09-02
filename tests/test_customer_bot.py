@@ -76,6 +76,13 @@ class TestCustomerBot(unittest.TestCase):
             )
             conn.execute(
                 """
+                INSERT INTO pos_stocks_mirror
+                    (source_device,item_type,school,color,size,unit_price,count,snapshot_at)
+                VALUES ('POS-TEST','تيشيرت خريفي','رجاك','احمر','20',315,3,'2099-01-01T10:00:00Z')
+                """
+            )
+            conn.execute(
+                """
                 INSERT INTO pos_reservations_mirror
                     (source_device,reservation_key,customer,item_type,school,color,size,qty,unit_price,total_amount,paid_amount,status,updated_at)
                 VALUES ('POS-CEN','id:558','عميل اختبار','تيشيرت صيفي','رجاك','احمر','10',2,270,540,200,'معلق','2099-01-01T10:00:00Z')
@@ -117,6 +124,14 @@ class TestCustomerBot(unittest.TestCase):
         parsed = self.bot.parse("عندكم EIS ابتدائي تيشيرت خريفي مقاس 10؟")
         self.assertEqual(parsed["size"], "10")
         self.assertNotEqual(parsed["size"], "S")
+
+    def test_arabic_indic_digits_are_size_numbers(self):
+        parsed = self.bot.parse("تيشيرت خريفي رجاك ٢٠")
+        self.assertEqual(parsed["size"], "20")
+
+    def test_stock_reply_hides_non_public_devices(self):
+        reply = self.bot.reply("تيشيرت خريفي رجاك 20")
+        self.assertNotIn("POS-TEST", reply)
 
     def test_twilio_helpers_extract_message_and_escape_xml(self):
         msg = extract_twilio_message(

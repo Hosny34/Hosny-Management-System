@@ -79,6 +79,10 @@ def _where_like(field: str, value: Any, where: List[str], args: List[Any]) -> No
     args.append(f"%{text}%")
 
 
+def _allowed_devices(config: BotConfig) -> List[str]:
+    return [clean(b.get("device")) for b in config.branches if clean(b.get("device"))]
+
+
 @dataclass
 class WarehouseCustomerQueries:
     config: BotConfig
@@ -108,6 +112,12 @@ class WarehouseCustomerQueries:
     def known_values(self, field: str, limit: int = 2000) -> List[str]:
         if field not in {"item_type", "school", "color", "size"}:
             return []
+        devices = _allowed_devices(self.config)
+        device_filter = ""
+        args: List[Any] = []
+        if devices:
+            device_filter = f"AND source_device IN ({','.join('?' for _ in devices)})"
+            args.extend(devices)
         try:
             with closing(self._connect()) as conn:
                 rows = conn.execute(
@@ -115,10 +125,11 @@ class WarehouseCustomerQueries:
                     SELECT DISTINCT TRIM({field}) AS value
                       FROM pos_stocks_mirror
                      WHERE COALESCE(TRIM({field}), '') <> ''
+                       {device_filter}
                      ORDER BY LENGTH(TRIM({field})) DESC, TRIM({field})
                      LIMIT ?
                     """,
-                    (int(limit),),
+                    (*args, int(limit)),
                 ).fetchall()
         except sqlite3.Error:
             return []
@@ -136,6 +147,10 @@ class WarehouseCustomerQueries:
     ) -> List[Dict[str, Any]]:
         where = ["COALESCE(pm.count, 0) >= ?"]
         args: List[Any] = [int(min_count)]
+        devices = _allowed_devices(self.config)
+        if devices:
+            where.append(f"pm.source_device IN ({','.join('?' for _ in devices)})")
+            args.extend(devices)
         _where_like("pm.item_type", item_type, where, args)
         _where_like("pm.school", school, where, args)
         _where_like("pm.color", color, where, args)

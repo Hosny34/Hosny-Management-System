@@ -12,6 +12,11 @@ from typing import Any, Dict, List
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+try:
+    from .queries import BRANCH_NAMES
+except ImportError:
+    from queries import BRANCH_NAMES
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = ROOT / "Warehouse" / "warehouse_data.sqlite3"
@@ -33,9 +38,10 @@ def _open_readonly(path: Path) -> sqlite3.Connection:
 
 
 def load_customer_stock_rows(db_path: Path) -> List[Dict[str, Any]]:
+    devices = sorted(BRANCH_NAMES)
     with closing(_open_readonly(db_path)) as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 pm.source_device,
                 pm.item_type,
@@ -53,6 +59,7 @@ def load_customer_stock_rows(db_path: Path) -> List[Dict[str, Any]]:
                AND COALESCE(TRIM(pm.school), '') <> ''
                AND COALESCE(TRIM(pm.color), '') <> ''
                AND COALESCE(TRIM(pm.size), '') <> ''
+               AND pm.source_device IN ({','.join('?' for _ in devices)})
              GROUP BY
                 pm.source_device,
                 pm.item_type,
@@ -61,7 +68,8 @@ def load_customer_stock_rows(db_path: Path) -> List[Dict[str, Any]]:
                 pm.size,
                 pm.unit_price
              ORDER BY pm.source_device, pm.school, pm.item_type, pm.color, pm.size, pm.unit_price
-            """
+            """,
+            devices,
         ).fetchall()
 
     out: List[Dict[str, Any]] = []

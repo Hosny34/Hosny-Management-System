@@ -10,6 +10,32 @@ except ImportError:
     from queries import BRANCH_NAMES, WarehouseCustomerQueries, canonical_branch
 
 
+DIGIT_TRANSLATION = str.maketrans(
+    {
+        "\u0660": "0",
+        "\u0661": "1",
+        "\u0662": "2",
+        "\u0663": "3",
+        "\u0664": "4",
+        "\u0665": "5",
+        "\u0666": "6",
+        "\u0667": "7",
+        "\u0668": "8",
+        "\u0669": "9",
+        "\u06f0": "0",
+        "\u06f1": "1",
+        "\u06f2": "2",
+        "\u06f3": "3",
+        "\u06f4": "4",
+        "\u06f5": "5",
+        "\u06f6": "6",
+        "\u06f7": "7",
+        "\u06f8": "8",
+        "\u06f9": "9",
+    }
+)
+
+
 def money(value: Any) -> str:
     try:
         return str(int(round(float(value or 0))))
@@ -18,7 +44,7 @@ def money(value: Any) -> str:
 
 
 def normalize_text(value: Any) -> str:
-    text = str(value or "").strip()
+    text = str(value or "").strip().translate(DIGIT_TRANSLATION)
     text = re.sub(r"[إأآا]", "ا", text)
     text = text.replace("ى", "ي").replace("ة", "ه")
     text = re.sub(r"\s+", " ", text)

@@ -34,6 +34,9 @@ def _parse_dt(value: Any) -> datetime | None:
 class CloudCustomerQueries:
     config: BotConfig
 
+    def _allowed_devices(self) -> set[str]:
+        return {clean(b.get("device")) for b in self.config.branches if clean(b.get("device"))}
+
     def _get_json(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         base = self.config.customer_stock_api_url.rstrip("/")
         if not base:
@@ -95,14 +98,18 @@ class CloudCustomerQueries:
             return []
         now = datetime.now()
         stale_after = timedelta(minutes=max(1, int(self.config.stock_stale_minutes)))
+        allowed_devices = self._allowed_devices()
         out: List[Dict[str, Any]] = []
         for r in payload.get("rows") or []:
+            device = clean(r.get("source_device"))
+            if allowed_devices and device not in allowed_devices:
+                continue
             uploaded_dt = _parse_dt(r.get("uploaded_at") or r.get("snapshot_at"))
             stale = True if uploaded_dt is None else (now - uploaded_dt) > stale_after
             out.append(
                 {
-                    "branch_device": clean(r.get("source_device")),
-                    "branch": branch_display_name(r.get("source_device")),
+                    "branch_device": device,
+                    "branch": branch_display_name(device),
                     "item_type": clean(r.get("item_type")),
                     "school": clean(r.get("school")),
                     "color": clean(r.get("color")),
