@@ -9,6 +9,7 @@ from pathlib import Path
 from customer_bot.bot import ArabicCustomerBot
 from customer_bot.config import BotConfig
 from customer_bot.queries import WarehouseCustomerQueries
+from customer_bot.whatsapp import extract_twilio_message, twiml_message
 
 
 class TestCustomerBot(unittest.TestCase):
@@ -116,6 +117,19 @@ class TestCustomerBot(unittest.TestCase):
         parsed = self.bot.parse("عندكم EIS ابتدائي تيشيرت خريفي مقاس 10؟")
         self.assertEqual(parsed["size"], "10")
         self.assertNotEqual(parsed["size"], "S")
+
+    def test_twilio_helpers_extract_message_and_escape_xml(self):
+        msg = extract_twilio_message(
+            {
+                "From": "whatsapp:+201111111111",
+                "Body": "stock question",
+                "MessageSid": "SM123",
+            }
+        )
+        self.assertEqual(msg["from"], "+201111111111")
+        self.assertEqual(msg["text"], "stock question")
+        self.assertEqual(msg["id"], "SM123")
+        self.assertIn("&lt;test&gt;", twiml_message("<test>"))
 
     def test_branch_info_reply_is_arabic(self):
         reply = self.bot.reply("عنوان فرع العبور")

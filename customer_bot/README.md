@@ -93,3 +93,15 @@ WHATSAPP_PHONE_NUMBER_ID
 WHATSAPP_VERIFY_TOKEN
 WAREHOUSE_DB_PATH
 ```
+
+## Twilio WhatsApp Setup
+
+For Twilio Sandbox or a production Twilio WhatsApp sender, set the incoming
+message webhook to:
+
+```text
+https://acceptable-alignment-production-dae8.up.railway.app/twilio/webhook
+```
+
+Use HTTP `POST`. The bot replies with TwiML, so no Twilio secret is required for
+basic inbound customer replies.

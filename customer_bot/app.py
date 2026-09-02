@@ -1,22 +1,23 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import parse_qs
 from typing import Any, Dict
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 
 try:
     from .bot import ArabicCustomerBot
     from .config import load_config
     from .runtime import make_queries
-    from .whatsapp import extract_incoming_messages, send_text
+    from .whatsapp import extract_incoming_messages, extract_twilio_message, send_text, twiml_message
 except ImportError:
     from bot import ArabicCustomerBot
     from config import load_config
     from runtime import make_queries
-    from whatsapp import extract_incoming_messages, send_text
+    from whatsapp import extract_incoming_messages, extract_twilio_message, send_text, twiml_message
 
 
 config = load_config()
@@ -117,3 +118,13 @@ async def receive_webhook(request: Request) -> Dict[str, Any]:
         reply = bot.reply(msg["text"])
         sent.append({"to": msg["from"], "reply": reply, "send_result": send_text(msg["from"], reply)})
     return {"ok": True, "messages": len(sent), "sent": sent}
+
+
+@app.post("/twilio/webhook")
+async def receive_twilio_webhook(request: Request) -> Response:
+    raw_body = (await request.body()).decode("utf-8", errors="replace")
+    values = parse_qs(raw_body, keep_blank_values=True)
+    form = {key: vals[-1] if vals else "" for key, vals in values.items()}
+    msg = extract_twilio_message(form)
+    reply = bot.reply(msg["text"]) if msg["text"] else "اكتب اسم المدرسة والصنف والمقاس وسأبحث لك في الفروع."
+    return Response(content=twiml_message(reply), media_type="application/xml")

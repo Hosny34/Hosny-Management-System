@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from html import escape
 from typing import Any, Dict, Iterable, List
 
 def extract_incoming_messages(payload: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -15,6 +16,22 @@ def extract_incoming_messages(payload: Dict[str, Any]) -> List[Dict[str, str]]:
                 if sender and text:
                     messages.append({"from": sender, "text": text, "id": message_id})
     return messages
+
+
+def extract_twilio_message(form: Dict[str, str]) -> Dict[str, str]:
+    sender = str(form.get("From") or form.get("WaId") or "").strip()
+    if sender.startswith("whatsapp:"):
+        sender = sender[len("whatsapp:") :]
+    return {
+        "from": sender,
+        "text": str(form.get("Body") or "").strip(),
+        "id": str(form.get("MessageSid") or form.get("SmsMessageSid") or "").strip(),
+    }
+
+
+def twiml_message(body: str) -> str:
+    safe_body = escape(body[:1600], quote=False)
+    return f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{safe_body}</Message></Response>'
 
 
 def send_text(to: str, body: str) -> Dict[str, Any]:
