@@ -72,6 +72,37 @@ class CloudCustomerQueries:
             return []
         return [clean(x) for x in payload.get("values") or [] if clean(x)]
 
+    def distinct_values(
+        self,
+        field: str,
+        *,
+        source_device: str = "",
+        school: str = "",
+        item_type: str = "",
+        color: str = "",
+        min_count: int = 1,
+        limit: int = 200,
+    ) -> List[str]:
+        try:
+            payload = self._get_json(
+                "/v1/customer/known-values",
+                {
+                    "field": field,
+                    "source_device": source_device,
+                    "school": school,
+                    "item_type": item_type,
+                    "color": color,
+                    "min_count": min_count,
+                    "limit": limit,
+                },
+            )
+        except Exception:
+            return []
+        allowed_devices = self._allowed_devices()
+        if source_device and allowed_devices and source_device not in allowed_devices:
+            return []
+        return [clean(x) for x in payload.get("values") or [] if clean(x)]
+
     def search_stock(
         self,
         *,
@@ -79,6 +110,7 @@ class CloudCustomerQueries:
         school: str = "",
         color: str = "",
         size: str = "",
+        source_device: str = "",
         min_count: int = 1,
         limit: int = 30,
     ) -> List[Dict[str, Any]]:
@@ -90,6 +122,7 @@ class CloudCustomerQueries:
                     "school": school,
                     "color": color,
                     "size": size,
+                    "source_device": source_device,
                     "min_count": min_count,
                     "limit": limit,
                 },

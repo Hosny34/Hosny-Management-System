@@ -74,7 +74,10 @@ python -m customer_bot.cli "فرع السنتر حجز 558"
 ## Current Rules
 
 - Replies are Arabic only.
-- Stock searches show all branches.
+- WhatsApp replies use a numbered menu flow: branch, school, item type, optional
+  color, then the customer types the size.
+- `0` always returns to the main menu.
+- Stock searches are scoped to the selected branch.
 - Prices are POS mirror prices, not Warehouse profile prices.
 - If a branch stock snapshot is older than 30 minutes, the reply warns the
   customer that the update is old.

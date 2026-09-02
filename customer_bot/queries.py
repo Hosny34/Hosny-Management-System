@@ -135,6 +135,47 @@ class WarehouseCustomerQueries:
             return []
         return [clean(r["value"]) for r in rows if clean(r["value"])]
 
+    def distinct_values(
+        self,
+        field: str,
+        *,
+        source_device: str = "",
+        school: str = "",
+        item_type: str = "",
+        color: str = "",
+        min_count: int = 1,
+        limit: int = 200,
+    ) -> List[str]:
+        if field not in {"item_type", "school", "color", "size"}:
+            return []
+        where = ["COALESCE(count, 0) >= ?", f"COALESCE(TRIM({field}), '') <> ''"]
+        args: List[Any] = [int(min_count)]
+        devices = _allowed_devices(self.config)
+        if devices:
+            where.append(f"source_device IN ({','.join('?' for _ in devices)})")
+            args.extend(devices)
+        if source_device:
+            where.append("source_device = ?")
+            args.append(clean(source_device))
+        _where_like("school", school, where, args)
+        _where_like("item_type", item_type, where, args)
+        _where_like("color", color, where, args)
+        try:
+            with closing(self._connect()) as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT TRIM({field}) AS value
+                      FROM pos_stocks_mirror
+                     WHERE {' AND '.join(where)}
+                     ORDER BY TRIM({field})
+                     LIMIT ?
+                    """,
+                    (*args, int(limit)),
+                ).fetchall()
+        except sqlite3.Error:
+            return []
+        return [clean(r["value"]) for r in rows if clean(r["value"])]
+
     def search_stock(
         self,
         *,
@@ -142,6 +183,7 @@ class WarehouseCustomerQueries:
         school: str = "",
         color: str = "",
         size: str = "",
+        source_device: str = "",
         min_count: int = 1,
         limit: int = 30,
     ) -> List[Dict[str, Any]]:
@@ -151,6 +193,9 @@ class WarehouseCustomerQueries:
         if devices:
             where.append(f"pm.source_device IN ({','.join('?' for _ in devices)})")
             args.extend(devices)
+        if source_device:
+            where.append("pm.source_device = ?")
+            args.append(clean(source_device))
         _where_like("pm.item_type", item_type, where, args)
         _where_like("pm.school", school, where, args)
         _where_like("pm.color", color, where, args)

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from customer_bot.bot import ArabicCustomerBot
 from customer_bot.config import BotConfig
+from customer_bot.conversation import MenuConversationBot
 from customer_bot.queries import WarehouseCustomerQueries
 from customer_bot.whatsapp import extract_twilio_message, twiml_message
 
@@ -83,6 +84,13 @@ class TestCustomerBot(unittest.TestCase):
             )
             conn.execute(
                 """
+                INSERT INTO pos_stocks_mirror
+                    (source_device,item_type,school,color,size,unit_price,count,snapshot_at)
+                VALUES ('POS-OBO','تيشيرت خريفي','رجاك','احمر','20',315,3,'2099-01-01T10:00:00Z')
+                """
+            )
+            conn.execute(
+                """
                 INSERT INTO pos_reservations_mirror
                     (source_device,reservation_key,customer,item_type,school,color,size,qty,unit_price,total_amount,paid_amount,status,updated_at)
                 VALUES ('POS-CEN','id:558','عميل اختبار','تيشيرت صيفي','رجاك','احمر','10',2,270,540,200,'معلق','2099-01-01T10:00:00Z')
@@ -112,7 +120,9 @@ class TestCustomerBot(unittest.TestCase):
                 },
             ],
         )
-        self.bot = ArabicCustomerBot(WarehouseCustomerQueries(cfg))
+        self.queries = WarehouseCustomerQueries(cfg)
+        self.bot = ArabicCustomerBot(self.queries)
+        self.menu_bot = MenuConversationBot(self.queries)
 
     def test_stock_reply_uses_all_branches_and_pos_price(self):
         reply = self.bot.reply("عندكم البيان تيشيرت خريفي مقاس 10؟")
@@ -132,6 +142,20 @@ class TestCustomerBot(unittest.TestCase):
     def test_stock_reply_hides_non_public_devices(self):
         reply = self.bot.reply("تيشيرت خريفي رجاك 20")
         self.assertNotIn("POS-TEST", reply)
+
+    def test_menu_flow_guides_customer_to_stock_result(self):
+        user = "whatsapp:+201111111111"
+        self.assertIn("البحث عن صنف", self.menu_bot.reply(user, "مرحبا"))
+        self.assertIn("فرع العبور", self.menu_bot.reply(user, "1"))
+        schools = self.menu_bot.reply(user, "1")
+        self.assertIn("رجاك", schools)
+        item_types = self.menu_bot.reply(user, "2")
+        self.assertIn("تيشيرت خريفي", item_types)
+        size_prompt = self.menu_bot.reply(user, "1")
+        self.assertIn("اكتب المقاس", size_prompt)
+        result = self.menu_bot.reply(user, "٢٠")
+        self.assertIn("متوفر 3 قطعة", result)
+        self.assertIn("القائمة الرئيسية", result)
 
     def test_twilio_helpers_extract_message_and_escape_xml(self):
         msg = extract_twilio_message(

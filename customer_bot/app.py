@@ -11,11 +11,13 @@ from pydantic import BaseModel
 try:
     from .bot import ArabicCustomerBot
     from .config import load_config
+    from .conversation import MenuConversationBot
     from .runtime import make_queries
     from .whatsapp import extract_incoming_messages, extract_twilio_message, send_text, twiml_message
 except ImportError:
     from bot import ArabicCustomerBot
     from config import load_config
+    from conversation import MenuConversationBot
     from runtime import make_queries
     from whatsapp import extract_incoming_messages, extract_twilio_message, send_text, twiml_message
 
@@ -23,6 +25,7 @@ except ImportError:
 config = load_config()
 queries = make_queries(config)
 bot = ArabicCustomerBot(queries)
+menu_bot = MenuConversationBot(queries)
 app = FastAPI(title="Hosny Customer Bot", version="0.1.0")
 
 
@@ -115,7 +118,7 @@ async def receive_webhook(request: Request) -> Dict[str, Any]:
     payload = await request.json()
     sent = []
     for msg in extract_incoming_messages(payload):
-        reply = bot.reply(msg["text"])
+        reply = menu_bot.reply(msg["from"], msg["text"])
         sent.append({"to": msg["from"], "reply": reply, "send_result": send_text(msg["from"], reply)})
     return {"ok": True, "messages": len(sent), "sent": sent}
 
@@ -126,5 +129,5 @@ async def receive_twilio_webhook(request: Request) -> Response:
     values = parse_qs(raw_body, keep_blank_values=True)
     form = {key: vals[-1] if vals else "" for key, vals in values.items()}
     msg = extract_twilio_message(form)
-    reply = bot.reply(msg["text"]) if msg["text"] else "اكتب اسم المدرسة والصنف والمقاس وسأبحث لك في الفروع."
+    reply = menu_bot.reply(msg["from"], msg["text"]) if msg["text"] else menu_bot.reply(msg["from"], "قائمة")
     return Response(content=twiml_message(reply), media_type="application/xml")
