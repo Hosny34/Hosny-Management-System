@@ -20,9 +20,17 @@ BRANCH_NAMES = {
     "POS-OBO": "فرع العبور",
     "POS-GESR": "فرع جسر السويس",
     "POS-BAH": "فرع بهتيم",
-    "POS-CEN": "فرع السنتر",
+    "POS-CEN": "فرع الشارع الجديد",
 }
 BRANCH_BY_NAME = {v: k for k, v in BRANCH_NAMES.items()}
+BRANCH_BY_NAME.update(
+    {
+        "فرع السنتر": "POS-CEN",
+        "السنتر": "POS-CEN",
+        "فرع الشارع الجديد": "POS-CEN",
+        "الشارع الجديد": "POS-CEN",
+    }
+)
 
 
 def clean(value: Any) -> str:

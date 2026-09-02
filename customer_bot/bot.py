@@ -73,7 +73,7 @@ def _match_branch(text: str) -> str:
     for device, name in BRANCH_NAMES.items():
         if normalize_text(name) in norm or normalize_text(name.replace("فرع ", "")) in norm:
             return device
-    if "سنتر" in norm or "center" in norm:
+    if "سنتر" in norm or "الشارع الجديد" in norm or "center" in norm:
         return "POS-CEN"
     if "عبور" in norm:
         return "POS-OBO"
@@ -161,7 +161,7 @@ class ArabicCustomerBot:
 
     def _reply_reservation(self, parsed: Dict[str, str]) -> str:
         if not parsed.get("branch"):
-            return "من فضلك اكتب اسم الفرع أولاً ثم رقم الحجز. مثال: فرع السنتر حجز 558"
+            return "من فضلك اكتب اسم الفرع أولاً ثم رقم الحجز. مثال: فرع الشارع الجديد حجز 558"
         if not parsed.get("bill_number"):
             return "من فضلك اكتب رقم الحجز بعد اسم الفرع. مثال: فرع العبور حجز 558"
         row = self.queries.reservation_status(branch=parsed["branch"], bill_number=parsed["bill_number"])

@@ -152,8 +152,8 @@ class TestCustomerBot(unittest.TestCase):
                 },
                 {
                     "device": "POS-CEN",
-                    "name": "فرع السنتر",
-                    "address": "عنوان السنتر",
+                    "name": "فرع الشارع الجديد",
+                    "address": "عنوان الشارع الجديد",
                     "phone": "011",
                     "maps_url": "https://maps.example/cen",
                     "hours": "من 10 إلى 10",
@@ -235,7 +235,7 @@ class TestCustomerBot(unittest.TestCase):
         self.assertIn("الخريطة", reply)
 
     def test_reservation_lookup_requires_branch_and_bill_number(self):
-        reply = self.bot.reply("فرع السنتر حجز 558")
+        reply = self.bot.reply("فرع الشارع الجديد حجز 558")
         self.assertIn("حجز رقم 558", reply)
         self.assertIn("الحالة: معلق", reply)
         self.assertIn("المتبقي: 340 جنيه", reply)
