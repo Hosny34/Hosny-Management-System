@@ -143,6 +143,15 @@ class TestCustomerBot(unittest.TestCase):
         reply = self.bot.reply("تيشيرت خريفي رجاك 20")
         self.assertNotIn("POS-TEST", reply)
 
+    def test_size_filter_is_exact(self):
+        rows = self.queries.search_stock(
+            source_device="POS-OBO",
+            school="رجاك",
+            item_type="تيشيرت خريفي",
+            size="2",
+        )
+        self.assertEqual(rows, [])
+
     def test_menu_flow_guides_customer_to_stock_result(self):
         user = "whatsapp:+201111111111"
         self.assertIn("البحث عن صنف", self.menu_bot.reply(user, "مرحبا"))

@@ -79,6 +79,14 @@ def _where_like(field: str, value: Any, where: List[str], args: List[Any]) -> No
     args.append(f"%{text}%")
 
 
+def _where_exact(field: str, value: Any, where: List[str], args: List[Any]) -> None:
+    text = clean(value)
+    if not text:
+        return
+    where.append(f"LOWER(TRIM({field})) = LOWER(?)")
+    args.append(text)
+
+
 def _allowed_devices(config: BotConfig) -> List[str]:
     return [clean(b.get("device")) for b in config.branches if clean(b.get("device"))]
 
@@ -199,7 +207,7 @@ class WarehouseCustomerQueries:
         _where_like("pm.item_type", item_type, where, args)
         _where_like("pm.school", school, where, args)
         _where_like("pm.color", color, where, args)
-        _where_like("pm.size", size, where, args)
+        _where_exact("pm.size", size, where, args)
         try:
             with closing(self._connect()) as conn:
                 rows = conn.execute(
