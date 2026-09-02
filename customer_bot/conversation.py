@@ -131,7 +131,7 @@ class MenuConversationBot:
         schools = self.queries.distinct_values(
             "school",
             source_device=session.data["branch"],
-            min_count=1,
+            min_count=0,
             limit=80,
         )
         options = [{"id": value, "title": value} for value in schools]
@@ -147,6 +147,19 @@ class MenuConversationBot:
         if choice is None:
             return self._invalid_choice(session, "اختار رقم المدرسة من القائمة:")
         session.data["school"] = choice["id"]
+        has_available_stock = self.queries.search_stock(
+            source_device=session.data["branch"],
+            school=session.data["school"],
+            min_count=1,
+            limit=1,
+        )
+        if not has_available_stock:
+            self.sessions[key] = MenuSession(step="main")
+            return (
+                "غير متوفر حالياً لهذه المدرسة في الفرع المختار.\n"
+                "ممكن تسأل مرة أخرى خلال يومين.\n\n"
+                + self._main_menu()
+            )
         session.step = "item_type"
         return self._show_item_types(key)
 

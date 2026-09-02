@@ -91,6 +91,13 @@ class TestCustomerBot(unittest.TestCase):
             )
             conn.execute(
                 """
+                INSERT INTO pos_stocks_mirror
+                    (source_device,item_type,school,color,size,unit_price,count,snapshot_at)
+                VALUES ('POS-OBO','تيشيررت صيفي','مدرسة بدون مخزون','ازرق','10',200,0,'2099-01-01T10:00:00Z')
+                """
+            )
+            conn.execute(
+                """
                 INSERT INTO pos_reservations_mirror
                     (source_device,reservation_key,customer,item_type,school,color,size,qty,unit_price,total_amount,paid_amount,status,updated_at)
                 VALUES ('POS-CEN','id:558','عميل اختبار','تيشيرت صيفي','رجاك','احمر','10',2,270,540,200,'معلق','2099-01-01T10:00:00Z')
@@ -165,6 +172,16 @@ class TestCustomerBot(unittest.TestCase):
         result = self.menu_bot.reply(user, "٢٠")
         self.assertIn("متوفر 3 قطعة", result)
         self.assertIn("القائمة الرئيسية", result)
+
+    def test_menu_lists_zero_stock_school_then_reports_unavailable(self):
+        user = "whatsapp:+202222222222"
+        self.menu_bot.reply(user, "قائمة")
+        self.menu_bot.reply(user, "1")
+        schools = self.menu_bot.reply(user, "1")
+        self.assertIn("مدرسة بدون مخزون", schools)
+        reply = self.menu_bot.reply(user, "مدرسة بدون مخزون")
+        self.assertIn("غير متوفر حالياً", reply)
+        self.assertIn("خلال يومين", reply)
 
     def test_twilio_helpers_extract_message_and_escape_xml(self):
         msg = extract_twilio_message(
